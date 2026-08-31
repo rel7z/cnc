@@ -1,0 +1,8 @@
+{
+  "server_addr": "localhost:9090",
+  "worker_id": "",
+  "max_tasks": 0,
+  "capabilities": ["domain_resolve", "ip_scan", "file_split"],
+  "data_dir": "./worker_data",
+  "use_websocket": false
+}
