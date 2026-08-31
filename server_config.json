@@ -1,7 +1,0 @@
-{
-  "http_addr": "0.0.0.0:8080",
-  "tcp_addr": "0.0.0.0:9090",
-  "data_dir": "/opt/cnc/data",
-  "max_retries": 3,
-  "heartbeat_ttl": "30s"
-}
