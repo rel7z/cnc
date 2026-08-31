@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -83,6 +85,7 @@ func (c *CLI) Execute() error {
 		c.statusCmd(),
 		c.splitCmd(),
 		c.configCmd(),
+		c.deployCmd(),
 	)
 
 	return rootCmd.Execute()
@@ -547,6 +550,258 @@ func mustMarshal(v interface{}) string {
 	data, _ := json.Marshal(v)
 	return string(data)
 }
+
+func (c *CLI) deployCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "deploy",
+		Short: "Build and deploy CNC to Linux servers",
+	}
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "build [server|worker|all]",
+			Short: "Build binary for Linux",
+			Args:  cobra.MaximumNArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				target := "all"
+				if len(args) > 0 {
+					target = args[0]
+				}
+				return c.buildBinary(target)
+			},
+		},
+		&cobra.Command{
+			Use:   "install [server|worker]",
+			Short: "Install systemd service on current machine",
+			Args:  cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return c.installService(args[0])
+			},
+		},
+		&cobra.Command{
+			Use:   "push <user@host> [server|worker]",
+			Short: "Deploy binary and config to remote server via SSH",
+			Args:  cobra.MinimumNArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				role := "server"
+				if len(args) > 1 {
+					role = args[1]
+				}
+				return c.pushDeploy(args[0], role)
+			},
+		},
+		&cobra.Command{
+			Use:   "gen-config [server|worker]",
+			Short: "Generate example config files",
+			Args:  cobra.MaximumNArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				role := "server"
+				if len(args) > 0 {
+					role = args[0]
+				}
+				return c.genConfig(role)
+			},
+		},
+	)
+	return cmd
+}
+
+func (c *CLI) buildBinary(target string) error {
+	targets := []string{"server", "worker"}
+	if target != "all" {
+		targets = []string{target}
+	}
+
+	for _, t := range targets {
+		output := fmt.Sprintf("cnc-%s", t)
+		cmd := exec.Command("go", "build", "-o", output, "-ldflags", "-s -w", "./cmd/cnc/main.go")
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		fmt.Printf("Building %s...\n", output)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("build %s: %w", t, err)
+		}
+		fmt.Printf("  -> %s\n", output)
+	}
+	return nil
+}
+
+func (c *CLI) installService(role string) error {
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("install requires root (run with sudo)")
+	}
+
+	binary := "cnc"
+	if _, err := os.Stat(binary); err != nil {
+		return fmt.Errorf("binary %s not found, run 'cnc deploy build' first", binary)
+	}
+
+	installDir := "/opt/cnc"
+	os.MkdirAll(installDir, 0755)
+
+	dst := filepath.Join(installDir, "cnc")
+	if err := copyFile(binary, dst); err != nil {
+		return err
+	}
+	os.Chmod(dst, 0755)
+
+	var serviceContent string
+	var configSrc, configDst string
+
+	switch role {
+	case "server":
+		serviceContent = serverServiceTemplate
+		configSrc = "./server_config.json"
+		configDst = filepath.Join(installDir, "server_config.json")
+	case "worker":
+		serviceContent = workerServiceTemplate
+		configSrc = "./worker_config.json"
+		configDst = filepath.Join(installDir, "worker_config.json")
+	default:
+		return fmt.Errorf("role must be 'server' or 'worker'")
+	}
+
+	if _, err := os.Stat(configSrc); err == nil {
+		copyFile(configSrc, configDst)
+	}
+
+	servicePath := fmt.Sprintf("/etc/systemd/system/cnc-%s.service", role)
+	if err := os.WriteFile(servicePath, []byte(serviceContent), 0644); err != nil {
+		return err
+	}
+
+	exec.Command("systemctl", "daemon-reload").Run()
+	exec.Command("systemctl", "enable", fmt.Sprintf("cnc-%s", role)).Run()
+	fmt.Printf("Installed cnc-%s service. Start with: systemctl start cnc-%s\n", role, role)
+	return nil
+}
+
+func (c *CLI) pushDeploy(host, role string) error {
+	binary := fmt.Sprintf("cnc-%s", role)
+	if _, err := os.Stat(binary); err != nil {
+		return fmt.Errorf("binary %s not found, run 'cnc deploy build %s' first", binary, role)
+	}
+
+	configSrc := fmt.Sprintf("./%s_config.json", role)
+	configDst := fmt.Sprintf("/opt/cnc/%s_config.json", role)
+
+	cmds := []*exec.Cmd{
+		exec.Command("ssh", host, "sudo mkdir -p /opt/cnc"),
+		exec.Command("scp", binary, fmt.Sprintf("%s:/opt/cnc/cnc", host)),
+		exec.Command("ssh", host, "sudo chmod 755 /opt/cnc/cnc"),
+	}
+	if _, err := os.Stat(configSrc); err == nil {
+		cmds = append(cmds, exec.Command("scp", configSrc, fmt.Sprintf("%s:%s", host, configDst)))
+	}
+
+	for _, cmd := range cmds {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+	}
+
+	serviceTmpl := serverServiceTemplate
+	if role == "worker" {
+		serviceTmpl = workerServiceTemplate
+	}
+	serviceCmd := exec.Command("ssh", host, fmt.Sprintf("cat | sudo tee /etc/systemd/system/cnc-%s.service", role))
+	serviceCmd.Stdin = strings.NewReader(serviceTmpl)
+	serviceCmd.Stdout = os.Stdout
+	serviceCmd.Stderr = os.Stderr
+	if err := serviceCmd.Run(); err != nil {
+		return err
+	}
+
+	exec.Command("ssh", host, "sudo systemctl daemon-reload").Run()
+	exec.Command("ssh", host, fmt.Sprintf("sudo systemctl enable --now cnc-%s", role)).Run()
+
+	fmt.Printf("Deployed %s to %s\n", role, host)
+	return nil
+}
+
+func (c *CLI) genConfig(role string) error {
+	switch role {
+	case "server":
+		return os.WriteFile("server_config.json", []byte(serverConfigExample), 0644)
+	case "worker":
+		return os.WriteFile("worker_config.json", []byte(workerConfigExample), 0644)
+	default:
+		return fmt.Errorf("role must be 'server' or 'worker'")
+	}
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+const serverServiceTemplate = `[Unit]
+Description=CNC Server
+After=network.target
+
+[Service]
+Type=simple
+User=cnc
+WorkingDirectory=/opt/cnc
+ExecStart=/opt/cnc/cnc -mode=server
+Restart=on-failure
+RestartSec=5
+Environment=GIN_MODE=release
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+`
+
+const workerServiceTemplate = `[Unit]
+Description=CNC Worker
+After=network.target
+
+[Service]
+Type=simple
+User=cnc
+WorkingDirectory=/opt/cnc
+ExecStart=/opt/cnc/cnc -mode=worker
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+`
+
+const serverConfigExample = `{
+  "http_addr": "0.0.0.0:8080",
+  "tcp_addr": "0.0.0.0:9090",
+  "data_dir": "/opt/cnc/data",
+  "max_retries": 3,
+  "heartbeat_ttl": "30s"
+}
+`
+
+const workerConfigExample = `{
+  "server_addr": "SERVER_IP:9090",
+  "worker_id": "worker-01",
+  "max_tasks": 8,
+  "capabilities": ["domain_resolve", "ip_scan"],
+  "data_dir": "/opt/cnc/worker_data",
+  "use_websocket": false
+}
+`
 
 func RunCLI() {
 	cli := NewCLI()
