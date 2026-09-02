@@ -3,5 +3,5 @@
   "tcp_addr": ":9090",
   "data_dir": "./cnc_data",
   "max_retries": 3,
-  "heartbeat_ttl": "120s"
+  "heartbeat_ttl": "30s"
 }

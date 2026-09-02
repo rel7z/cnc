@@ -15,43 +15,28 @@ func main() {
 	configPath := flag.String("config", "worker_config.json", "Path to worker config file")
 	flag.Parse()
 
-	var config *cnc.WorkerConfig
-	var err error
-
-	if _, statErr := os.Stat(*configPath); statErr == nil {
-		config, err = cnc.LoadWorkerConfig(*configPath)
-		if err != nil {
-			log.Printf("Warning: failed to load config from %s: %v", *configPath, err)
-			log.Println("Using default configuration")
-			config = cnc.DefaultWorkerConfig()
-		}
-	} else {
-		log.Printf("Config file %s not found, using defaults", *configPath)
+	config, err := cnc.LoadWorkerConfig(*configPath)
+	if err != nil {
+		log.Printf("Config file not found or invalid (%v), using defaults", err)
 		config = cnc.DefaultWorkerConfig()
 	}
 
 	worker := cnc.NewWorkerAgent(config)
 
-	// Handle shutdown gracefully
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-sigChan
-		log.Println("\nReceived shutdown signal")
+		<-sigCh
+		fmt.Println("\nShutting down worker...")
 		worker.Stop()
 		os.Exit(0)
 	}()
 
-	fmt.Println("========================================")
-	fmt.Println("     CNC Worker")
-	fmt.Println("========================================")
-	fmt.Printf("Worker ID:     %s\n", config.WorkerID)
-	fmt.Printf("Server:        %s\n", config.ServerAddr)
-	fmt.Printf("Max Tasks:     %d\n", config.MaxTasks)
-	fmt.Printf("Capabilities:  %v\n", config.Capabilities)
-	fmt.Printf("Data Dir:      %s\n", config.DataDir)
-	fmt.Println("========================================")
+	fmt.Println("CNC Worker")
+	fmt.Printf("  ID       : %s\n", config.WorkerID)
+	fmt.Printf("  Server   : %s\n", config.ServerAddr)
+	fmt.Printf("  MaxTasks : %d\n", config.MaxTasks)
+	fmt.Printf("  DataDir  : %s\n", config.DataDir)
 	fmt.Println()
 
 	if err := worker.Start(); err != nil {

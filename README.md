@@ -1,446 +1,238 @@
-# CNC - Distributed Cluster Controller
+# CNC — Distributed Shell Task Cluster
 
-Command & Control system untuk mendistribusikan workload besar ke multiple servers/workers secara paralel.
+CNC is a lightweight command-and-control system for distributing shell commands across multiple worker machines. You define the command, point it at an input file, and CNC splits the work across all connected workers automatically.
 
-## 🎯 Fitur Utama
+---
 
-- **Distributed Processing**: Split file besar dan process secara paralel di multiple workers
-- **Auto File Splitting**: Otomatis split file berdasarkan ukuran dengan line-aware splitting
-- **Worker Auto-Discovery**: Workers otomatis register ke server
-- **Heartbeat Monitoring**: Deteksi worker offline otomatis
-- **Task Retry**: Automatic retry untuk failed tasks
-- **Load Balancing**: Task didistribusikan ke worker yang paling tidak sibuk
-- **HTTP API**: RESTful API untuk monitoring dan control
-- **Real-time Progress**: Track job progress secara real-time
+## How It Works
 
-## 📋 Prerequisites
+1. You submit a job with a shell command and a large input file
+2. The server splits the input file into chunks
+3. Each chunk is dispatched as a task to an available worker
+4. Workers execute the command as a subprocess (file mode or pipe mode)
+5. Results are written to the output directory
 
-- Go 1.20 atau lebih baru
-- Linux atau macOS
-- Network connectivity antar servers (untuk distributed setup)
+---
 
-## 🚀 Quick Start
+## Quick Start
 
-### 1. Build Binaries
+### 1. Build
 
 ```bash
-# Clone repository
-cd cnc
-
-# Build all binaries
-make build
-
-# Atau build untuk Linux
-make linux-all
+make build          # builds for your current OS
+make build-linux    # cross-compiles for Linux amd64
 ```
 
-Ini akan menghasilkan 3 binaries:
-- `cnc-server` - Server koordinator
-- `cnc-worker` - Worker agent
-- `cnc` - CLI tool
+Produces: `cnc-server`, `cnc-worker`, `cnc` (and `-linux` variants)
 
-### 2. Start Server
+### 2. Start the server
 
 ```bash
-# Dengan default config
 ./cnc-server
-
-# Atau dengan custom config
+# or with a custom config:
 ./cnc-server -config server_config.json
 ```
 
-Server akan listen di:
-- HTTP API: `localhost:8080`
-- TCP (untuk workers): `localhost:9090`
+Default ports: HTTP `:8080`, TCP `:9090`
 
-### 3. Start Workers
-
-Di setiap server worker:
+### 3. Start one or more workers
 
 ```bash
-# Dengan default config
 ./cnc-worker
-
-# Atau dengan custom config
+# or with a custom config:
 ./cnc-worker -config worker_config.json
 ```
 
-Worker akan otomatis connect dan register ke server.
+Workers connect to the server over TCP and wait for tasks. You can run as many workers as you like — on the same machine or on remote servers.
 
-### 4. Submit Job via CLI
+### 4. Submit a job
 
+**Via CLI (interactive):**
 ```bash
-# Submit job untuk domain resolution
 ./cnc job submit
-
-# Lihat semua jobs
-./cnc job list
-
-# Check job status
-./cnc job status <job-id>
-
-# Lihat workers
-./cnc workers
-
-# Show cluster status
-./cnc status
 ```
 
-## 📝 Configuration
-
-### Server Configuration (`server_config.json`)
-
-```json
-{
-  "http_addr": ":8080",
-  "tcp_addr": ":9090",
-  "data_dir": "./cnc_data",
-  "max_retries": 3,
-  "heartbeat_ttl": "120s"
-}
-```
-
-**Parameters:**
-- `http_addr`: HTTP API listen address
-- `tcp_addr`: TCP server untuk workers
-- `data_dir`: Directory untuk data storage
-- `max_retries`: Maximum retry attempts untuk failed tasks
-- `heartbeat_ttl`: Worker timeout duration
-
-### Worker Configuration (`worker_config.json`)
-
-```json
-{
-  "server_addr": "localhost:9090",
-  "worker_id": "worker_001",
-  "max_tasks": 4,
-  "capabilities": ["domain_resolve", "ip_scan"],
-  "data_dir": "./worker_data",
-  "use_websocket": false
-}
-```
-
-**Parameters:**
-- `server_addr`: Server address untuk connect
-- `worker_id`: Unique worker identifier (auto-generated jika kosong)
-- `max_tasks`: Maximum concurrent tasks
-- `capabilities`: Task types yang bisa di-handle
-- `data_dir`: Directory untuk temporary data
-- `use_websocket`: Use WebSocket instead of TCP (default: false)
-
-## 🔧 Job Types
-
-### 1. Domain Resolution (`domain_resolve`)
-
-Convert list domain menjadi IP ranges untuk scanning.
-
-**Input:** File dengan domain (one per line)
-```
-google.com
-github.com
-stackoverflow.com
-```
-
-**Output:** IP ranges dalam /24 CIDR
-```
-142.250.185.1
-142.250.185.2
-...
-142.250.185.255
-```
-
-**Usage:**
+**Via HTTP API:**
 ```bash
-# Via CLI
-./cnc job submit
-# Name: domain_resolver
-# Type: domain_resolve
-# Input: domains.txt
-# Output: ./results
-# Split size: 10485760 (10MB)
-
-# Via HTTP API
 curl -X POST http://localhost:8080/api/jobs \
   -H "Content-Type: application/json" \
   -d '{
-    "job": {
-      "name": "resolve_domains",
-      "type": "domain_resolve",
-      "input_file": "domains.txt",
-      "output_dir": "./results",
-      "split_size": 10485760,
-      "workers": []
-    }
+    "name":            "my job",
+    "command":         "grep foo {input} > {output}",
+    "exec_mode":       "file",
+    "input_file":      "/data/biglist.txt",
+    "output_dir":      "/data/results",
+    "split_size":      10485760,
+    "timeout_seconds": 300
   }'
 ```
 
-### 2. IP Scanning (`ip_scan`)
+### 5. Monitor
 
-Scan list IP untuk find live hosts dan open ports.
-
-**Input:** File dengan IP addresses (one per line)
-```
-8.8.8.8
-1.1.1.1
-192.168.1.1
-```
-
-**Output:** Dua files:
-- `ping_*.txt`: IPs yang respond ke TCP ping
-- `port80_*.txt`: IPs dengan port 80 terbuka
-
-**Usage:**
 ```bash
-# Via CLI
-./cnc job submit
-# Name: scan_ips
-# Type: ip_scan  
-# Input: ips.txt
-# Output: ./scan_results
-# Split size: 10485760
+./cnc status            # cluster-wide stats
+./cnc job list          # all jobs
+./cnc job status <id>   # one job
+./cnc worker list       # connected workers
 ```
 
-## 🌐 HTTP API Reference
+---
 
-### Workers
+## Execution Modes
 
-**List Workers**
-```bash
-GET /api/workers
+### File mode (`exec_mode: "file"`)
 
-Response:
-[
-  {
-    "id": "worker_001",
-    "address": "localhost:9090",
-    "status": "online",
-    "capabilities": ["domain_resolve", "ip_scan"],
-    "max_tasks": 4,
-    "current_load": 0,
-    "last_seen": "2026-09-01T11:30:00Z",
-    "registered": "2026-09-01T11:00:00Z"
-  }
-]
+The command uses `{input}` and `{output}` placeholders. The server replaces them with the actual chunk file path and a pre-determined output path before sending the task to a worker.
+
+```
+"command": "nmap -iL {input} -oN {output}"
+"command": "wc -l {input} > {output}"
+"command": "python3 /scripts/parse.py --in {input} --out {output}"
 ```
 
-### Jobs
+The worker runs `sh -c <rendered command>`. The output file is written at the path the server specified.
 
-**List Jobs**
-```bash
-GET /api/jobs
+### Pipe mode (`exec_mode: "pipe"`)
 
-Response:
-[
-  {
-    "id": "job_1234_1",
-    "name": "test_job",
-    "type": "domain_resolve",
-    "status": "running",
-    "total_tasks": 10,
-    "completed": 5,
-    "failed": 0,
-    "created_at": "2026-09-01T11:00:00Z"
-  }
-]
+The command receives the input chunk via **stdin** and its stdout is captured as the output. No placeholders needed.
+
+```
+"command": "sort"
+"command": "grep '\\.com$'"
+"command": "awk '{print $1}'"
+"command": "python3 /scripts/process.py"
 ```
 
-**Submit Job**
-```bash
-POST /api/jobs
-Content-Type: application/json
+The worker pipes the chunk file into the command's stdin and writes stdout to an output file.
 
+---
+
+## CLI Reference
+
+```
+cnc [--server http://host:8080] <command>
+
+Commands:
+  server start              Start the CNC server (blocking)
+  worker start              Start a worker agent (blocking)
+  worker list               List connected workers
+  job submit                Submit a job interactively
+  job list                  List all jobs
+  job status <job-id>       Get detailed status of a job
+  status                    Show cluster-wide stats
+
+Flags:
+  --server string   Server HTTP address (default "http://localhost:8080")
+```
+
+---
+
+## HTTP API Reference
+
+| Method   | Path               | Description                        |
+|----------|--------------------|------------------------------------|
+| `POST`   | `/api/jobs`        | Submit a new job                   |
+| `GET`    | `/api/jobs`        | List all jobs                      |
+| `GET`    | `/api/jobs/{id}`   | Get a specific job                 |
+| `DELETE` | `/api/jobs/{id}`   | Cancel a job                       |
+| `GET`    | `/api/workers`     | List connected workers             |
+| `GET`    | `/api/tasks`       | List all tasks                     |
+| `GET`    | `/api/stats`       | Cluster statistics                 |
+
+### POST /api/jobs
+
+```json
 {
-  "job": {
-    "name": "my_job",
-    "type": "domain_resolve",
-    "input_file": "/path/to/input.txt",
-    "output_dir": "/path/to/output",
-    "split_size": 10485760,
-    "workers": []
-  }
-}
-
-Response:
-{
-  "status": "ok",
-  "job_id": "job_1234_1"
+  "name":            "job name",
+  "command":         "shell command with optional {input} and {output}",
+  "exec_mode":       "file",
+  "input_file":      "/absolute/path/to/input.txt",
+  "output_dir":      "/absolute/path/to/output",
+  "split_size":      10485760,
+  "timeout_seconds": 300
 }
 ```
 
-**Get Job Status**
-```bash
-GET /api/jobs/{job_id}
+| Field              | Type   | Required | Default    | Description                                     |
+|--------------------|--------|----------|------------|-------------------------------------------------|
+| `name`             | string | yes      | —          | Human-readable job name                         |
+| `command`          | string | yes      | —          | Shell command; use `{input}` / `{output}` for file mode |
+| `exec_mode`        | string | no       | `"file"`   | `"file"` or `"pipe"`                            |
+| `input_file`       | string | yes      | —          | Path to the large input file to be split        |
+| `output_dir`       | string | yes      | —          | Directory where output files are written        |
+| `split_size`       | int    | no       | 10485760   | Bytes per chunk (split is line-aware)           |
+| `timeout_seconds`  | int    | no       | 300        | Subprocess timeout per task                     |
 
-Response:
+**Response:**
+```json
+{ "status": "ok", "job_id": "job_1234567890_1" }
+```
+
+---
+
+## Configuration
+
+### server_config.json
+
+```json
 {
-  "id": "job_1234_1",
-  "name": "my_job",
-  "status": "completed",
-  "total_tasks": 10,
-  "completed": 10,
-  "failed": 0,
-  ...
+  "http_addr":     ":8080",
+  "tcp_addr":      ":9090",
+  "data_dir":      "./cnc_data",
+  "max_retries":   3,
+  "heartbeat_ttl": "30s"
 }
 ```
 
-### Tasks
+| Field           | Description                                              |
+|-----------------|----------------------------------------------------------|
+| `http_addr`     | HTTP API listen address                                  |
+| `tcp_addr`      | TCP worker connection listen address                     |
+| `data_dir`      | Directory where the server stores split chunk files      |
+| `max_retries`   | How many times a failed task is retried                  |
+| `heartbeat_ttl` | How long before a silent worker is marked offline        |
 
-**List Tasks**
-```bash
-GET /api/tasks
+### worker_config.json
 
-Response:
-[
-  {
-    "id": "task_job_1234_1_0",
-    "job_id": "job_1234_1",
-    "type": "domain_resolve",
-    "status": "completed",
-    "assigned_to": "worker_001",
-    "created_at": "2026-09-01T11:00:00Z",
-    "completed_at": "2026-09-01T11:01:00Z"
-  }
-]
-```
-
-### Statistics
-
-**Get Cluster Statistics**
-```bash
-GET /api/stats
-
-Response:
+```json
 {
-  "workers_total": 3,
-  "workers_online": 3,
-  "jobs_total": 5,
-  "jobs_running": 1,
-  "tasks_total": 50,
-  "tasks_pending": 10,
-  "tasks_running": 20,
-  "tasks_completed": 15,
-  "tasks_failed": 5
+  "server_addr": "192.168.1.10:9090",
+  "worker_id":   "",
+  "max_tasks":   8,
+  "data_dir":    "./worker_data"
 }
 ```
 
-## 🏗️ Architecture
+| Field         | Description                                                     |
+|---------------|-----------------------------------------------------------------|
+| `server_addr` | Server TCP address the worker connects to                       |
+| `worker_id`   | Unique worker name; auto-generated from hostname+PID if empty   |
+| `max_tasks`   | Maximum concurrent tasks this worker will accept                |
+| `data_dir`    | Directory for temporary worker output files                     |
 
-```
-┌─────────────┐     ┌─────────────────┐     ┌─────────────┐
-│   Client    │────▶│   CNC Server    │◀───▶│  Worker 1   │
-│   (CLI)     │     │  (Coordinator)  │     │  (Executor) │
-└─────────────┘     └─────────────────┘     └─────────────┘
-                           │ ▲                      │
-                           │ │                      │
-                           ▼ │              ┌───────┴───────┐
-                    ┌─────────────┐         │               │
-                    │  Worker 2   │   ┌─────▼─────┐ ┌──────▼──────┐
-                    │  (Executor) │   │ Worker 3  │ │  Worker N   │
-                    └─────────────┘   └───────────┘ └─────────────┘
-```
+---
 
-### Components
+## Deploying Workers on Remote Linux Servers
 
-1. **CNC Server**: Koordinator pusat
-   - Menerima job submissions
-   - Split input files
-   - Manage worker registrations
-   - Distribute tasks ke workers
-   - Track progress
-   - Provide HTTP API
-
-2. **Worker Agent**: Task executor
-   - Register ke server
-   - Kirim heartbeats
-   - Execute tasks
-   - Report hasil
-   - Auto-reconnect jika disconnect
-
-3. **CLI**: Command-line interface
-   - Submit jobs
-   - Monitor progress
-   - Manage cluster
-
-## 🔄 Workflow
-
-1. **Job Submission**
-   - User submit job via CLI atau API
-   - Server receive dan validate job
-
-2. **File Splitting**
-   - Server split input file menjadi chunks
-   - Each chunk = 1 task
-   - Line-aware splitting (tidak potong di tengah line)
-
-3. **Task Distribution**
-   - Server queue semua tasks
-   - Dispatcher assign tasks ke available workers
-   - Load balancing otomatis
-
-4. **Task Execution**
-   - Worker execute task
-   - Generate output file
-   - Report result ke server
-
-5. **Job Completion**
-   - Server track semua task completions
-   - Update job status
-   - Retry failed tasks (up to max_retries)
-
-## 🚀 Deployment
-
-### Single Server (Local Testing)
-
+Build the Linux binaries on your Mac:
 ```bash
-# Terminal 1: Start server
-./cnc-server
-
-# Terminal 2: Start worker
-./cnc-worker
-
-# Terminal 3: Submit job
-./cnc job submit
+make build-linux
+# produces: cnc-server-linux, cnc-worker-linux, cnc-linux
 ```
 
-### Multi-Server (Production)
-
-**Server Node:**
+Copy to the remote server:
 ```bash
-# On coordinator machine
-./cnc-server -config server_config.json
+scp cnc-worker-linux user@remote:/opt/cnc/cnc-worker
+scp worker_config.json user@remote:/opt/cnc/worker_config.json
 ```
 
-**Worker Nodes:**
+On the remote server, edit `worker_config.json` to point `server_addr` at your server machine's IP, then run:
 ```bash
-# On each worker machine
-# Edit worker_config.json:
-# "server_addr": "<server-ip>:9090"
-
-./cnc-worker -config worker_config.json
+chmod +x /opt/cnc/cnc-worker
+/opt/cnc/cnc-worker -config /opt/cnc/worker_config.json
 ```
 
-### Using Systemd (Linux)
-
-**Server Service** (`/etc/systemd/system/cnc-server.service`):
-```ini
-[Unit]
-Description=CNC Server
-After=network.target
-
-[Service]
-Type=simple
-User=cnc
-WorkingDirectory=/opt/cnc
-ExecStart=/opt/cnc/cnc-server -config /opt/cnc/server_config.json
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-```
-
-**Worker Service** (`/etc/systemd/system/cnc-worker.service`):
+To run as a systemd service, create `/etc/systemd/system/cnc-worker.service`:
 ```ini
 [Unit]
 Description=CNC Worker
@@ -448,7 +240,6 @@ After=network.target
 
 [Service]
 Type=simple
-User=cnc
 WorkingDirectory=/opt/cnc
 ExecStart=/opt/cnc/cnc-worker -config /opt/cnc/worker_config.json
 Restart=on-failure
@@ -459,150 +250,68 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 ```
 
-**Enable and Start:**
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable cnc-server
-sudo systemctl start cnc-server
-
-sudo systemctl enable cnc-worker
-sudo systemctl start cnc-worker
-
-# Check status
-sudo systemctl status cnc-server
-sudo systemctl status cnc-worker
-
-# View logs
-sudo journalctl -u cnc-server -f
-sudo journalctl -u cnc-worker -f
+sudo systemctl enable --now cnc-worker
 ```
-
-## 📊 Monitoring
-
-### CLI Monitoring
-
-```bash
-# Watch cluster stats
-watch -n 2 './cnc status'
-
-# Monitor specific job
-watch -n 2 './cnc job status job_1234_1'
-
-# Watch worker list
-watch -n 2 './cnc workers'
-```
-
-### Log Monitoring
-
-```bash
-# Server logs
-tail -f /var/log/cnc-server.log
-
-# Worker logs
-tail -f /var/log/cnc-worker.log
-```
-
-## 🐛 Troubleshooting
-
-### Worker Tidak Connect
-
-**Check:**
-1. Server running? `curl http://localhost:8080/api/stats`
-2. Network connectivity: `telnet <server-ip> 9090`
-3. Firewall: pastikan port 9090 terbuka
-4. Config: check `server_addr` di worker_config.json
-
-**Logs:**
-```bash
-# Check worker logs
-./cnc-worker -config worker_config.json 2>&1 | tee worker.log
-```
-
-### Task Tidak Execute
-
-**Check:**
-1. Workers registered? `curl http://localhost:8080/api/workers`
-2. Worker capabilities match task type?
-3. Worker has available capacity? (current_load < max_tasks)
-
-**Debug:**
-```bash
-# Check task queue
-curl http://localhost:8080/api/tasks | jq '.[] | {id, status, assigned_to}'
-```
-
-### Job Stuck
-
-**Possible causes:**
-1. Worker offline (check heartbeat)
-2. All workers busy
-3. Task failing repeatedly (check max_retries)
-
-**Fix:**
-```bash
-# Add more workers
-./cnc-worker &
-
-# Or cancel and resubmit job
-./cnc job cancel <job-id>
-```
-
-### High Memory Usage
-
-**Worker side:**
-- Reduce `max_tasks` in worker_config.json
-- Increase file `split_size` to create fewer, larger tasks
-
-**Server side:**
-- Reduce task queue size in code (DefaultTaskQueueSize)
-- Increase split_size to reduce total tasks
-
-## 📦 Building from Source
-
-```bash
-# Install dependencies
-go mod download
-
-# Build all
-make build
-
-# Build for Linux (cross-compile)
-make linux-all
-
-# Clean build artifacts
-make clean
-
-# Run tests
-make test
-```
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-1. Fork repository
-2. Create feature branch
-3. Make changes
-4. Test thoroughly
-5. Submit pull request
-
-## 📄 License
-
-MIT License - see LICENSE file
-
-## 🔗 Related Projects
-
-- Similar systems: Apache Spark, Dask, Ray
-- Job queues: RabbitMQ, Redis Queue, Bull
-- Distributed computing: Kubernetes Jobs, AWS Batch
-
-## 📞 Support
-
-- Issues: GitHub Issues
-- Documentation: README.md (this file)
-- Technical docs: TECHNICAL.md
 
 ---
 
-**Version:** 1.0.0  
-**Last Updated:** September 2026  
-**Author:** fahrel
+## Job and Task Lifecycle
+
+```
+Job status:   pending → running → completed | failed | cancelled
+Task status:  pending → assigned → running → completed | failed
+```
+
+Failed tasks are automatically retried up to `max_retries` times. If a worker goes offline mid-task, its tasks are requeued for another worker.
+
+---
+
+## Examples
+
+**Resolve domains and extract IP prefixes:**
+```json
+{
+  "name": "resolve-domains",
+  "command": "python3 /scripts/resolve.py {input} {output}",
+  "exec_mode": "file",
+  "input_file": "/data/domains.txt",
+  "output_dir": "/data/ips"
+}
+```
+
+**Port scan a list of IPs using nmap:**
+```json
+{
+  "name": "nmap-scan",
+  "command": "nmap -iL {input} -p 80,443,8080 -oN {output} --open",
+  "exec_mode": "file",
+  "input_file": "/data/ips.txt",
+  "output_dir": "/data/scan_results",
+  "timeout_seconds": 600
+}
+```
+
+**Filter lines from a large file:**
+```json
+{
+  "name": "filter-coms",
+  "command": "grep '\\.com$'",
+  "exec_mode": "pipe",
+  "input_file": "/data/domains.txt",
+  "output_dir": "/data/filtered"
+}
+```
+
+**Run a custom Python script on each chunk:**
+```json
+{
+  "name": "custom-parse",
+  "command": "python3 /opt/scripts/parse.py",
+  "exec_mode": "pipe",
+  "input_file": "/data/raw.txt",
+  "output_dir": "/data/parsed",
+  "split_size": 5242880
+}
+```

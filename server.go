@@ -11,28 +11,29 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
+// Server is the CNC command-and-control server. It accepts worker connections
+// over TCP, exposes an HTTP API for job management, splits input files into
+// chunks, and dispatches tasks to available workers.
 type Server struct {
-	mu           sync.RWMutex
-	workers      map[string]*Worker
-	jobs         map[string]*Job
-	tasks        map[string]*Task
-	jobTasks     map[string][]string // jobID -> []taskID
-	taskQueue    chan *Task
-	upgrader     websocket.Upgrader
-	httpServer   *http.Server
-	tcpListener  net.Listener
-	config       *ServerConfig
-	jobCounter   int
-	taskCounter  int
-	wg           sync.WaitGroup
-	ctx          context.Context
-	cancel       context.CancelFunc
+	mu          sync.RWMutex
+	workers     map[string]*Worker
+	jobs        map[string]*Job
+	tasks       map[string]*Task
+	jobTasks    map[string][]string // jobID -> []taskID
+	taskQueue   chan *Task
+	httpServer  *http.Server
+	tcpListener net.Listener
+	config      *ServerConfig
+	jobCounter  int
+	taskCounter int
+	wg          sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 type ServerConfig struct {
@@ -80,10 +81,7 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	return &config, nil
 }
 
-func (s *Server) getHeartbeatTTL() time.Duration {
-	if s.config.HeartbeatTTL == "" {
-		return DefaultHeartbeatTTL
-	}
+func (s *Server) heartbeatTTL() time.Duration {
 	d, err := time.ParseDuration(s.config.HeartbeatTTL)
 	if err != nil {
 		return DefaultHeartbeatTTL
@@ -102,18 +100,16 @@ func NewServer(config *ServerConfig) *Server {
 		tasks:     make(map[string]*Task),
 		jobTasks:  make(map[string][]string),
 		taskQueue: make(chan *Task, DefaultTaskQueueSize),
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
-		config: config,
-		ctx:    ctx,
-		cancel: cancel,
+		config:    config,
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 }
 
+// Start runs all server components. It blocks on the HTTP listener.
 func (s *Server) Start() error {
 	if err := os.MkdirAll(s.config.DataDir, 0755); err != nil {
-		return fmt.Errorf("failed to create data dir: %w", err)
+		return fmt.Errorf("create data dir: %w", err)
 	}
 
 	s.wg.Add(1)
@@ -126,19 +122,18 @@ func (s *Server) Start() error {
 	go s.tcpServer()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/api/workers", s.handleWorkersAPI)
 	mux.HandleFunc("/api/jobs", s.handleJobsAPI)
+	mux.HandleFunc("/api/jobs/", s.handleJobByIDAPI)
 	mux.HandleFunc("/api/tasks", s.handleTasksAPI)
 	mux.HandleFunc("/api/stats", s.handleStatsAPI)
-	mux.HandleFunc("/api/split", s.handleSplitAPI)
 
 	s.httpServer = &http.Server{
 		Addr:    s.config.HTTPAddr,
 		Handler: mux,
 	}
 
-	log.Printf("CNC Server starting on HTTP %s, TCP %s", s.config.HTTPAddr, s.config.TCPAddr)
+	log.Printf("CNC Server starting — HTTP %s  TCP %s", s.config.HTTPAddr, s.config.TCPAddr)
 	return s.httpServer.ListenAndServe()
 }
 
@@ -148,7 +143,7 @@ func (s *Server) Stop() {
 	if s.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		s.httpServer.Shutdown(ctx)
+		s.httpServer.Shutdown(ctx) //nolint:errcheck
 	}
 	if s.tcpListener != nil {
 		s.tcpListener.Close()
@@ -157,16 +152,18 @@ func (s *Server) Stop() {
 	log.Println("CNC Server stopped")
 }
 
+// ── TCP server ───────────────────────────────────────────────────────────────
+
 func (s *Server) tcpServer() {
 	defer s.wg.Done()
+
 	ln, err := net.Listen("tcp", s.config.TCPAddr)
 	if err != nil {
-		log.Printf("TCP server error: %v", err)
+		log.Printf("TCP listen error: %v", err)
 		return
 	}
 	s.tcpListener = ln
 	defer ln.Close()
-
 	log.Printf("TCP server listening on %s", s.config.TCPAddr)
 
 	for {
@@ -185,508 +182,209 @@ func (s *Server) tcpServer() {
 				}
 			}
 			s.wg.Add(1)
-			go s.handleTCPConnection(conn)
+			go s.handleTCPConn(conn)
 		}
 	}
 }
 
-func (s *Server) handleTCPConnection(conn net.Conn) {
+// handleTCPConn manages one persistent worker connection.
+// Inbound messages are decoded in a read loop.
+// Outbound messages are sent by a dedicated write goroutine via Worker.SendCh,
+// which eliminates the TCP blocking bug caused by holding the mutex while writing.
+func (s *Server) handleTCPConn(conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
-
 	log.Printf("New TCP connection from %s", conn.RemoteAddr())
 
 	decoder := json.NewDecoder(conn)
 	encoder := json.NewEncoder(conn)
-	var encoderMu sync.Mutex
 
-	// Helper to send with lock
-	sendResponse := func(v interface{}) error {
-		encoderMu.Lock()
-		defer encoderMu.Unlock()
-		return encoder.Encode(v)
-	}
+	// sendCh is a buffered channel owned by this connection.
+	// The write goroutine below is the only writer to the TCP socket.
+	sendCh := make(chan *Message, 256)
 
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		default:
-			var msg Message
-			if err := decoder.Decode(&msg); err != nil {
-				if err != io.EOF {
-					log.Printf("TCP decode error from %s: %v", conn.RemoteAddr(), err)
+	// Write goroutine — drains sendCh and writes to the socket.
+	writeCtx, writeCancel := context.WithCancel(s.ctx)
+	defer writeCancel()
+
+	go func() {
+		for {
+			select {
+			case <-writeCtx.Done():
+				return
+			case msg, ok := <-sendCh:
+				if !ok {
+					return
 				}
-				return
+				if err := encoder.Encode(msg); err != nil {
+					log.Printf("TCP write error to %s: %v", conn.RemoteAddr(), err)
+					writeCancel()
+					return
+				}
 			}
-			// Handle synchronously with response helper
-			s.handleMessageSync(&msg, sendResponse)
 		}
-	}
-}
+	}()
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("WebSocket upgrade error: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	log.Printf("New WebSocket connection from %s", r.RemoteAddr)
-
+	// Read loop — decode messages and dispatch handlers.
+	var registeredWorkerID string
 	for {
 		select {
-		case <-s.ctx.Done():
-			return
+		case <-writeCtx.Done():
+			// write goroutine died or server is shutting down
+			goto cleanup
 		default:
-			var msg Message
-			if err := conn.ReadJSON(&msg); err != nil {
-				log.Printf("WebSocket read error: %v", err)
-				return
+		}
+
+		var msg Message
+		if err := decoder.Decode(&msg); err != nil {
+			if err != io.EOF {
+				log.Printf("TCP read error from %s: %v", conn.RemoteAddr(), err)
 			}
-			s.handleMessage(&msg, &wsEncoder{conn: conn})
+			goto cleanup
 		}
+
+		switch msg.Type {
+		case MsgTypeRegisterWorker:
+			registeredWorkerID = s.handleRegisterWorker(&msg, sendCh)
+
+		case MsgTypeWorkerHeartbeat:
+			s.handleWorkerHeartbeat(&msg)
+
+		case MsgTypeTaskResult:
+			s.handleTaskResult(&msg)
+
+		case MsgTypeShutdownWorker:
+			log.Printf("Worker at %s requested shutdown", conn.RemoteAddr())
+			goto cleanup
+
+		default:
+			log.Printf("Unknown message type from %s: %s", conn.RemoteAddr(), msg.Type)
+		}
+	}
+
+cleanup:
+	writeCancel()
+	if registeredWorkerID != "" {
+		s.markWorkerOffline(registeredWorkerID)
 	}
 }
 
-type ResponseFunc func(interface{}) error
+// ── Message handlers ─────────────────────────────────────────────────────────
 
-func (s *Server) handleMessageSync(msg *Message, sendResponse ResponseFunc) {
-	switch msg.Type {
-	case MsgTypeRegisterWorker:
-		s.handleRegisterWorkerSync(msg, sendResponse)
-	case MsgTypeWorkerHeartbeat:
-		s.handleWorkerHeartbeatSync(msg)
-	case MsgTypeTaskResult:
-		s.handleTaskResultSync(msg)
-	case MsgTypeGetWorkers:
-		s.handleGetWorkersSync(sendResponse)
-	case MsgTypeSubmitJob:
-		s.handleSubmitJobSync(msg, sendResponse)
-	case MsgTypeJobStatus:
-		s.handleJobStatusSync(msg, sendResponse)
-	case MsgTypeJobList:
-		s.handleJobListSync(sendResponse)
-	case MsgTypeCancelJob:
-		s.handleCancelJobSync(msg, sendResponse)
-	case MsgTypeSplitFile:
-		s.handleSplitFileSync(msg, sendResponse)
+func (s *Server) handleRegisterWorker(msg *Message, sendCh chan *Message) string {
+	var p RegisterWorkerPayload
+	if err := msg.UnmarshalPayload(&p); err != nil {
+		log.Printf("Invalid register payload: %v", err)
+		return ""
+	}
+
+	s.mu.Lock()
+	p.Worker.Registered = time.Now()
+	p.Worker.LastSeen = time.Now()
+	p.Worker.Status = WorkerStatusOnline
+	p.Worker.SendCh = sendCh
+	s.workers[p.Worker.ID] = &p.Worker
+	s.mu.Unlock()
+
+	log.Printf("Worker registered: %s (max_tasks=%d)", p.Worker.ID, p.Worker.MaxTasks)
+
+	// Acknowledge registration.
+	ack, _ := NewMessage("ack", map[string]string{"status": "ok", "worker_id": p.Worker.ID})
+	select {
+	case sendCh <- ack:
 	default:
-		log.Printf("Unknown message type: %s", msg.Type)
 	}
+
+	return p.Worker.ID
 }
 
-func (s *Server) handleRegisterWorkerSync(msg *Message, sendResponse ResponseFunc) {
-	var payload RegisterWorkerPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		sendResponse(ErrorPayload{Code: "INVALID_PAYLOAD", Message: err.Error()})
+func (s *Server) handleWorkerHeartbeat(msg *Message) {
+	var p WorkerHeartbeatPayload
+	if err := msg.UnmarshalPayload(&p); err != nil {
 		return
 	}
-
 	s.mu.Lock()
-	payload.Worker.Registered = time.Now()
-	payload.Worker.LastSeen = time.Now()
-	payload.Worker.Status = WorkerStatusOnline
-	payload.Worker.Encoder = nil // Don't store encoder
-	s.workers[payload.Worker.ID] = &payload.Worker
-	s.mu.Unlock()
-
-	log.Printf("Worker registered: %s (%s) with capabilities: %v", 
-		payload.Worker.ID, payload.Worker.Address, payload.Worker.Capabilities)
-	
-	sendResponse(map[string]string{"status": "ok", "worker_id": payload.Worker.ID})
-}
-
-func (s *Server) handleWorkerHeartbeatSync(msg *Message) {
-	var payload WorkerHeartbeatPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		return
-	}
-
-	s.mu.Lock()
-	if worker, ok := s.workers[payload.WorkerID]; ok {
-		worker.LastSeen = time.Now()
-		worker.Status = payload.Status
-		worker.CurrentLoad = payload.CurrentLoad
-	}
-	s.mu.Unlock()
-}
-
-func (s *Server) handleTaskResultSync(msg *Message) {
-	var payload TaskResultPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		log.Printf("Invalid task result payload: %v", err)
-		return
-	}
-
-	log.Printf("Received task result: task=%s, worker=%s, error=%q", payload.TaskID, payload.WorkerID, payload.Error)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	task, ok := s.tasks[payload.TaskID]
-	if !ok {
-		log.Printf("Received result for unknown task: %s", payload.TaskID)
-		return
-	}
-
-	now := time.Now()
-	if payload.Error != "" {
-		task.Status = TaskStatusFailed
-		task.Error = payload.Error
-		task.RetryCount++
-		log.Printf("Task %s failed: %s (retry %d/%d)", 
-			payload.TaskID, payload.Error, task.RetryCount, s.config.MaxRetries)
-		
-		if task.RetryCount < s.config.MaxRetries {
-			task.Status = TaskStatusPending
-			task.AssignedTo = ""
-			go func(t *Task) {
-				s.taskQueue <- t
-				log.Printf("Task %s requeued for retry", t.ID)
-			}(task)
-		}
-	} else {
-		task.Status = TaskStatusCompleted
-		task.CompletedAt = &now
-		task.Result = payload.Result
-		log.Printf("Task %s marked as completed", payload.TaskID)
-	}
-
-	s.updateJobProgress(task.JobID)
-
-	// Update worker load
-	if worker, ok := s.workers[payload.WorkerID]; ok {
-		worker.CurrentLoad--
-		if worker.CurrentLoad < 0 {
-			worker.CurrentLoad = 0
-		}
-		if worker.CurrentLoad < worker.MaxTasks {
-			worker.Status = WorkerStatusOnline
-		}
-		log.Printf("Worker %s load updated: %d/%d", payload.WorkerID, worker.CurrentLoad, worker.MaxTasks)
-	}
-}
-
-func (s *Server) handleGetWorkersSync(sendResponse ResponseFunc) {
-	s.mu.RLock()
-	workers := make([]*Worker, 0, len(s.workers))
-	for _, w := range s.workers {
-		workers = append(workers, w)
-	}
-	s.mu.RUnlock()
-	sendResponse(workers)
-}
-
-func (s *Server) handleSubmitJobSync(msg *Message, sendResponse ResponseFunc) {
-	var payload SubmitJobPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		sendResponse(ErrorPayload{Code: "INVALID_PAYLOAD", Message: err.Error()})
-		return
-	}
-
-	s.mu.Lock()
-	s.jobCounter++
-	payload.Job.ID = fmt.Sprintf("job_%d_%d", time.Now().Unix(), s.jobCounter)
-	payload.Job.Status = "pending"
-	payload.Job.CreatedAt = time.Now()
-	s.jobs[payload.Job.ID] = &payload.Job
-	s.mu.Unlock()
-
-	log.Printf("Job submitted: %s (type: %s, input: %s)", 
-		payload.Job.ID, payload.Job.Type, payload.Job.InputFile)
-
-	go s.processJob(&payload.Job)
-	
-	sendResponse(map[string]string{"status": "ok", "job_id": payload.Job.ID})
-}
-
-func (s *Server) handleJobStatusSync(msg *Message, sendResponse ResponseFunc) {
-	var payload JobStatusPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		sendResponse(ErrorPayload{Code: "INVALID_PAYLOAD", Message: err.Error()})
-		return
-	}
-
-	s.mu.RLock()
-	job, ok := s.jobs[payload.JobID]
-	s.mu.RUnlock()
-
-	if !ok {
-		sendResponse(ErrorPayload{Code: "JOB_NOT_FOUND", Message: "Job not found"})
-		return
-	}
-	sendResponse(job)
-}
-
-func (s *Server) handleJobListSync(sendResponse ResponseFunc) {
-	s.mu.RLock()
-	jobPtrs := make([]*Job, 0, len(s.jobs))
-	for _, j := range s.jobs {
-		jobPtrs = append(jobPtrs, j)
-	}
-	s.mu.RUnlock()
-	
-	jobs := make([]Job, len(jobPtrs))
-	for i, j := range jobPtrs {
-		jobs[i] = *j
-	}
-	sendResponse(JobListPayload{Jobs: jobs})
-}
-
-func (s *Server) handleCancelJobSync(msg *Message, sendResponse ResponseFunc) {
-	var payload CancelJobPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		sendResponse(ErrorPayload{Code: "INVALID_PAYLOAD", Message: err.Error()})
-		return
-	}
-
-	s.mu.Lock()
-	job, ok := s.jobs[payload.JobID]
-	if ok {
-		job.Status = "cancelled"
-		log.Printf("Job %s cancelled", payload.JobID)
-	}
-	s.mu.Unlock()
-	sendResponse(map[string]string{"status": "ok"})
-}
-
-func (s *Server) handleSplitFileSync(msg *Message, sendResponse ResponseFunc) {
-	var payload SplitFilePayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		sendResponse(ErrorPayload{Code: "INVALID_PAYLOAD", Message: err.Error()})
-		return
-	}
-
-	splitFiles, err := s.SplitInputFile(payload.InputFile, payload.SplitSize, payload.OutputDir)
-	result := FileSplitResultPayload{
-		JobID:      payload.JobID,
-		SplitFiles: splitFiles,
-		Error:      "",
-	}
-	if err != nil {
-		result.Error = err.Error()
-	}
-	sendResponse(result)
-}
-
-type tcpEncoder struct {
-	encoder *json.Encoder
-	mu      sync.Mutex
-}
-
-func (e *tcpEncoder) Encode(v interface{}) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.encoder.Encode(v)
-}
-
-type wsEncoder struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
-}
-
-func (e *wsEncoder) Encode(v interface{}) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.conn.WriteJSON(v)
-}
-
-func (s *Server) handleMessage(msg *Message, encoder Encoder) {
-	switch msg.Type {
-	case MsgTypeRegisterWorker:
-		s.handleRegisterWorker(msg, encoder)
-	case MsgTypeWorkerHeartbeat:
-		s.handleWorkerHeartbeat(msg, encoder)
-	case MsgTypeTaskResult:
-		s.handleTaskResult(msg)
-	case MsgTypeGetWorkers:
-		s.handleGetWorkers(encoder)
-	case MsgTypeSubmitJob:
-		s.handleSubmitJob(msg, encoder)
-	case MsgTypeJobStatus:
-		s.handleJobStatus(msg, encoder)
-	case MsgTypeJobList:
-		s.handleJobList(encoder)
-	case MsgTypeCancelJob:
-		s.handleCancelJob(msg, encoder)
-	case MsgTypeSplitFile:
-		s.handleSplitFile(msg, encoder)
-	default:
-		log.Printf("Unknown message type: %s", msg.Type)
-	}
-}
-
-func (s *Server) handleRegisterWorker(msg *Message, encoder Encoder) {
-	var payload RegisterWorkerPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		s.sendError(encoder, "INVALID_PAYLOAD", err.Error())
-		return
-	}
-
-	s.mu.Lock()
-	payload.Worker.Registered = time.Now()
-	payload.Worker.LastSeen = time.Now()
-	payload.Worker.Status = WorkerStatusOnline
-	payload.Worker.Encoder = encoder
-	s.workers[payload.Worker.ID] = &payload.Worker
-	s.mu.Unlock()
-
-	log.Printf("Worker registered: %s (%s) with capabilities: %v", 
-		payload.Worker.ID, payload.Worker.Address, payload.Worker.Capabilities)
-	
-	response := map[string]string{"status": "ok", "worker_id": payload.Worker.ID}
-	if err := encoder.Encode(response); err != nil {
-		log.Printf("Failed to send registration response: %v", err)
-	}
-}
-
-func (s *Server) handleWorkerHeartbeat(msg *Message, encoder Encoder) {
-	var payload WorkerHeartbeatPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		return
-	}
-
-	s.mu.Lock()
-	if worker, ok := s.workers[payload.WorkerID]; ok {
-		worker.LastSeen = time.Now()
-		worker.Status = payload.Status
-		worker.CurrentLoad = payload.CurrentLoad
-		worker.Encoder = encoder
+	if w, ok := s.workers[p.WorkerID]; ok {
+		w.LastSeen = time.Now()
+		w.Status = p.Status
+		w.CurrentLoad = p.CurrentLoad
 	}
 	s.mu.Unlock()
 }
 
 func (s *Server) handleTaskResult(msg *Message) {
-	var payload TaskResultPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
+	var p TaskResultPayload
+	if err := msg.UnmarshalPayload(&p); err != nil {
 		log.Printf("Invalid task result payload: %v", err)
 		return
 	}
-
-	log.Printf("Received task result: task=%s, worker=%s, error=%q", payload.TaskID, payload.WorkerID, payload.Error)
+	log.Printf("Task result: task=%s worker=%s err=%q", p.TaskID, p.WorkerID, p.Error)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	task, ok := s.tasks[payload.TaskID]
+	task, ok := s.tasks[p.TaskID]
 	if !ok {
-		log.Printf("Received result for unknown task: %s", payload.TaskID)
+		log.Printf("Result for unknown task %s", p.TaskID)
 		return
 	}
 
 	now := time.Now()
-	if payload.Error != "" {
-		task.Status = TaskStatusFailed
-		task.Error = payload.Error
+	if p.Error != "" {
+		task.Error = p.Error
 		task.RetryCount++
-		log.Printf("Task %s failed: %s (retry %d/%d)", 
-			payload.TaskID, payload.Error, task.RetryCount, s.config.MaxRetries)
-		
 		if task.RetryCount < s.config.MaxRetries {
 			task.Status = TaskStatusPending
 			task.AssignedTo = ""
-			select {
-			case s.taskQueue <- task:
-				log.Printf("Task %s requeued for retry", payload.TaskID)
-			default:
-				log.Printf("Task queue full, cannot requeue task %s", payload.TaskID)
-			}
+			go func(t *Task) { s.taskQueue <- t }(task)
+			log.Printf("Task %s requeued (retry %d/%d)", task.ID, task.RetryCount, s.config.MaxRetries)
+		} else {
+			task.Status = TaskStatusFailed
+			log.Printf("Task %s permanently failed after %d retries", task.ID, task.RetryCount)
 		}
 	} else {
 		task.Status = TaskStatusCompleted
 		task.CompletedAt = &now
-		task.Result = payload.Result
-		log.Printf("Task %s marked as completed", payload.TaskID)
+		task.Result = p.Result
 	}
 
 	s.updateJobProgress(task.JobID)
 
-	// Update worker load
-	if worker, ok := s.workers[payload.WorkerID]; ok {
-		worker.CurrentLoad--
-		if worker.CurrentLoad < 0 {
-			worker.CurrentLoad = 0
+	if w, ok := s.workers[p.WorkerID]; ok {
+		w.CurrentLoad--
+		if w.CurrentLoad < 0 {
+			w.CurrentLoad = 0
 		}
-		if worker.CurrentLoad < worker.MaxTasks {
-			worker.Status = WorkerStatusOnline
+		if w.CurrentLoad < w.MaxTasks {
+			w.Status = WorkerStatusOnline
 		}
-		log.Printf("Worker %s load updated: %d/%d", payload.WorkerID, worker.CurrentLoad, worker.MaxTasks)
 	}
 }
 
-func (s *Server) updateJobProgress(jobID string) {
-	job, ok := s.jobs[jobID]
-	if !ok {
-		return
+// ── Job processing ────────────────────────────────────────────────────────────
+
+// submitJob validates and stores a job, then kicks off async processing.
+func (s *Server) submitJob(job *Job) {
+	if job.ExecMode == "" {
+		job.ExecMode = ExecModeFile
 	}
-
-	taskIDs, ok := s.jobTasks[jobID]
-	if !ok {
-		return
+	if job.SplitSize <= 0 {
+		job.SplitSize = DefaultSplitSize
 	}
-
-	completed := 0
-	failed := 0
-	for _, taskID := range taskIDs {
-		task, ok := s.tasks[taskID]
-		if !ok {
-			continue
-		}
-		if task.Status == TaskStatusCompleted {
-			completed++
-		}
-		if task.Status == TaskStatusFailed && task.RetryCount >= s.config.MaxRetries {
-			failed++
-		}
-	}
-
-	job.Completed = completed
-	job.Failed = failed
-
-	if completed+failed >= job.TotalTasks {
-		job.Status = "completed"
-		now := time.Now()
-		job.CompletedAt = &now
-		log.Printf("Job %s completed: %d succeeded, %d failed", jobID, completed, failed)
-	}
-}
-
-func (s *Server) handleGetWorkers(encoder Encoder) {
-	s.mu.RLock()
-	workers := make([]*Worker, 0, len(s.workers))
-	for _, w := range s.workers {
-		workers = append(workers, w)
-	}
-	s.mu.RUnlock()
-	encoder.Encode(workers)
-}
-
-func (s *Server) handleSubmitJob(msg *Message, encoder Encoder) {
-	var payload SubmitJobPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		s.sendError(encoder, "INVALID_PAYLOAD", err.Error())
-		return
+	if job.TimeoutSeconds <= 0 {
+		job.TimeoutSeconds = DefaultTimeout
 	}
 
 	s.mu.Lock()
 	s.jobCounter++
-	payload.Job.ID = fmt.Sprintf("job_%d_%d", time.Now().Unix(), s.jobCounter)
-	payload.Job.Status = "pending"
-	payload.Job.CreatedAt = time.Now()
-	s.jobs[payload.Job.ID] = &payload.Job
+	job.ID = fmt.Sprintf("job_%d_%d", time.Now().Unix(), s.jobCounter)
+	job.Status = "pending"
+	job.CreatedAt = time.Now()
+	s.jobs[job.ID] = job
 	s.mu.Unlock()
 
-	log.Printf("Job submitted: %s (type: %s, input: %s)", 
-		payload.Job.ID, payload.Job.Type, payload.Job.InputFile)
-
-	go s.processJob(&payload.Job)
-	
-	response := map[string]string{"status": "ok", "job_id": payload.Job.ID}
-	if err := encoder.Encode(response); err != nil {
-		log.Printf("Failed to send job submission response: %v", err)
-	}
+	log.Printf("Job submitted: %s  command=%q  mode=%s  input=%s", job.ID, job.Command, job.ExecMode, job.InputFile)
+	go s.processJob(job)
 }
 
 func (s *Server) processJob(job *Job) {
@@ -696,9 +394,7 @@ func (s *Server) processJob(job *Job) {
 	job.StartedAt = &now
 	s.mu.Unlock()
 
-	log.Printf("Processing job %s, splitting file %s", job.ID, job.InputFile)
-
-	splitFiles, err := s.SplitInputFile(job.InputFile, job.SplitSize, job.OutputDir)
+	splitFiles, err := s.splitInputFile(job.InputFile, job.SplitSize, job.OutputDir)
 	if err != nil {
 		log.Printf("Job %s split error: %v", job.ID, err)
 		s.mu.Lock()
@@ -706,308 +402,85 @@ func (s *Server) processJob(job *Job) {
 		s.mu.Unlock()
 		return
 	}
-
-	log.Printf("Job %s split into %d files", job.ID, len(splitFiles))
+	log.Printf("Job %s: split into %d chunks", job.ID, len(splitFiles))
 
 	s.mu.Lock()
 	job.TotalTasks = len(splitFiles)
 	taskIDs := make([]string, 0, len(splitFiles))
-	
-	for i, sf := range splitFiles {
-		s.taskCounter++
+
+	for i, chunkPath := range splitFiles {
 		taskID := fmt.Sprintf("task_%s_%d", job.ID, i)
+
+		// Determine output file path for this chunk.
+		outputFile := filepath.Join(job.OutputDir, fmt.Sprintf("result_part_%04d.txt", i+1))
+
+		// Render the command: replace {input} and {output} placeholders.
+		renderedCmd := strings.ReplaceAll(job.Command, "{input}", chunkPath)
+		renderedCmd = strings.ReplaceAll(renderedCmd, "{output}", outputFile)
+
 		task := &Task{
-			ID:         taskID,
-			JobID:      job.ID,
-			Type:       job.Type,
-			Payload:    map[string]interface{}{
-				"input_file":  sf,
-				"output_dir":  job.OutputDir,
-				"task_index":  i,
-				"total_tasks": len(splitFiles),
+			ID:    taskID,
+			JobID: job.ID,
+			Type:  "shell",
+			Payload: map[string]interface{}{
+				"command":         renderedCmd,
+				"exec_mode":       string(job.ExecMode),
+				"input_file":      chunkPath,
+				"output_file":     outputFile,
+				"timeout_seconds": job.TimeoutSeconds,
 			},
-			Status:     TaskStatusPending,
-			CreatedAt:  time.Now(),
-			Priority:   0,
-			RetryCount: 0,
+			Status:    TaskStatusPending,
+			CreatedAt: time.Now(),
 		}
 		s.tasks[taskID] = task
 		taskIDs = append(taskIDs, taskID)
-		
+
 		select {
 		case s.taskQueue <- task:
 		default:
-			log.Printf("Warning: task queue full, task %s may be delayed", taskID)
-			go func(t *Task) {
-				s.taskQueue <- t
-			}(task)
+			// Queue full — push in background so we don't hold the lock.
+			go func(t *Task) { s.taskQueue <- t }(task)
 		}
 	}
 	s.jobTasks[job.ID] = taskIDs
 	s.mu.Unlock()
-
-	log.Printf("Job %s: created %d tasks", job.ID, len(splitFiles))
 }
 
-func (s *Server) SplitInputFile(inputFile string, splitSize int64, outputDir string) ([]string, error) {
-	f, err := os.Open(inputFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open input file: %w", err)
-	}
-	defer f.Close()
-
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create output dir: %w", err)
-	}
-
-	var splitFiles []string
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, FileReadBufferSize), 10*FileReadBufferSize)
-	
-	partNum := 0
-	var currentPart *os.File
-	var currentSize int64
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		lineSize := int64(len(line)) + 1 // +1 for newline
-
-		if currentPart == nil || currentSize+lineSize > splitSize {
-			if currentPart != nil {
-				currentPart.Close()
-			}
-			partNum++
-			splitFile := filepath.Join(outputDir, fmt.Sprintf("part_%04d.txt", partNum))
-			splitFiles = append(splitFiles, splitFile)
-			currentPart, err = os.Create(splitFile)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create part file: %w", err)
-			}
-			currentSize = 0
-		}
-
-		if _, err := fmt.Fprintln(currentPart, line); err != nil {
-			currentPart.Close()
-			return nil, fmt.Errorf("failed to write to part file: %w", err)
-		}
-		currentSize += lineSize
-	}
-
-	if currentPart != nil {
-		currentPart.Close()
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading input file: %w", err)
-	}
-
-	return splitFiles, nil
-}
-
-func (s *Server) handleJobStatus(msg *Message, encoder Encoder) {
-	var payload JobStatusPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		s.sendError(encoder, "INVALID_PAYLOAD", err.Error())
-		return
-	}
-
-	s.mu.RLock()
-	job, ok := s.jobs[payload.JobID]
-	s.mu.RUnlock()
-
+func (s *Server) updateJobProgress(jobID string) {
+	job, ok := s.jobs[jobID]
 	if !ok {
-		s.sendError(encoder, "JOB_NOT_FOUND", "Job not found")
 		return
 	}
-	encoder.Encode(job)
-}
+	taskIDs := s.jobTasks[jobID]
 
-func (s *Server) handleJobList(encoder Encoder) {
-	s.mu.RLock()
-	jobPtrs := make([]*Job, 0, len(s.jobs))
-	for _, j := range s.jobs {
-		jobPtrs = append(jobPtrs, j)
-	}
-	s.mu.RUnlock()
-	
-	jobs := make([]Job, len(jobPtrs))
-	for i, j := range jobPtrs {
-		jobs[i] = *j
-	}
-	encoder.Encode(JobListPayload{Jobs: jobs})
-}
-
-func (s *Server) handleCancelJob(msg *Message, encoder Encoder) {
-	var payload CancelJobPayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		s.sendError(encoder, "INVALID_PAYLOAD", err.Error())
-		return
-	}
-
-	s.mu.Lock()
-	job, ok := s.jobs[payload.JobID]
-	if ok {
-		job.Status = "cancelled"
-		log.Printf("Job %s cancelled", payload.JobID)
-	}
-	s.mu.Unlock()
-	encoder.Encode(map[string]string{"status": "ok"})
-}
-
-func (s *Server) handleSplitFile(msg *Message, encoder Encoder) {
-	var payload SplitFilePayload
-	if err := msg.UnmarshalPayload(&payload); err != nil {
-		s.sendError(encoder, "INVALID_PAYLOAD", err.Error())
-		return
-	}
-
-	splitFiles, err := s.SplitInputFile(payload.InputFile, payload.SplitSize, payload.OutputDir)
-	result := FileSplitResultPayload{
-		JobID:      payload.JobID,
-		SplitFiles: splitFiles,
-		Error:      "",
-	}
-	if err != nil {
-		result.Error = err.Error()
-	}
-	encoder.Encode(result)
-}
-
-func (s *Server) handleWorkersAPI(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	workers := make([]*Worker, 0, len(s.workers))
-	for _, worker := range s.workers {
-		workers = append(workers, worker)
-	}
-	s.mu.RUnlock()
-	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(workers)
-}
-
-func (s *Server) handleJobsAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		// Submit a new job
-		var payload SubmitJobPayload
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
-			return
+	completed, failed := 0, 0
+	for _, tid := range taskIDs {
+		t, ok := s.tasks[tid]
+		if !ok {
+			continue
 		}
-
-		s.mu.Lock()
-		s.jobCounter++
-		payload.Job.ID = fmt.Sprintf("job_%d_%d", time.Now().Unix(), s.jobCounter)
-		payload.Job.Status = "pending"
-		payload.Job.CreatedAt = time.Now()
-		s.jobs[payload.Job.ID] = &payload.Job
-		s.mu.Unlock()
-
-		log.Printf("Job submitted: %s (type: %s, input: %s)", 
-			payload.Job.ID, payload.Job.Type, payload.Job.InputFile)
-
-		go s.processJob(&payload.Job)
-		
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "job_id": payload.Job.ID})
-		return
-	}
-
-	// GET - List all jobs
-	s.mu.RLock()
-	jobs := make([]*Job, 0, len(s.jobs))
-	for _, j := range s.jobs {
-		jobs = append(jobs, j)
-	}
-	s.mu.RUnlock()
-	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(jobs)
-}
-
-func (s *Server) handleTasksAPI(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	tasks := make([]*Task, 0, len(s.tasks))
-	for _, t := range s.tasks {
-		tasks = append(tasks, t)
-	}
-	s.mu.RUnlock()
-	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tasks)
-}
-
-func (s *Server) handleStatsAPI(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	stats := map[string]interface{}{
-		"workers_total":   len(s.workers),
-		"workers_online":  0,
-		"jobs_total":      len(s.jobs),
-		"jobs_running":    0,
-		"tasks_total":     len(s.tasks),
-		"tasks_pending":   0,
-		"tasks_running":   0,
-		"tasks_completed": 0,
-		"tasks_failed":    0,
-	}
-	
-	for _, w := range s.workers {
-		if w.Status == WorkerStatusOnline {
-			stats["workers_online"] = stats["workers_online"].(int) + 1
-		}
-	}
-	
-	for _, j := range s.jobs {
-		if j.Status == "running" {
-			stats["jobs_running"] = stats["jobs_running"].(int) + 1
-		}
-	}
-	
-	for _, t := range s.tasks {
 		switch t.Status {
-		case TaskStatusPending:
-			stats["tasks_pending"] = stats["tasks_pending"].(int) + 1
-		case TaskStatusAssigned, TaskStatusRunning:
-			stats["tasks_running"] = stats["tasks_running"].(int) + 1
 		case TaskStatusCompleted:
-			stats["tasks_completed"] = stats["tasks_completed"].(int) + 1
+			completed++
 		case TaskStatusFailed:
-			stats["tasks_failed"] = stats["tasks_failed"].(int) + 1
+			failed++
 		}
 	}
-	s.mu.RUnlock()
-	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
+	job.Completed = completed
+	job.Failed = failed
+
+	if completed+failed >= job.TotalTasks && job.TotalTasks > 0 {
+		job.Status = "completed"
+		now := time.Now()
+		job.CompletedAt = &now
+		log.Printf("Job %s completed: %d ok  %d failed", jobID, completed, failed)
+	}
 }
 
-func (s *Server) handleSplitAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	
-	var req SplitFilePayload
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	
-	splitFiles, err := s.SplitInputFile(req.InputFile, req.SplitSize, req.OutputDir)
-	result := FileSplitResultPayload{
-		JobID:      req.JobID,
-		SplitFiles: splitFiles,
-	}
-	if err != nil {
-		result.Error = err.Error()
-	}
-	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
-}
+// ── Task dispatcher ───────────────────────────────────────────────────────────
 
 func (s *Server) taskDispatcher() {
 	defer s.wg.Done()
-	
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -1022,71 +495,68 @@ func (s *Server) dispatchTask(task *Task) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Find available worker
-	var availableWorker *Worker
+	if task.Status != TaskStatusPending {
+		return
+	}
+
+	// Find an available worker whose capabilities match ("shell" is universal).
+	var chosen *Worker
 	for _, w := range s.workers {
-		if w.Status == WorkerStatusOnline && w.CurrentLoad < w.MaxTasks {
-			availableWorker = w
+		if w.Status == WorkerStatusOnline && w.CurrentLoad < w.MaxTasks && w.SendCh != nil {
+			chosen = w
 			break
 		}
 	}
 
-	if availableWorker == nil {
-		// No worker available, requeue
+	if chosen == nil {
+		// No worker available — requeue after a short delay.
 		go func() {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 			s.taskQueue <- task
 		}()
 		return
 	}
 
-	if task.Status != TaskStatusPending {
-		return
-	}
-
 	task.Status = TaskStatusAssigned
-	task.AssignedTo = availableWorker.ID
+	task.AssignedTo = chosen.ID
 	now := time.Now()
 	task.StartedAt = &now
-	availableWorker.CurrentLoad++
-	if availableWorker.CurrentLoad >= availableWorker.MaxTasks {
-		availableWorker.Status = WorkerStatusBusy
+	chosen.CurrentLoad++
+	if chosen.CurrentLoad >= chosen.MaxTasks {
+		chosen.Status = WorkerStatusBusy
 	}
 
-	s.sendTaskToWorker(availableWorker, task)
-}
-
-func (s *Server) sendTaskToWorker(worker *Worker, task *Task) {
 	msg, err := NewMessage(MsgTypeAssignTask, AssignTaskPayload{Task: *task})
 	if err != nil {
-		log.Printf("Failed to create task message: %v", err)
-		task.Status = TaskStatusPending
-		task.AssignedTo = ""
-		worker.CurrentLoad--
-		s.taskQueue <- task
+		log.Printf("Failed to build assign-task message: %v", err)
+		s.requeueTask(task, chosen)
 		return
 	}
 
-	if worker.Encoder != nil {
-		if err := worker.Encoder.Encode(msg); err != nil {
-			log.Printf("Failed to send task %s to worker %s: %v", task.ID, worker.ID, err)
-			task.Status = TaskStatusPending
-			task.AssignedTo = ""
-			worker.CurrentLoad--
-			worker.Status = WorkerStatusOffline
-			worker.Encoder = nil
-			s.taskQueue <- task
-			return
-		}
-		log.Printf("Assigned task %s to worker %s", task.ID, worker.ID)
-	} else {
-		log.Printf("No encoder for worker %s, requeueing task %s", worker.ID, task.ID)
-		task.Status = TaskStatusPending
-		task.AssignedTo = ""
-		worker.CurrentLoad--
-		s.taskQueue <- task
+	// Non-blocking send into the worker's send channel.
+	// If the channel is full the worker is overloaded — requeue.
+	select {
+	case chosen.SendCh <- msg:
+		log.Printf("Dispatched task %s → worker %s", task.ID, chosen.ID)
+	default:
+		log.Printf("Worker %s send buffer full, requeueing task %s", chosen.ID, task.ID)
+		s.requeueTask(task, chosen)
 	}
 }
+
+func (s *Server) requeueTask(task *Task, w *Worker) {
+	task.Status = TaskStatusPending
+	task.AssignedTo = ""
+	if w != nil {
+		w.CurrentLoad--
+		if w.CurrentLoad < 0 {
+			w.CurrentLoad = 0
+		}
+	}
+	go func() { s.taskQueue <- task }()
+}
+
+// ── Heartbeat checker ─────────────────────────────────────────────────────────
 
 func (s *Server) heartbeatChecker() {
 	defer s.wg.Done()
@@ -1099,15 +569,12 @@ func (s *Server) heartbeatChecker() {
 			return
 		case <-ticker.C:
 			s.mu.Lock()
-			now := time.Now()
-			for id, worker := range s.workers {
-				if now.Sub(worker.LastSeen) > s.getHeartbeatTTL() {
-					if worker.Status != WorkerStatusOffline {
-						worker.Status = WorkerStatusOffline
-						worker.Encoder = nil
-						log.Printf("Worker %s marked offline (last seen: %s)", id, worker.LastSeen.Format("15:04:05"))
-						s.requeueWorkerTasks(id)
-					}
+			for id, w := range s.workers {
+				if time.Since(w.LastSeen) > s.heartbeatTTL() && w.Status != WorkerStatusOffline {
+					w.Status = WorkerStatusOffline
+					w.SendCh = nil
+					log.Printf("Worker %s marked offline (last seen %s ago)", id, time.Since(w.LastSeen).Round(time.Second))
+					s.requeueWorkerTasks(id)
 				}
 			}
 			s.mu.Unlock()
@@ -1117,27 +584,235 @@ func (s *Server) heartbeatChecker() {
 
 func (s *Server) requeueWorkerTasks(workerID string) {
 	for _, task := range s.tasks {
-		if task.AssignedTo == workerID && (task.Status == TaskStatusAssigned || task.Status == TaskStatusRunning) {
+		if task.AssignedTo != workerID {
+			continue
+		}
+		if task.Status != TaskStatusAssigned && task.Status != TaskStatusRunning {
+			continue
+		}
+		task.RetryCount++
+		if task.RetryCount < s.config.MaxRetries {
 			task.Status = TaskStatusPending
 			task.AssignedTo = ""
-			task.RetryCount++
-			if task.RetryCount < s.config.MaxRetries {
-				go func(t *Task) {
-					s.taskQueue <- t
-				}(task)
-				log.Printf("Requeued task %s from offline worker %s", task.ID, workerID)
-			} else {
-				task.Status = TaskStatusFailed
-				task.Error = "max retries exceeded after worker went offline"
-				s.updateJobProgress(task.JobID)
-				log.Printf("Task %s failed: max retries after worker %s went offline", task.ID, workerID)
-			}
+			go func(t *Task) { s.taskQueue <- t }(task)
+			log.Printf("Requeued task %s from offline worker %s", task.ID, workerID)
+		} else {
+			task.Status = TaskStatusFailed
+			task.Error = "worker went offline, max retries exceeded"
+			s.updateJobProgress(task.JobID)
 		}
 	}
 }
 
-func (s *Server) sendError(encoder Encoder, code, message string) {
-	if err := encoder.Encode(ErrorPayload{Code: code, Message: message}); err != nil {
-		log.Printf("Failed to send error response: %v", err)
+func (s *Server) markWorkerOffline(workerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok := s.workers[workerID]
+	if !ok {
+		return
 	}
+	if w.Status != WorkerStatusOffline {
+		w.Status = WorkerStatusOffline
+		w.SendCh = nil
+		s.requeueWorkerTasks(workerID)
+		log.Printf("Worker %s disconnected", workerID)
+	}
+}
+
+// ── File splitting ────────────────────────────────────────────────────────────
+
+func (s *Server) splitInputFile(inputFile string, splitSize int64, outputDir string) ([]string, error) {
+	f, err := os.Open(inputFile)
+	if err != nil {
+		return nil, fmt.Errorf("open input file: %w", err)
+	}
+	defer f.Close()
+
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("create output dir: %w", err)
+	}
+
+	var splitFiles []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, FileReadBufferSize), 10*FileReadBufferSize)
+
+	partNum := 0
+	var current *os.File
+	var currentSize int64
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		lineSize := int64(len(line)) + 1
+
+		if current == nil || currentSize+lineSize > splitSize {
+			if current != nil {
+				current.Close()
+			}
+			partNum++
+			path := filepath.Join(outputDir, fmt.Sprintf("part_%04d.txt", partNum))
+			splitFiles = append(splitFiles, path)
+			current, err = os.Create(path)
+			if err != nil {
+				return nil, fmt.Errorf("create part file: %w", err)
+			}
+			currentSize = 0
+		}
+
+		if _, err := fmt.Fprintln(current, line); err != nil {
+			current.Close()
+			return nil, fmt.Errorf("write part file: %w", err)
+		}
+		currentSize += lineSize
+	}
+	if current != nil {
+		current.Close()
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan input file: %w", err)
+	}
+	return splitFiles, nil
+}
+
+// ── HTTP API ──────────────────────────────────────────────────────────────────
+
+func writeJSON(w http.ResponseWriter, code int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(v) //nolint:errcheck
+}
+
+func (s *Server) handleWorkersAPI(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	list := make([]*Worker, 0, len(s.workers))
+	for _, wk := range s.workers {
+		list = append(list, wk)
+	}
+	s.mu.RUnlock()
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) handleJobsAPI(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var job Job
+		if err := json.NewDecoder(r.Body).Decode(&job); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if job.Command == "" {
+			http.Error(w, "command is required", http.StatusBadRequest)
+			return
+		}
+		if job.InputFile == "" {
+			http.Error(w, "input_file is required", http.StatusBadRequest)
+			return
+		}
+		if job.OutputDir == "" {
+			http.Error(w, "output_dir is required", http.StatusBadRequest)
+			return
+		}
+		s.submitJob(&job)
+		writeJSON(w, http.StatusCreated, map[string]string{"status": "ok", "job_id": job.ID})
+
+	case http.MethodGet:
+		s.mu.RLock()
+		jobs := make([]*Job, 0, len(s.jobs))
+		for _, j := range s.jobs {
+			jobs = append(jobs, j)
+		}
+		s.mu.RUnlock()
+		writeJSON(w, http.StatusOK, jobs)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleJobByIDAPI(w http.ResponseWriter, r *http.Request) {
+	// Path: /api/jobs/{id}
+	jobID := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
+	if jobID == "" {
+		http.Error(w, "job id required", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.RLock()
+		job, ok := s.jobs[jobID]
+		s.mu.RUnlock()
+		if !ok {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, job)
+
+	case http.MethodDelete:
+		s.mu.Lock()
+		job, ok := s.jobs[jobID]
+		if ok {
+			job.Status = "cancelled"
+		}
+		s.mu.Unlock()
+		if !ok {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleTasksAPI(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	tasks := make([]*Task, 0, len(s.tasks))
+	for _, t := range s.tasks {
+		tasks = append(tasks, t)
+	}
+	s.mu.RUnlock()
+	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (s *Server) handleStatsAPI(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats := map[string]int{
+		"workers_total":   len(s.workers),
+		"workers_online":  0,
+		"jobs_total":      len(s.jobs),
+		"jobs_running":    0,
+		"tasks_total":     len(s.tasks),
+		"tasks_pending":   0,
+		"tasks_running":   0,
+		"tasks_completed": 0,
+		"tasks_failed":    0,
+	}
+
+	for _, wk := range s.workers {
+		if wk.Status == WorkerStatusOnline || wk.Status == WorkerStatusBusy {
+			stats["workers_online"]++
+		}
+	}
+	for _, j := range s.jobs {
+		if j.Status == "running" {
+			stats["jobs_running"]++
+		}
+	}
+	for _, t := range s.tasks {
+		switch t.Status {
+		case TaskStatusPending:
+			stats["tasks_pending"]++
+		case TaskStatusAssigned, TaskStatusRunning:
+			stats["tasks_running"]++
+		case TaskStatusCompleted:
+			stats["tasks_completed"]++
+		case TaskStatusFailed:
+			stats["tasks_failed"]++
+		}
+	}
+
+	writeJSON(w, http.StatusOK, stats)
 }

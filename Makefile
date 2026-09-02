@@ -1,59 +1,34 @@
-.PHONY: all build clean test server worker cli linux-server linux-worker linux-all
+# CNC — Distributed Shell Task Cluster
+# ──────────────────────────────────────
+# Targets:
+#   build         Build server, worker, and CLI for the current OS
+#   build-linux   Cross-compile for Linux amd64 (CGO disabled)
+#   clean         Remove built binaries
 
-# Build everything
-all: build
+LDFLAGS := -s -w
+GO      := go
 
-# Build all binaries for current platform
-build: server worker cli
+.PHONY: build build-linux clean
 
-# Build server
-server:
-	@echo "Building cnc-server..."
-	@go build -o cnc-server ./cmd/server/main.go
+# ── Local build ──────────────────────────────────────────────────────────────
+build:
+	$(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o cnc-server ./cmd/server
+	$(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o cnc-worker ./cmd/worker
+	$(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o cnc       ./cmd/cnc
+	@echo "Built: cnc-server  cnc-worker  cnc"
 
-# Build worker
-worker:
-	@echo "Building cnc-worker..."
-	@go build -o cnc-worker ./cmd/worker/main.go
+# ── Linux cross-compile ──────────────────────────────────────────────────────
+build-linux:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		$(GO) build -ldflags "$(LDFLAGS)" -o cnc-server-linux ./cmd/server
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		$(GO) build -ldflags "$(LDFLAGS)" -o cnc-worker-linux ./cmd/worker
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		$(GO) build -ldflags "$(LDFLAGS)" -o cnc-linux        ./cmd/cnc
+	@echo "Built: cnc-server-linux  cnc-worker-linux  cnc-linux"
 
-# Build CLI
-cli:
-	@echo "Building cnc CLI..."
-	@go build -o cnc ./cmd/cnc/main.go
-
-# Build Linux binaries (for deployment)
-linux-all: linux-server linux-worker
-
-linux-server:
-	@echo "Building cnc-server for Linux..."
-	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o cnc-server-linux ./cmd/server/main.go
-
-linux-worker:
-	@echo "Building cnc-worker for Linux..."
-	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o cnc-worker-linux ./cmd/worker/main.go
-
-# Clean build artifacts
+# ── Clean ────────────────────────────────────────────────────────────────────
 clean:
-	@echo "Cleaning..."
-	@rm -f cnc cnc-server cnc-worker cnc-server-linux cnc-worker-linux
-	@rm -rf cnc_data worker_data
-	@echo "Clean complete"
-
-# Run tests
-test:
-	@echo "Running tests..."
-	@go test -v ./...
-
-# Run server locally
-run-server: server
-	@./cnc-server
-
-# Run worker locally
-run-worker: worker
-	@./cnc-worker
-
-# Install dependencies
-deps:
-	@echo "Installing dependencies..."
-	@go mod download
-	@go mod tidy
+	rm -f cnc-server cnc-worker cnc
+	rm -f cnc-server-linux cnc-worker-linux cnc-linux
+	@echo "Cleaned"

@@ -1,726 +1,278 @@
-# CNC - Technical Documentation
+# CNC — Technical Reference for AI Assistants
 
-Dokumentasi teknis untuk developer dan AI yang akan maintain/extend system ini.
-
-## 📐 Architecture Overview
-
-### System Design
-
-CNC menggunakan **Master-Worker pattern** dengan components:
-
-1. **Server (Master)**
-   - Centralized coordinator
-   - HTTP API untuk external clients
-   - TCP server untuk worker connections
-   - Task queue dan dispatcher
-   - Job dan task state management
-
-2. **Worker (Executor)**
-   - Task execution engine
-   - TCP client ke server
-   - Heartbeat mechanism
-   - Autonomous reconnection
-
-3. **CLI (Client)**
-   - User interface
-   - HTTP client untuk API calls
-   - Job submission dan monitoring
-
-### Communication Protocols
-
-**Worker ↔ Server:** TCP dengan JSON messages
-- Persistent connection
-- Bidirectional communication
-- Message-based protocol (see `protocol.go`)
-
-**Client ↔ Server:** HTTP REST API
-- Stateless
-- JSON request/response
-- Standard HTTP methods
-
-## 🗂️ Project Structure
-
-```
-cnc/
-├── cmd/
-│   ├── cnc/main.go          # CLI entry point
-│   ├── server/main.go       # Server entry point
-│   └── worker/main.go       # Worker entry point
-├── protocol.go              # Message types dan structs
-├── server.go                # Server implementation
-├── worker.go                # Worker implementation
-├── cli.go                   # CLI commands
-├── go.mod                   # Go dependencies
-├── Makefile                 # Build automation
-├── README.md                # User documentation
-├── TECHNICAL.md             # This file
-├── test_full.sh             # Integration test script
-├── server_config.json       # Server config
-└── worker_config.json       # Worker config
-```
-
-## 🔧 Core Components
-
-### 1. Protocol (`protocol.go`)
-
-Defines all message types dan data structures.
-
-**Key Types:**
-```go
-type TaskType string
-const (
-    TaskTypeDomainResolve TaskType = "domain_resolve"
-    TaskTypeIPScan        TaskType = "ip_scan"
-)
-
-type TaskStatus string
-const (
-    TaskStatusPending    TaskStatus = "pending"
-    TaskStatusAssigned   TaskStatus = "assigned"
-    TaskStatusRunning    TaskStatus = "running"
-    TaskStatusCompleted  TaskStatus = "completed"
-    TaskStatusFailed     TaskStatus = "failed"
-)
-
-type Message struct {
-    Type      string          `json:"type"`
-    Payload   json.RawMessage `json:"payload"`
-    Timestamp time.Time       `json:"timestamp"`
-}
-```
-
-**Message Types:**
-- `register_worker`: Worker registration
-- `worker_heartbeat`: Keep-alive dari worker
-- `assign_task`: Server assign task ke worker
-- `task_result`: Worker report hasil
-- `submit_job`: Client submit job baru
-- `job_status`: Request job status
-- Dan lain-lain (lihat constants di protocol.go)
-
-**Important Structs:**
-- `Task`: Single unit of work dengan JobID, Type, Payload, Status
-- `Job`: Collection of tasks dengan metadata
-- `Worker`: Worker registration info
-- `TaskResult`: Output dari task execution
-
-### 2. Server (`server.go`)
-
-Server adalah koordinator pusat.
-
-**Main Struct:**
-```go
-type Server struct {
-    mu           sync.RWMutex
-    workers      map[string]*Worker      // Registered workers
-    jobs         map[string]*Job         // All jobs
-    tasks        map[string]*Task        // All tasks
-    jobTasks     map[string][]string     // JobID -> TaskIDs mapping
-    taskQueue    chan *Task              // Pending tasks queue
-    config       *ServerConfig
-    ctx          context.Context
-    cancel       context.CancelFunc
-}
-```
-
-**Key Functions:**
-
-**`Start()`**
-- Initialize HTTP dan TCP servers
-- Start background goroutines:
-  - `taskDispatcher()`: Assign tasks ke workers
-  - `heartbeatChecker()`: Monitor worker health
-  - `tcpServer()`: Accept worker connections
-
-**`processJob(job *Job)`**
-- Split input file dengan `SplitInputFile()`
-- Create tasks untuk each chunk
-- Queue tasks untuk execution
-
-**`SplitInputFile(inputFile, splitSize, outputDir)`**
-- **Line-aware splitting** - tidak potong di tengah line
-- Baca file line-by-line menggunakan `bufio.Scanner`
-- Create part files ketika size threshold tercapai
-- Return list of split file paths
-
-**`taskDispatcher()`**
-- Continuous loop yang monitor task queue
-- Find available workers (online + capacity)
-- Assign tasks menggunakan `dispatchTask()`
-- Requeue jika tidak ada worker available
-
-**`heartbeatChecker()`**
-- Check worker `LastSeen` timestamps
-- Mark offline jika > `HeartbeatTTL`
-- Requeue tasks dari offline workers
-
-**`handleTCPConnection(conn)`**
-- Handle single worker connection
-- Decode JSON messages
-- Call appropriate handlers
-- **CURRENT ISSUE**: Message handling dapat block
-  - Synchronous processing
-  - Race condition dengan concurrent messages
-  - Need refactor untuk async handling
-
-**HTTP Handlers:**
-- `handleWorkersAPI`: GET /api/workers
-- `handleJobsAPI`: GET/POST /api/jobs  
-- `handleTasksAPI`: GET /api/tasks
-- `handleStatsAPI`: GET /api/stats
-
-### 3. Worker (`worker.go`)
-
-Worker execute tasks dan report results.
-
-**Main Struct:**
-```go
-type WorkerAgent struct {
-    mu              sync.RWMutex
-    config          *WorkerConfig
-    worker          *Worker
-    tasks           map[string]*Task     // Active tasks
-    conn            net.Conn             // TCP connection
-    encoder         *json.Encoder
-    decoder         *json.Decoder
-    stats           WorkerStats          // Performance metrics
-    ctx             context.Context
-    cancel          context.CancelFunc
-}
-```
-
-**Key Functions:**
-
-**`Start()`**
-- Connect ke server (TCP atau WebSocket)
-- Register worker
-- Start background goroutines:
-  - `heartbeatLoop()`: Send periodic heartbeats
-  - `messageLoop()`: Receive messages dari server
-  - `statsReporter()`: Log statistics
-
-**`executeTask(task)`**
-- Route ke appropriate executor based on task type
-- Handle success/failure
-- Send result ke server
-- Update statistics
-
-**`executeDomainResolve(task)`**
-- Baca domains dari input file
-- Parallel DNS lookups (100 goroutines)
-- Extract /24 IP prefixes
-- Generate all IPs in each /24 range
-- Write ke output file
-- Return `TaskResult` dengan metadata
-
-**`executeIPScan(task)`**
-- Baca IPs dari input file
-- Spawn worker pool (DefaultScanWorkers = 1000)
-- TCP ping ke multiple ports
-- Check port 80 availability
-- Write hasil ke two files: ping_*.txt, port80_*.txt
-
-**`sendTaskResult(taskID, result, errMsg)`**
-- Create TaskResultPayload
-- Marshal to JSON message
-- Send via TCP connection
-- **CURRENT ISSUE**: 
-  - Blocking for ~58 seconds on 244-byte message
-  - Root cause: TCP encoder.Encode blocking
-  - Likely race condition atau buffer issue
-  - Need investigation atau switch protocol
-
-**`reconnect()`**
-- Attempt reconnection 10 times
-- 5-second delay between attempts
-- Re-register after successful connect
-- Restart message loop
-
-### 4. CLI (`cli.go`)
-
-Command-line interface untuk user interaction.
-
-**Commands:**
-- `server start/stop`: Manage server
-- `worker start/stop`: Manage worker
-- `job submit/list/status/cancel/logs`: Job management
-- `workers`: List all workers
-- `status`: Show cluster stats
-- `split`: Manually split file
-- `config`: Manage CLI configuration
-
-**HTTP Client:**
-- `client *http.Client` dengan 30s timeout
-- JSON encoding/decoding
-- Fallback ke TCP untuk beberapa operations
-
-## 🔄 Data Flow
-
-### Job Submission Flow
-
-```
-1. Client -> Server: POST /api/jobs
-   {
-     job: {
-       name, type, input_file, output_dir, split_size
-     }
-   }
-
-2. Server: Create Job
-   - Generate job_id
-   - Set status = "pending"
-   - Store dalam jobs map
-
-3. Server: processJob() goroutine
-   a. SplitInputFile()
-      - Baca input file line-by-line
-      - Create part files (part_0001.txt, part_0002.txt, ...)
-      - Return paths
-   
-   b. Create Tasks
-      - 1 task per part file
-      - task.Payload = {input_file: part_path, output_dir, ...}
-      - Store dalam tasks map
-      - Add task_id ke jobTasks[job_id]
-      - Queue ke taskQueue
-
-4. Server: taskDispatcher()
-   - Read from taskQueue
-   - Find available worker
-   - sendTaskToWorker()
-   - Update task.Status = "assigned"
-
-5. Worker: Receive AssignTask message
-   - handleAssignTask()
-   - Launch executeTask() goroutine
-
-6. Worker: Execute task
-   - executeDomainResolve() or executeIPScan()
-   - Process input file
-   - Generate output file
-   - Create TaskResult
-
-7. Worker -> Server: TaskResult message
-   - sendTaskResult()
-   - **BLOCKS HERE** (current issue)
-
-8. Server: Receive TaskResult
-   - handleTaskResult()
-   - Update task.Status = "completed"
-   - Store task.Result
-   - updateJobProgress()
-   - Update worker.CurrentLoad--
-
-9. Server: Job Completion
-   - When all tasks completed/failed
-   - job.Status = "completed"
-   - job.CompletedAt = now
-```
-
-### Heartbeat Flow
-
-```
-Worker:
-- Every 5 seconds
-- Send WorkerHeartbeatPayload {WorkerID, Status, CurrentLoad}
-
-Server:
-- Receive heartbeat
-- Update worker.LastSeen = now
-- Update worker.Status and worker.CurrentLoad
-
-heartbeatChecker():
-- Every 10 seconds
-- Check all workers
-- If now - worker.LastSeen > HeartbeatTTL:
-  - Mark worker offline
-  - Requeue assigned tasks
-```
-
-## 🐛 Known Issues
-
-### Issue #1: Task Result Message Blocking
-
-**Symptom:**
-- Worker completes task successfully
-- Output file generated correctly
-- `sendTaskResult()` blocks for ~58 seconds
-- Server never receives message
-- Worker marked offline
-- Job never completes
-
-**Timeline:**
-```
-11:30:31 - Task starts executing
-11:30:31 - Task completes, sending result... (244 bytes)
-11:31:29 - (58 seconds later) Connection lost
-11:31:29 - Task result sent successfully
-```
-
-**Root Cause Hypothesis:**
-1. **TCP Write Blocking**: `encoder.Encode()` blocks karena TCP buffer full atau connection issue
-2. **Race Condition**: Heartbeat loop dan executeTask goroutine both writing ke same connection
-3. **Server Read Blocking**: Server's decoder.Decode() blocking message queue
-4. **Timeout Cascade**: Server's 60s read deadline menyebabkan connection close
-
-**Evidence:**
-- Message size: only 244 bytes (not a size issue)
-- Consistent 58-second block time
-- Worker has `connMu` mutex protecting writes
-- Server marks worker offline at ~30s (heartbeat TTL)
-- Connection breaks at ~60s (server read deadline)
-
-**Attempted Fixes:**
-1. ✅ Removed server read deadline - still blocks
-2. ✅ Made message handling async - created new issues
-3. ✅ Added thread-safe encoder wrapper - still blocks
-4. ❌ Increased heartbeat TTL to 120s - same issue
-
-**Possible Solutions:**
-1. **Switch to WebSocket**: Built-in ping/pong, better async support
-2. **Use gRPC**: Streaming support, better concurrency
-3. **Buffered Channels**: Queue messages instead of direct send
-4. **Separate Connections**: One for heartbeat, one for task results
-5. **HTTP for Results**: Workers POST results via HTTP API instead of TCP
-
-### Issue #2: Worker Encoder Storage
-
-**Problem:**
-Server stores `worker.Encoder` untuk send tasks, tapi encoder tied ke specific connection. Jika connection changes, encoder invalid.
-
-**Current Workaround:**
-Update encoder pada setiap heartbeat, tapi masih fragile.
-
-**Better Solution:**
-- Don't store encoder
-- Use connection pool or message queue
-- Workers poll for tasks instead of push
-
-### Issue #3: Large Output in Task Results
-
-**Not Currently Used:**
-TaskResult originally designed untuk include output data dalam message. Ini akan cause huge messages.
-
-**Current Solution:**
-TaskResult hanya include metadata:
-- OutputFile path
-- LinesOut count
-- BytesOut size
-- Stats map
-
-Output files written directly ke shared filesystem atau uploaded separately.
-
-## 🔮 Future Improvements
-
-### High Priority
-
-1. **Fix TCP Blocking Issue**
-   - Implement WebSocket support
-   - Or use HTTP POST untuk task results
-   - Add proper connection pooling
-
-2. **Result Aggregation**
-   - Combine split files into single output
-   - Option untuk merge atau keep separate
-   - Progress tracking untuk aggregation
-
-3. **Authentication**
-   - Worker authentication tokens
-   - API key untuk HTTP API
-   - TLS/SSL support
-
-### Medium Priority
-
-4. **Persistence**
-   - Save job/task state ke database
-   - Resume interrupted jobs
-   - Job history dan auditing
-
-5. **Better Error Handling**
-   - Detailed error messages
-   - Error categorization
-   - Retry strategies per error type
-
-6. **Resource Limits**
-   - CPU/memory limits per task
-   - Disk space monitoring
-   - Network bandwidth throttling
-
-7. **Metrics & Monitoring**
-   - Prometheus metrics export
-   - Grafana dashboards
-   - Alert integration
-
-### Low Priority
-
-8. **Web UI**
-   - React-based dashboard
-   - Real-time job monitoring
-   - Worker management
-
-9. **Task Priorities**
-   - Priority queue implementation
-   - SLA-based scheduling
-   - Cost optimization
-
-10. **Advanced Features**
-    - Task dependencies (DAG)
-    - Conditional execution
-    - Custom task types via plugins
-
-## 🧪 Testing
-
-### Unit Tests
-
-**To Add:**
-```go
-// server_test.go
-func TestSplitInputFile(t *testing.T)
-func TestTaskDispatcher(t *testing.T)
-func TestHeartbeatChecker(t *testing.T)
-
-// worker_test.go  
-func TestExecuteDomainResolve(t *testing.T)
-func TestExecuteIPScan(t *testing.T)
-func TestReconnection(t *testing.T)
-
-// protocol_test.go
-func TestMessageEncoding(t *testing.T)
-func TestPayloadUnmarshaling(t *testing.T)
-```
-
-### Integration Tests
-
-**Current:** `test_full.sh`
-- Start server
-- Start worker
-- Submit job
-- Monitor completion
-- Verify output
-
-**To Add:**
-- Multi-worker test
-- Failure scenarios
-- Performance benchmarks
-- Load testing
-
-### Manual Testing
-
-```bash
-# Test split functionality
-./cnc split test_domains.txt ./output 1024
-
-# Test server API
-curl http://localhost:8080/api/stats
-curl http://localhost:8080/api/workers
-
-# Test job submission
-curl -X POST http://localhost:8080/api/jobs \
-  -d '{"job":{...}}'
-
-# Monitor logs
-tail -f server.log worker.log
-```
-
-## 📊 Performance Considerations
-
-### Bottlenecks
-
-1. **File I/O**
-   - Reading large input files
-   - Writing output files
-   - Use buffered I/O (`bufio`)
-
-2. **Network**
-   - Message serialization
-   - TCP connection overhead
-   - Consider compression
-
-3. **Memory**
-   - Task queue size
-   - In-memory state maps
-   - Large file processing
-
-### Optimizations
-
-1. **Concurrency**
-   - Worker pool size tuning
-   - Parallel file processing
-   - Async message handling
-
-2. **Resource Usage**
-   - Adjust split_size based on memory
-   - Limit concurrent tasks
-   - Implement backpressure
-
-3. **Network Efficiency**
-   - Keep-alive connections
-   - Message batching
-   - Protocol buffers instead of JSON
-
-## 🔐 Security Considerations
-
-### Current State
-- ❌ No authentication
-- ❌ No encryption
-- ❌ No input validation
-- ❌ No rate limiting
-- ❌ No access control
-
-### Required for Production
-
-1. **Authentication**
-   - Worker registration tokens
-   - API keys untuk CLI
-   - JWT untuk web clients
-
-2. **Encryption**
-   - TLS untuk all connections
-   - Encrypt sensitive job data
-   - Secure configuration storage
-
-3. **Input Validation**
-   - Sanitize file paths
-   - Validate job parameters
-   - Limit file sizes
-
-4. **Access Control**
-   - Role-based permissions
-   - Job ownership
-   - Resource quotas
-
-5. **Audit Logging**
-   - All API calls
-   - Job submissions
-   - Worker registrations
-   - Security events
-
-## 📚 Code Style & Conventions
-
-### Go Best Practices
-
-1. **Error Handling**
-   ```go
-   // Good
-   if err := doSomething(); err != nil {
-       return fmt.Errorf("failed to do something: %w", err)
-   }
-   
-   // Avoid
-   doSomething()  // Ignoring errors
-   ```
-
-2. **Mutex Usage**
-   ```go
-   // Always defer unlock
-   s.mu.Lock()
-   defer s.mu.Unlock()
-   
-   // RLock untuk read-only
-   s.mu.RLock()
-   defer s.mu.RUnlock()
-   ```
-
-3. **Context Usage**
-   ```go
-   // Pass context untuk cancellation
-   func (w *WorkerAgent) executeTask(ctx context.Context, task *Task)
-   
-   // Check cancellation
-   select {
-   case <-ctx.Done():
-       return ctx.Err()
-   default:
-       // Continue
-   }
-   ```
-
-4. **Logging**
-   ```go
-   // Structured logging
-   log.Printf("Task %s completed: lines=%d, bytes=%d", 
-       task.ID, result.LinesOut, result.BytesOut)
-   
-   // Not just
-   log.Println("Task completed")
-   ```
-
-### Naming Conventions
-
-- Types: PascalCase (`TaskType`, `WorkerStatus`)
-- Functions: camelCase (`executeTask`, `sendMessage`)
-- Constants: PascalCase with prefix (`TaskStatusPending`, `MsgTypeRegisterWorker`)
-- Private fields: camelCase with receiver prefix (`s.mu`, `w.conn`)
-
-## 🛠️ Development Setup
-
-### Prerequisites
-
-```bash
-# Install Go
-brew install go  # macOS
-# or download from golang.org
-
-# Install tools
-go install golang.org/x/tools/cmd/goimports@latest
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-```
-
-### Build & Run
-
-```bash
-# Get dependencies
-go mod download
-
-# Build
-make build
-
-# Run server
-./cnc-server
-
-# Run worker
-./cnc-worker
-
-# Run tests
-go test -v ./...
-
-# Lint
-golangci-lint run
-```
-
-### Debugging
-
-```bash
-# Enable verbose logging
-export DEBUG=1
-./cnc-server 2>&1 | tee server.log
-
-# Use delve debugger
-dlv debug ./cmd/server/main.go
-
-# Print stack traces
-export GOTRACEBACK=all
-```
-
-## 📖 Additional Resources
-
-### Go Documentation
-- [Effective Go](https://golang.org/doc/effective_go)
-- [Go Concurrency Patterns](https://go.dev/blog/pipelines)
-- [Context Package](https://pkg.go.dev/context)
-
-### Similar Projects
-- [Dask Distributed](https://distributed.dask.org/)
-- [Apache Spark](https://spark.apache.org/)
-- [Celery](https://docs.celeryproject.org/)
-
-### Network Programming
-- [TCP/IP Illustrated](https://www.amazon.com/TCP-Illustrated-Vol-Addison-Wesley-Professional/dp/0201633469)
-- [Go Network Programming](https://ipfs.io/ipfs/QmfYeDhGH9bZzihBUDEQbCbTc5k5FZKURMUoUvfmc27BwL/socket/tcp_sockets.html)
+This document explains the architecture, data flow, and design decisions of the CNC codebase. Read this before making any changes.
 
 ---
 
-**Document Version:** 1.0  
-**Last Updated:** September 2026  
-**For:** AI Assistants & Developers  
-**Project:** CNC Distributed Cluster Controller
+## Overview
+
+CNC is a Go distributed task system. A single **server** accepts HTTP job submissions, splits input files into line-aware chunks, and distributes one task per chunk to connected **workers** over persistent TCP connections. Workers execute each task as a shell subprocess and report results back. A **CLI** (`cnc`) wraps the HTTP API for human use.
+
+There are no message brokers, databases, or external dependencies beyond `github.com/spf13/cobra` (CLI) and the Go standard library.
+
+---
+
+## File Map
+
+```
+cnc/
+├── protocol.go          Core types: Job, Task, Worker, Message, all payload structs
+├── server.go            Server: TCP listener, HTTP API, job processing, task dispatch
+├── worker.go            Worker agent: TCP client, subprocess execution (file + pipe)
+├── cli.go               CLI: cobra commands wrapping the HTTP API
+├── cmd/
+│   ├── server/main.go   Server entrypoint (flag parsing, signal handling)
+│   ├── worker/main.go   Worker entrypoint (flag parsing, signal handling)
+│   └── cnc/main.go      CLI entrypoint
+├── server_config.json   Server config template
+├── worker_config.json   Worker config template
+├── Makefile             build, build-linux, clean
+├── go.mod               Module: github.com/fahrel/cnc
+└── go.sum
+```
+
+---
+
+## Protocol Layer (`protocol.go`)
+
+### Key Types
+
+**`Job`** — user-submitted work unit. Fields of note:
+- `Command string` — shell command template; may contain `{input}` and `{output}` placeholders (file mode) or be a plain command (pipe mode)
+- `ExecMode ExecMode` — `"file"` or `"pipe"` (see execution modes below)
+- `TimeoutSeconds int` — per-task subprocess timeout; defaults to `DefaultTimeout` (300s) if zero
+- `SplitSize int64` — byte threshold for line-aware file splitting; defaults to `DefaultSplitSize` (10MB) if zero
+
+**`Task`** — one chunk of a job. Always has `Type: "shell"`. The `Payload` map carries:
+```
+"command"          string   // rendered command (file mode) or raw command (pipe mode)
+"exec_mode"        string   // "file" or "pipe"
+"input_file"       string   // path to the chunk file
+"output_file"      string   // predetermined output path
+"timeout_seconds"  float64  // JSON numbers decode as float64 in map[string]interface{}
+```
+
+**`Worker`** — represents a connected worker. `SendCh chan *Message` is the non-blocking write channel. **It is never serialised** (tagged `json:"-"`). The server's TCP write goroutine drains this channel. Set to `nil` when the worker goes offline.
+
+**`Message`** — TCP envelope. `Type` is a string constant (e.g. `"assign_task"`). `Payload` is `json.RawMessage` — call `msg.UnmarshalPayload(&myStruct)` to decode.
+
+### Message Types (TCP only)
+```
+register_worker    worker → server   RegisterWorkerPayload
+worker_heartbeat   worker → server   WorkerHeartbeatPayload
+assign_task        server → worker   AssignTaskPayload
+task_result        worker → server   TaskResultPayload
+shutdown_worker    server → worker   (empty payload)
+ack                server → worker   map[string]string{"status":"ok","worker_id":"..."}
+```
+
+Workers list and job operations are **HTTP only** — no TCP message types exist for them.
+
+---
+
+## Server (`server.go`)
+
+### Startup Sequence
+
+```
+Server.Start()
+  ├── os.MkdirAll(config.DataDir)
+  ├── go taskDispatcher()      — reads taskQueue, calls dispatchTask()
+  ├── go heartbeatChecker()    — marks stale workers offline, requeues their tasks
+  ├── go tcpServer()           — accepts worker connections
+  └── httpServer.ListenAndServe()
+```
+
+### TCP Connection Lifecycle (`handleTCPConn`)
+
+Each accepted TCP connection gets:
+1. A `json.Decoder` (read loop, current goroutine)
+2. A `json.Encoder` (write goroutine only — never written from anywhere else)
+3. A `sendCh chan *Message` with a buffer of 256
+
+The **write goroutine** drains `sendCh` and encodes to the socket. This is the fix for the old TCP blocking bug — the mutex is never held during a socket write.
+
+The **read loop** decodes messages and calls the appropriate handler synchronously. On disconnect it calls `markWorkerOffline(workerID)`.
+
+### Task Dispatch (`dispatchTask`)
+
+Called by `taskDispatcher` for every task dequeued from `taskQueue`.
+
+1. Acquires `s.mu.Lock()`
+2. Finds a worker where `Status == online && CurrentLoad < MaxTasks && SendCh != nil`
+3. Marks the task `assigned`, increments `worker.CurrentLoad`
+4. Does a **non-blocking send** into `worker.SendCh`:
+   - If the channel accepts: task is dispatched
+   - If the channel is full: `requeueTask()` is called (decrements load, puts task back)
+5. If no worker is available: requeues after 200ms sleep (without holding the lock)
+
+**Important:** `dispatchTask` holds `s.mu.Lock()` the entire time. Keep any work inside it minimal.
+
+### Job Processing (`processJob`)
+
+Runs in a goroutine. Steps:
+1. Sets `job.Status = "running"`
+2. Calls `splitInputFile()` — line-aware splitter, never cuts mid-line
+3. For each chunk file, renders the command:
+   - Replaces `{input}` with the chunk path
+   - Replaces `{output}` with `<output_dir>/result_part_NNNN.txt`
+4. Creates a `Task` with the rendered command and all payload fields
+5. Enqueues each task to `taskQueue` (non-blocking, falls back to goroutine if full)
+
+### Mutex Usage
+
+`s.mu sync.RWMutex` guards: `s.workers`, `s.jobs`, `s.tasks`, `s.jobTasks`, `s.jobCounter`, `s.taskCounter`.
+
+- All HTTP handlers acquire `s.mu.RLock()` for reads, `s.mu.Lock()` for writes
+- `handleTaskResult`, `dispatchTask`, `heartbeatChecker`, `markWorkerOffline` all use `s.mu.Lock()`
+- `updateJobProgress` is always called while `s.mu` is already held — **do not acquire the lock inside it**
+
+---
+
+## Worker (`worker.go`)
+
+### Connection Model
+
+Single persistent TCP connection to the server. Protected by `w.connMu sync.Mutex` — only `connect()`, `send()`, and `reconnect()` touch `w.conn`/`w.encoder`/`w.decoder`.
+
+`w.reconnecting atomic.Bool` prevents multiple concurrent reconnect attempts.
+
+### Message Loop
+
+`messageLoop()` decodes messages from `w.decoder` in a loop. On any read error it calls `go w.reconnect()` and returns (the goroutine exits). `reconnect()` restarts a new `messageLoop` goroutine on success.
+
+### Task Execution
+
+```
+handleAssignTask(msg)
+  └── go executeTask(task)
+        └── executeShellTask(task)
+              ├── ExecModeFile → execFile(command, outputFile, timeout)
+              └── ExecModePipe → execPipe(taskID, command, inputFile, outputFile, timeout)
+```
+
+**`execFile`**: runs `sh -c <command>` (command already has `{input}` and `{output}` rendered by the server). Captures stderr. Returns error if exit code != 0.
+
+**`execPipe`**: opens `inputFile` as stdin, creates `outputFile` for stdout, runs `sh -c <command>`. If `outputFile` is empty, falls back to `<DataDir>/result_<taskID>.txt`.
+
+Both modes use `context.WithTimeout(w.ctx, timeout)` — if the worker is stopped mid-task, the subprocess is killed.
+
+### Payload Extraction
+
+`task.Payload` is `map[string]interface{}`. JSON numbers decode as `float64`. Always extract `timeout_seconds` as `float64` then multiply:
+```go
+timeoutSec, _ := task.Payload["timeout_seconds"].(float64)
+timeout := time.Duration(timeoutSec) * time.Second
+```
+
+---
+
+## CLI (`cli.go`)
+
+Thin wrapper over the HTTP API using `github.com/spf13/cobra`. No TCP connections. All commands accept a `--server` flag to override the server URL.
+
+Commands:
+- `server start` — calls `NewServer(config).Start()` in-process (blocking)
+- `worker start` — calls `NewWorkerAgent(config).Start()` in-process (blocking)
+- `worker list` — GET `/api/workers`
+- `job submit` — interactive prompt → POST `/api/jobs`
+- `job list` — GET `/api/jobs`
+- `job status <id>` — GET `/api/jobs/{id}`
+- `status` — GET `/api/stats`
+
+---
+
+## Data Flow (End to End)
+
+```
+User
+  │  POST /api/jobs {name, command, exec_mode, input_file, output_dir, ...}
+  ▼
+Server.handleJobsAPI()
+  │  validates required fields, calls submitJob()
+  ▼
+Server.submitJob()
+  │  assigns job ID, stores in s.jobs, calls go processJob()
+  ▼
+Server.processJob()
+  │  splitInputFile() → [part_0001.txt, part_0002.txt, ...]
+  │  for each chunk:
+  │    render command: {input}→chunk path, {output}→result_part_NNNN.txt
+  │    create Task{Type:"shell", Payload:{command, exec_mode, input_file, output_file, timeout}}
+  │    push to s.taskQueue
+  ▼
+Server.taskDispatcher() / dispatchTask()
+  │  find available worker, send Task via worker.SendCh
+  ▼
+TCP write goroutine (in handleTCPConn)
+  │  encodes Message{type:"assign_task"} to socket
+  ▼
+WorkerAgent.messageLoop()
+  │  decodes message, calls go executeTask()
+  ▼
+WorkerAgent.executeShellTask()
+  │  file mode: sh -c <rendered_command>
+  │  pipe mode: sh -c <command> < chunk_file > output_file
+  ▼
+WorkerAgent.sendResult()
+  │  sends Message{type:"task_result"} back to server
+  ▼
+Server.handleTaskResult()
+  │  updates Task.Status, calls updateJobProgress()
+  │  decrements worker.CurrentLoad
+  ▼
+Job.Status = "completed" when all tasks done
+```
+
+---
+
+## Known Constraints and Edge Cases
+
+**File paths must be accessible from workers.** In file mode the server renders absolute paths into the command. Workers must have the same filesystem mounted (NFS, shared volume, or the same machine). In pipe mode, the server sends the chunk file path — same constraint applies.
+
+**Split files live in `output_dir`.** `splitInputFile` writes `part_NNNN.txt` files and `result_part_NNNN.txt` into the same `output_dir`. If a job is cancelled or fails, these files remain.
+
+**No authentication.** The TCP port and HTTP API are unauthenticated. Run behind a firewall or VPN.
+
+**Worker ID must be unique.** If two workers register with the same ID, the second registration overwrites the first in `s.workers`. Auto-generation from hostname+PID avoids this for normal use.
+
+**`job_id` format.** Jobs are named `job_<unix_timestamp>_<counter>`. Tasks are named `task_<job_id>_<index>`. These are stored only in memory — server restart loses all state.
+
+**No persistence.** All state (`s.workers`, `s.jobs`, `s.tasks`) is in memory. A server restart loses all job history.
+
+---
+
+## Adding a New Feature: Checklist
+
+Before changing anything:
+1. Re-read the relevant section of this document
+2. Note which mutexes guard the data you need to touch
+3. Check whether `updateJobProgress` is involved — it must be called under `s.mu.Lock()`
+
+Common extension points:
+- **New job option** → add field to `Job` in `protocol.go`, use it in `processJob` in `server.go`
+- **New CLI command** → add a `cmd*` method to `CLI` in `cli.go`, register it in `Execute()`
+- **New HTTP endpoint** → add `mux.HandleFunc` in `Server.Start()`, implement handler in `server.go`
+- **Change how workers execute tasks** → modify `executeShellTask` in `worker.go`; the rest of the pipeline is unchanged
+
+---
+
+## Dependencies
+
+```
+github.com/spf13/cobra v1.8.0   CLI framework
+```
+
+That is the only external dependency. `gorilla/websocket` and `golang.org/x/crypto` were removed in the current version.
+
+---
+
+## Build
+
+```bash
+make build          # local OS binaries: cnc-server, cnc-worker, cnc
+make build-linux    # linux/amd64 static binaries: cnc-server-linux, cnc-worker-linux, cnc-linux
+make clean          # removes all built binaries
+```
+
+Go version required: 1.21+
