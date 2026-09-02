@@ -1,0 +1,6 @@
+{
+  "server_addr": "172.104.180.163:9090",
+  "worker_id": "",
+  "max_tasks": 8,
+  "data_dir": "./worker_data"
+}
