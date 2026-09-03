@@ -1,9 +1,15 @@
 import type { Job, Stats, Task, Worker } from "./types";
 
-const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
+// Server-side (SSR/RSC): always hit the Go server directly.
+// Client-side: go through the Next.js proxy at /api/*.
+const isServer = typeof window === "undefined";
+const BASE = isServer
+  ? (process.env.GO_API_URL ?? "http://localhost:8080")
+  : "";
 
 async function apiFetch<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
+  const url = isServer ? `${BASE}${path}` : path;
+  const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
     throw new Error(`API ${path} returned ${res.status}`);
   }
