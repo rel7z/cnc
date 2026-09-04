@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import path from "path";
 
 interface FormState {
   name: string;
@@ -53,6 +54,11 @@ const inputDisabledClass =
   "w-full bg-gray-800/50 border border-gray-700/50 rounded-lg px-3 py-2 text-sm text-gray-500 " +
   "cursor-not-allowed transition-colors";
 
+/** Derive the basename from a unix-style path string (no Node.js path needed). */
+function basename(p: string): string {
+  return p.split("/").filter(Boolean).pop() ?? p;
+}
+
 export function SubmitJobForm() {
   const router = useRouter();
   const [form, setForm] = useState<FormState>(defaults);
@@ -63,18 +69,20 @@ export function SubmitJobForm() {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
+  // Derive what filename workers will receive in their home dir.
+  const destFilename = form.input_file ? basename(form.input_file) : null;
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
     setError(null);
 
-    // -1 is the NoTimeout sentinel understood by the Go server.
     const timeoutValue = form.no_timeout
       ? -1
       : parseInt(form.timeout_seconds, 10) || 300;
 
     const body: Record<string, unknown> = {
-      name: form.name || form.input_file.split("/").pop(),
+      name: form.name || basename(form.input_file),
       command: form.command,
       input_file: form.input_file,
       timeout_seconds: timeoutValue,
@@ -106,28 +114,40 @@ export function SubmitJobForm() {
   return (
     <form onSubmit={handleSubmit} className="space-y-6 max-w-xl">
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
-        <h3 className="text-sm font-semibold text-white">Job</h3>
+        <h3 className="text-sm font-semibold text-white">Distribute File</h3>
 
-        <Field label="Input file" required hint="Path to the file on the server to split and distribute">
+        <Field
+          label="Input file"
+          required
+          hint="Full path to the file on the server — it will be split and each worker receives a piece."
+        >
           <input
             type="text"
             className={`${inputClass} font-mono`}
-            placeholder="/data/targets.txt"
+            placeholder="~/xaa.txt"
             value={form.input_file}
             onChange={(e) => set("input_file", e.target.value)}
             required
           />
         </Field>
 
+        {/* Show what filename workers will see */}
+        {destFilename && (
+          <div className="flex items-center gap-2 rounded-lg bg-gray-800/60 border border-gray-700/50 px-3 py-2">
+            <span className="text-xs text-gray-500">Each worker receives</span>
+            <code className="text-xs text-emerald-400 font-mono">~/{destFilename}</code>
+          </div>
+        )}
+
         <Field
           label="Command"
           required
-          hint="Use {input} as the placeholder for each chunk — e.g. node index.js {input}"
+          hint={`Use {input} where the file path should go — e.g. "nmap -iL {input}" or "python3 scan.py {input}". Each worker substitutes {input} with ~/${destFilename ?? "<filename>"}.`}
         >
           <input
             type="text"
             className={`${inputClass} font-mono`}
-            placeholder="node index.js {input}"
+            placeholder={`nmap -iL {input}`}
             value={form.command}
             onChange={(e) => set("command", e.target.value)}
             required
@@ -136,7 +156,7 @@ export function SubmitJobForm() {
 
         <Field
           label="Workers"
-          hint="Number of equal parts to split into. Leave blank to use all online workers."
+          hint="How many equal parts to split into — one part per worker. Leave blank to use all online workers automatically."
         >
           <input
             type="number"
@@ -178,8 +198,7 @@ export function SubmitJobForm() {
                 type="checkbox"
                 checked={form.no_timeout}
                 onChange={(e) => set("no_timeout", e.target.checked)}
-                className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500/50 accent-blue-500"
-                aria-label="No timeout"
+                className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-800 accent-blue-500"
               />
               <span className="text-xs text-gray-400">No timeout</span>
             </label>
@@ -205,7 +224,7 @@ export function SubmitJobForm() {
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
             </svg>
           )}
-          {submitting ? "Submitting…" : "Submit Job"}
+          {submitting ? "Distributing…" : "Distribute File"}
         </button>
         <button
           type="button"

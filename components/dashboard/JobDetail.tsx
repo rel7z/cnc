@@ -27,11 +27,15 @@ function duration(start?: string, end?: string): string {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+function basename(p: string): string {
+  return p.split("/").filter(Boolean).pop() ?? p;
+}
+
 // ── Progress bar ──────────────────────────────────────────────────────────────
 
 function JobProgressBar({ job }: { job: Job }) {
   const total = job.total_tasks;
-  if (total === 0) return <p className="text-xs text-gray-500">No tasks yet</p>;
+  if (total === 0) return <p className="text-xs text-gray-500">No tasks yet — splitting file…</p>;
 
   const completedPct = Math.round((job.completed / total) * 100);
   const failedPct = Math.round((job.failed / total) * 100);
@@ -47,18 +51,9 @@ function JobProgressBar({ job }: { job: Job }) {
         aria-valuemax={100}
         aria-label={`${completedPct}% complete`}
       >
-        <div
-          className="bg-emerald-500 h-full transition-all duration-500"
-          style={{ width: `${completedPct}%` }}
-        />
-        <div
-          className="bg-red-500 h-full transition-all duration-500"
-          style={{ width: `${failedPct}%` }}
-        />
-        <div
-          className="bg-gray-600 h-full transition-all duration-500"
-          style={{ width: `${remaining}%` }}
-        />
+        <div className="bg-emerald-500 h-full transition-all duration-500" style={{ width: `${completedPct}%` }} />
+        <div className="bg-red-500 h-full transition-all duration-500" style={{ width: `${failedPct}%` }} />
+        <div className="bg-gray-600 h-full transition-all duration-500" style={{ width: `${remaining}%` }} />
       </div>
       <div className="flex items-center gap-4 text-xs text-gray-400">
         <span className="flex items-center gap-1.5">
@@ -73,9 +68,7 @@ function JobProgressBar({ job }: { job: Job }) {
           <span className="h-2 w-2 rounded-full bg-gray-600 inline-block" />
           {total - job.completed - job.failed} remaining
         </span>
-        <span className="ml-auto font-medium text-white">
-          {completedPct}% complete
-        </span>
+        <span className="ml-auto font-medium text-white">{completedPct}% complete</span>
       </div>
     </div>
   );
@@ -108,53 +101,55 @@ function TaskTable({ tasks }: { tasks: Task[] }) {
       <table className="w-full text-sm text-left">
         <thead className="text-xs text-gray-400 uppercase tracking-wider border-b border-gray-800">
           <tr>
-            <th className="py-2.5 px-4 font-medium">Task ID</th>
+            <th className="py-2.5 px-4 font-medium">Part</th>
+            <th className="py-2.5 px-4 font-medium">Worker receives</th>
             <th className="py-2.5 px-4 font-medium">Worker</th>
             <th className="py-2.5 px-4 font-medium">Status</th>
             <th className="py-2.5 px-4 font-medium">Duration</th>
-            <th className="py-2.5 px-4 font-medium">Output</th>
             <th className="py-2.5 px-4 font-medium">Retries</th>
+            <th className="py-2.5 px-4 font-medium">Error</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-800">
-          {tasks.map((task) => (
-            <tr key={task.id} className="hover:bg-gray-800/40 transition-colors">
-              <td className="py-2.5 px-4 font-mono text-xs text-gray-400 max-w-[180px]">
-                <span className="truncate block" title={task.id}>
-                  {task.id}
-                </span>
-              </td>
-              <td className="py-2.5 px-4 font-mono text-xs text-gray-400 max-w-[160px]">
-                <span className="truncate block" title={task.assigned_to}>
-                  {task.assigned_to ?? "—"}
-                </span>
-              </td>
-              <td className="py-2.5 px-4">
-                <StatusBadge status={task.status} />
-              </td>
-              <td className="py-2.5 px-4 text-xs text-gray-400 whitespace-nowrap">
-                {duration(task.started_at, task.completed_at)}
-              </td>
-              <td className="py-2.5 px-4 text-xs text-gray-400">
-                {task.error ? (
-                  <span className="text-red-400 truncate block max-w-[200px]" title={task.error}>
-                    {task.error}
+          {tasks.map((task) => {
+            const partNum = task.id.split("_").slice(-1)[0] ?? "?";
+            const destName = task.payload?.dest_name;
+            return (
+              <tr key={task.id} className="hover:bg-gray-800/40 transition-colors">
+                <td className="py-2.5 px-4 font-mono text-xs text-gray-400 tabular-nums">
+                  #{partNum}
+                </td>
+                <td className="py-2.5 px-4 font-mono text-xs text-emerald-400">
+                  {destName ? `~/${destName}` : "—"}
+                </td>
+                <td className="py-2.5 px-4 font-mono text-xs text-gray-400 max-w-[160px]">
+                  <span className="truncate block" title={task.assigned_to}>
+                    {task.assigned_to ?? "—"}
                   </span>
-                ) : task.result?.message ? (
-                  <span className="text-emerald-400">{task.result.message}</span>
-                ) : (
-                  "—"
-                )}
-              </td>
-              <td className="py-2.5 px-4 text-xs text-gray-400 tabular-nums">
-                {task.retry_count > 0 ? (
-                  <span className="text-yellow-400">{task.retry_count}</span>
-                ) : (
-                  "0"
-                )}
-              </td>
-            </tr>
-          ))}
+                </td>
+                <td className="py-2.5 px-4">
+                  <StatusBadge status={task.status} />
+                </td>
+                <td className="py-2.5 px-4 text-xs text-gray-400 whitespace-nowrap">
+                  {duration(task.started_at, task.completed_at)}
+                </td>
+                <td className="py-2.5 px-4 text-xs text-gray-400 tabular-nums">
+                  {task.retry_count > 0 ? (
+                    <span className="text-yellow-400">{task.retry_count}</span>
+                  ) : "0"}
+                </td>
+                <td className="py-2.5 px-4 text-xs text-gray-400">
+                  {task.error ? (
+                    <span className="text-red-400 truncate block max-w-[200px]" title={task.error}>
+                      {task.error}
+                    </span>
+                  ) : task.result?.message ? (
+                    <span className="text-emerald-400">{task.result.message}</span>
+                  ) : "—"}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -179,17 +174,18 @@ export function JobDetail({ jobId }: JobDetailProps) {
             Job <span className="font-mono text-gray-300">{jobId}</span> not found.
           </p>
           <p className="text-gray-600 text-xs mt-1">
-            It may have not loaded yet — the live connection will update this page automatically.
+            The live connection will update this page automatically.
           </p>
         </div>
       </div>
     );
   }
 
-  // Filter tasks belonging to this job, sorted by creation time.
   const jobTasks = Object.values(tasks)
     .filter((t) => t.job_id === jobId)
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+  const destFilename = job.input_file ? basename(job.input_file) : null;
 
   return (
     <div className="p-6 space-y-6">
@@ -197,15 +193,11 @@ export function JobDetail({ jobId }: JobDetailProps) {
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-base font-semibold text-white">
-              {job.name || job.id}
-            </h2>
+            <h2 className="text-base font-semibold text-white">{job.name || job.id}</h2>
             <p className="font-mono text-xs text-gray-500 mt-0.5">{job.id}</p>
           </div>
           <StatusBadge status={job.status} className="shrink-0" />
         </div>
-
-        {/* Progress */}
         <JobProgressBar job={job} />
       </div>
 
@@ -213,30 +205,31 @@ export function JobDetail({ jobId }: JobDetailProps) {
       <div className="bg-gray-900 border border-gray-800 rounded-xl px-5 py-1">
         <dl>
           <InfoRow label="Command">{job.command || "—"}</InfoRow>
-          <InfoRow label="Input file">{job.input_file || "—"}</InfoRow>
-          <InfoRow label="Workers">{job.workers > 0 ? String(job.workers) : "auto"}</InfoRow>
+          <InfoRow label="Source file">{job.input_file || "—"}</InfoRow>
+          <InfoRow label="Workers receive">
+            {destFilename ? (
+              <span className="text-emerald-400">~/{destFilename}</span>
+            ) : "—"}
+          </InfoRow>
+          <InfoRow label="Parts">{job.workers > 0 ? String(job.workers) : "auto"}</InfoRow>
           <InfoRow label="Timeout">
             {job.timeout_seconds === -1 ? (
               <span className="text-gray-400">none</span>
-            ) : (
-              `${job.timeout_seconds}s`
-            )}
+            ) : `${job.timeout_seconds}s`}
           </InfoRow>
           <InfoRow label="Created">{formatDate(job.created_at)}</InfoRow>
           <InfoRow label="Started">{formatDate(job.started_at)}</InfoRow>
           <InfoRow label="Completed">{formatDate(job.completed_at)}</InfoRow>
-          <InfoRow label="Duration">
-            {duration(job.started_at, job.completed_at)}
-          </InfoRow>
+          <InfoRow label="Duration">{duration(job.started_at, job.completed_at)}</InfoRow>
         </dl>
       </div>
 
       {/* Task list */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-white">Tasks</h3>
+          <h3 className="text-sm font-semibold text-white">Distribution</h3>
           <span className="text-xs text-gray-500">
-            {jobTasks.length} of {job.total_tasks} loaded
+            {jobTasks.length} of {job.total_tasks} parts
           </span>
         </div>
         <TaskTable tasks={jobTasks} />
