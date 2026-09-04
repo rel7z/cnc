@@ -1,6 +1,7 @@
 {
   "/_global-error/page": "app/_global-error/page.js",
   "/_not-found/page": "app/_not-found/page.js",
+  "/api/events/route": "app/api/events/route.js",
   "/dashboard/jobs/[id]/page": "app/dashboard/jobs/[id]/page.js",
   "/dashboard/jobs/new/page": "app/dashboard/jobs/new/page.js",
   "/dashboard/jobs/page": "app/dashboard/jobs/page.js",

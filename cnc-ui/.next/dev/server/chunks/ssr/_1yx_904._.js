@@ -211,9 +211,13 @@ __turbopack_context__.s([
     "toRecord",
     ()=>toRecord
 ]);
-const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
+// Server-side (SSR/RSC): always hit the Go server directly.
+// Client-side: go through the Next.js proxy at /api/*.
+const isServer = ("TURBOPACK compile-time value", "undefined") === "undefined";
+const BASE = ("TURBOPACK compile-time truthy", 1) ? process.env.GO_API_URL ?? "http://localhost:8080" : "TURBOPACK unreachable";
 async function apiFetch(path) {
-    const res = await fetch(`${BASE}${path}`, {
+    const url = ("TURBOPACK compile-time truthy", 1) ? `${BASE}${path}` : "TURBOPACK unreachable";
+    const res = await fetch(url, {
         cache: "no-store"
     });
     if (!res.ok) {

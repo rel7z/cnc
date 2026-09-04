@@ -215,7 +215,13 @@ export function JobDetail({ jobId }: JobDetailProps) {
           <InfoRow label="Command">{job.command || "—"}</InfoRow>
           <InfoRow label="Input file">{job.input_file || "—"}</InfoRow>
           <InfoRow label="Workers">{job.workers > 0 ? String(job.workers) : "auto"}</InfoRow>
-          <InfoRow label="Timeout">{job.timeout_seconds}s</InfoRow>
+          <InfoRow label="Timeout">
+            {job.timeout_seconds === -1 ? (
+              <span className="text-gray-400">none</span>
+            ) : (
+              `${job.timeout_seconds}s`
+            )}
+          </InfoRow>
           <InfoRow label="Created">{formatDate(job.created_at)}</InfoRow>
           <InfoRow label="Started">{formatDate(job.started_at)}</InfoRow>
           <InfoRow label="Completed">{formatDate(job.completed_at)}</InfoRow>

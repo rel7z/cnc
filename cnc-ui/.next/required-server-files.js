@@ -330,7 +330,13 @@ self.__SERVER_FILES_MANIFEST={
       "afterFiles": [
         {
           "source": "/api/:path*",
-          "destination": "http://localhost:8080/api/:path*"
+          "destination": "http://localhost:8080/api/:path*",
+          "missing": [
+            {
+              "type": "header",
+              "key": "x-skip-rewrite"
+            }
+          ]
         }
       ],
       "fallback": []

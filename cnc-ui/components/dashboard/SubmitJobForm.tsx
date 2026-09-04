@@ -9,6 +9,7 @@ interface FormState {
   input_file: string;
   workers: string;
   timeout_seconds: string;
+  no_timeout: boolean;
 }
 
 const defaults: FormState = {
@@ -17,6 +18,7 @@ const defaults: FormState = {
   input_file: "",
   workers: "",
   timeout_seconds: "300",
+  no_timeout: false,
 };
 
 function Field({
@@ -47,13 +49,17 @@ const inputClass =
   "placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 " +
   "transition-colors";
 
+const inputDisabledClass =
+  "w-full bg-gray-800/50 border border-gray-700/50 rounded-lg px-3 py-2 text-sm text-gray-500 " +
+  "cursor-not-allowed transition-colors";
+
 export function SubmitJobForm() {
   const router = useRouter();
   const [form, setForm] = useState<FormState>(defaults);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function set(key: keyof FormState, value: string) {
+  function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
@@ -62,11 +68,16 @@ export function SubmitJobForm() {
     setSubmitting(true);
     setError(null);
 
+    // -1 is the NoTimeout sentinel understood by the Go server.
+    const timeoutValue = form.no_timeout
+      ? -1
+      : parseInt(form.timeout_seconds, 10) || 300;
+
     const body: Record<string, unknown> = {
       name: form.name || form.input_file.split("/").pop(),
       command: form.command,
       input_file: form.input_file,
-      timeout_seconds: parseInt(form.timeout_seconds, 10) || 300,
+      timeout_seconds: timeoutValue,
     };
 
     const w = parseInt(form.workers, 10);
@@ -147,14 +158,32 @@ export function SubmitJobForm() {
           />
         </Field>
 
-        <Field label="Timeout per task (seconds)">
-          <input
-            type="number"
-            min={1}
-            className={inputClass}
-            value={form.timeout_seconds}
-            onChange={(e) => set("timeout_seconds", e.target.value)}
-          />
+        <Field label="Timeout per task">
+          <div className="space-y-2">
+            <div className="flex items-center gap-3">
+              <input
+                type="number"
+                min={1}
+                disabled={form.no_timeout}
+                className={form.no_timeout ? inputDisabledClass : inputClass}
+                placeholder="300"
+                value={form.no_timeout ? "" : form.timeout_seconds}
+                onChange={(e) => set("timeout_seconds", e.target.value)}
+                aria-label="Timeout in seconds"
+              />
+              <span className="text-xs text-gray-500 whitespace-nowrap">seconds</span>
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer select-none w-fit">
+              <input
+                type="checkbox"
+                checked={form.no_timeout}
+                onChange={(e) => set("no_timeout", e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500/50 accent-blue-500"
+                aria-label="No timeout"
+              />
+              <span className="text-xs text-gray-400">No timeout</span>
+            </label>
+          </div>
         </Field>
       </div>
 

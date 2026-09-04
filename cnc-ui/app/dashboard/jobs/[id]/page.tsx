@@ -74,7 +74,9 @@ export default async function JobDetailPage({ params }: JobDetailPageProps) {
               </div>
               <div className="flex justify-between">
                 <span className="text-xs text-gray-500">Timeout</span>
-                <span className="text-xs text-gray-300">{job.timeout_seconds}s</span>
+                <span className="text-xs text-gray-300">
+                  {job.timeout_seconds === -1 ? "none" : `${job.timeout_seconds}s`}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-xs text-gray-500">Created</span>

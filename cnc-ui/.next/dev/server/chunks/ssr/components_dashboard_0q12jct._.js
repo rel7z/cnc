@@ -119,7 +119,8 @@ const defaults = {
     command: "",
     input_file: "",
     workers: "",
-    timeout_seconds: "300"
+    timeout_seconds: "300",
+    no_timeout: false
 };
 function Field({ label, hint, required, children }) {
     return /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("div", {
@@ -134,13 +135,13 @@ function Field({ label, hint, required, children }) {
                         children: "*"
                     }, void 0, false, {
                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                        lineNumber: 37,
+                        lineNumber: 39,
                         columnNumber: 22
                     }, this)
                 ]
             }, void 0, true, {
                 fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                lineNumber: 35,
+                lineNumber: 37,
                 columnNumber: 7
             }, this),
             children,
@@ -149,17 +150,18 @@ function Field({ label, hint, required, children }) {
                 children: hint
             }, void 0, false, {
                 fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                lineNumber: 40,
+                lineNumber: 42,
                 columnNumber: 16
             }, this)
         ]
     }, void 0, true, {
         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-        lineNumber: 34,
+        lineNumber: 36,
         columnNumber: 5
     }, this);
 }
 const inputClass = "w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 " + "placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 " + "transition-colors";
+const inputDisabledClass = "w-full bg-gray-800/50 border border-gray-700/50 rounded-lg px-3 py-2 text-sm text-gray-500 " + "cursor-not-allowed transition-colors";
 function SubmitJobForm() {
     const router = (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$navigation$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["useRouter"])();
     const [form, setForm] = (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["useState"])(defaults);
@@ -175,11 +177,13 @@ function SubmitJobForm() {
         e.preventDefault();
         setSubmitting(true);
         setError(null);
+        // -1 is the NoTimeout sentinel understood by the Go server.
+        const timeoutValue = form.no_timeout ? -1 : parseInt(form.timeout_seconds, 10) || 300;
         const body = {
             name: form.name || form.input_file.split("/").pop(),
             command: form.command,
             input_file: form.input_file,
-            timeout_seconds: parseInt(form.timeout_seconds, 10) || 300
+            timeout_seconds: timeoutValue
         };
         const w = parseInt(form.workers, 10);
         if (w > 0) body.workers = w;
@@ -214,7 +218,7 @@ function SubmitJobForm() {
                         children: "Job"
                     }, void 0, false, {
                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                        lineNumber: 98,
+                        lineNumber: 109,
                         columnNumber: 9
                     }, this),
                     /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])(Field, {
@@ -230,12 +234,12 @@ function SubmitJobForm() {
                             required: true
                         }, void 0, false, {
                             fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                            lineNumber: 101,
+                            lineNumber: 112,
                             columnNumber: 11
                         }, this)
                     }, void 0, false, {
                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                        lineNumber: 100,
+                        lineNumber: 111,
                         columnNumber: 9
                     }, this),
                     /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])(Field, {
@@ -251,12 +255,12 @@ function SubmitJobForm() {
                             required: true
                         }, void 0, false, {
                             fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                            lineNumber: 116,
+                            lineNumber: 127,
                             columnNumber: 11
                         }, this)
                     }, void 0, false, {
                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                        lineNumber: 111,
+                        lineNumber: 122,
                         columnNumber: 9
                     }, this),
                     /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])(Field, {
@@ -271,12 +275,12 @@ function SubmitJobForm() {
                             onChange: (e)=>set("workers", e.target.value)
                         }, void 0, false, {
                             fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                            lineNumber: 130,
+                            lineNumber: 141,
                             columnNumber: 11
                         }, this)
                     }, void 0, false, {
                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                        lineNumber: 126,
+                        lineNumber: 137,
                         columnNumber: 9
                     }, this),
                     /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])(Field, {
@@ -290,36 +294,93 @@ function SubmitJobForm() {
                             onChange: (e)=>set("name", e.target.value)
                         }, void 0, false, {
                             fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                            lineNumber: 141,
+                            lineNumber: 152,
                             columnNumber: 11
                         }, this)
                     }, void 0, false, {
                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                        lineNumber: 140,
+                        lineNumber: 151,
                         columnNumber: 9
                     }, this),
                     /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])(Field, {
-                        label: "Timeout per task (seconds)",
-                        children: /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("input", {
-                            type: "number",
-                            min: 1,
-                            className: inputClass,
-                            value: form.timeout_seconds,
-                            onChange: (e)=>set("timeout_seconds", e.target.value)
-                        }, void 0, false, {
+                        label: "Timeout per task",
+                        children: /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("div", {
+                            className: "space-y-2",
+                            children: [
+                                /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("div", {
+                                    className: "flex items-center gap-3",
+                                    children: [
+                                        /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("input", {
+                                            type: "number",
+                                            min: 1,
+                                            disabled: form.no_timeout,
+                                            className: form.no_timeout ? inputDisabledClass : inputClass,
+                                            placeholder: "300",
+                                            value: form.no_timeout ? "" : form.timeout_seconds,
+                                            onChange: (e)=>set("timeout_seconds", e.target.value),
+                                            "aria-label": "Timeout in seconds"
+                                        }, void 0, false, {
+                                            fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
+                                            lineNumber: 164,
+                                            columnNumber: 15
+                                        }, this),
+                                        /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("span", {
+                                            className: "text-xs text-gray-500 whitespace-nowrap",
+                                            children: "seconds"
+                                        }, void 0, false, {
+                                            fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
+                                            lineNumber: 174,
+                                            columnNumber: 15
+                                        }, this)
+                                    ]
+                                }, void 0, true, {
+                                    fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
+                                    lineNumber: 163,
+                                    columnNumber: 13
+                                }, this),
+                                /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("label", {
+                                    className: "flex items-center gap-2 cursor-pointer select-none w-fit",
+                                    children: [
+                                        /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("input", {
+                                            type: "checkbox",
+                                            checked: form.no_timeout,
+                                            onChange: (e)=>set("no_timeout", e.target.checked),
+                                            className: "h-3.5 w-3.5 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500/50 accent-blue-500",
+                                            "aria-label": "No timeout"
+                                        }, void 0, false, {
+                                            fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
+                                            lineNumber: 177,
+                                            columnNumber: 15
+                                        }, this),
+                                        /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("span", {
+                                            className: "text-xs text-gray-400",
+                                            children: "No timeout"
+                                        }, void 0, false, {
+                                            fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
+                                            lineNumber: 184,
+                                            columnNumber: 15
+                                        }, this)
+                                    ]
+                                }, void 0, true, {
+                                    fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
+                                    lineNumber: 176,
+                                    columnNumber: 13
+                                }, this)
+                            ]
+                        }, void 0, true, {
                             fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                            lineNumber: 151,
+                            lineNumber: 162,
                             columnNumber: 11
                         }, this)
                     }, void 0, false, {
                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                        lineNumber: 150,
+                        lineNumber: 161,
                         columnNumber: 9
                     }, this)
                 ]
             }, void 0, true, {
                 fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                lineNumber: 97,
+                lineNumber: 108,
                 columnNumber: 7
             }, this),
             error && /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("div", {
@@ -327,7 +388,7 @@ function SubmitJobForm() {
                 children: error
             }, void 0, false, {
                 fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                lineNumber: 162,
+                lineNumber: 191,
                 columnNumber: 9
             }, this),
             /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("div", {
@@ -353,7 +414,7 @@ function SubmitJobForm() {
                                         strokeWidth: "4"
                                     }, void 0, false, {
                                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                                        lineNumber: 175,
+                                        lineNumber: 204,
                                         columnNumber: 15
                                     }, this),
                                     /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("path", {
@@ -362,20 +423,20 @@ function SubmitJobForm() {
                                         d: "M4 12a8 8 0 018-8v8z"
                                     }, void 0, false, {
                                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                                        lineNumber: 176,
+                                        lineNumber: 205,
                                         columnNumber: 15
                                     }, this)
                                 ]
                             }, void 0, true, {
                                 fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                                lineNumber: 174,
+                                lineNumber: 203,
                                 columnNumber: 13
                             }, this),
                             submitting ? "Submitting…" : "Submit Job"
                         ]
                     }, void 0, true, {
                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                        lineNumber: 168,
+                        lineNumber: 197,
                         columnNumber: 9
                     }, this),
                     /*#__PURE__*/ (0, __TURBOPACK__imported__module__$5b$project$5d2f$node_modules$2f$next$2f$dist$2f$server$2f$route$2d$modules$2f$app$2d$page$2f$vendored$2f$ssr$2f$react$2d$jsx$2d$dev$2d$runtime$2e$js__$5b$app$2d$ssr$5d$__$28$ecmascript$29$__["jsxDEV"])("button", {
@@ -385,19 +446,19 @@ function SubmitJobForm() {
                         children: "Cancel"
                     }, void 0, false, {
                         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                        lineNumber: 181,
+                        lineNumber: 210,
                         columnNumber: 9
                     }, this)
                 ]
             }, void 0, true, {
                 fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-                lineNumber: 167,
+                lineNumber: 196,
                 columnNumber: 7
             }, this)
         ]
     }, void 0, true, {
         fileName: "[project]/components/dashboard/SubmitJobForm.tsx",
-        lineNumber: 96,
+        lineNumber: 107,
         columnNumber: 5
     }, this);
 }
