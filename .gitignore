@@ -1,0 +1,13 @@
+bin/
+cnc-api/cnc
+cnc-api/cnc-server
+cnc-api/cnc-linux
+cnc-api/cnc-server-linux
+cnc-ui/node_modules/
+cnc-ui/.next/
+*.exe
+*.o
+*.so
+.DS_Store
+server_config.json
+cnc_data/

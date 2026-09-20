@@ -1,0 +1,5 @@
+{
+  "server_http": "http://localhost:8080",
+  "server_tcp": "localhost:9090",
+  "config_file": "./cnc_config.json"
+}

@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+:root {
+  --background: #030712;
+  --foreground: #f9fafb;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+@keyframes flash {
+  0%,
+  100% {
+    background-color: transparent;
+  }
+  50% {
+    background-color: rgb(59 130 246 / 0.08);
+  }
+}
+
+.row-flash {
+  animation: flash 0.8s ease-out;
+}

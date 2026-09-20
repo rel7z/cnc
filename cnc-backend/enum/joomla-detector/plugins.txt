@@ -1,0 +1,14 @@
+# Components
+com_gridbox
+
+# Libraries
+lib_astroid
+
+# System plugins
+plugin:system:astroid
+
+# Modules
+mod_menu
+
+# Templates
+tpl_cassiopeia

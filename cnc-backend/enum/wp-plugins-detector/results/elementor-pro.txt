@@ -1,0 +1,11 @@
+# Plugin        : elementor-pro
+# Version filter: (any)
+# Started       : 2026-09-13 08:14:20 UTC
+----------------------------------------
+cristianrosalescei.es
+xn--lilleblthalvmarathon-n0b.dk
+dramaluxury.com
+parakiting.nl
+----------------------------------------
+# Finished : 2026-09-13 08:14:26 UTC
+# Found    : 4

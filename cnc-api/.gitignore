@@ -1,0 +1,30 @@
+# Binaries
+cnc-server
+cnc-worker
+cnc
+cnc-server-linux
+cnc-worker-linux
+cnc-linux
+cnc-server-test
+
+# Data directories
+cnc_data/
+worker_data/
+upload_queue/
+
+# Google Drive credentials and tokens
+credentials.json
+token.json
+
+# State files
+.gdrive_state.json
+
+# OS files
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

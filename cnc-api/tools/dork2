@@ -1,0 +1,24 @@
+#!/bin/sh
+# dork2 launcher script
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Search locations for dork2 index.js
+for candidate in \
+  "$DIR/../../cnc-backend/google-parser/dork2/index.js" \
+  "$DIR/../cnc-backend/google-parser/dork2/index.js" \
+  "$DIR/google-parser/dork2/index.js" \
+  "/root/tools/google-parser/dork2/index.js" \
+  "/root/google-parser/dork2/index.js"; do
+  if [ -f "$candidate" ]; then
+    exec node "$candidate" "$@"
+  fi
+done
+
+# Fallback: check if index.js is in current directory
+if [ -f "index.js" ]; then
+  exec node index.js "$@"
+fi
+
+echo "[-] Error: dork2 index.js not found in expected paths" >&2
+exit 1
