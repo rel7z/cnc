@@ -1,0 +1,30 @@
+{
+  "http_addr": ":8080",
+  "tcp_addr": ":9090",
+  "data_dir": "./cnc_data",
+  "max_retries": 3,
+  "heartbeat_ttl": "30s",
+  "wp_plugins_dir": "~/plugins/wp",
+  "joomla_plugins_dir": "~/plugins/joomla",
+  "gdrive": {
+    "enabled": true,
+    "watch_dir": "~/merged",
+    "client_id": "720099164541-naqor10gbhs6a6uqodsnnq35ec7ol03l.apps.googleusercontent.com",
+    "client_secret": "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",
+    "token_path": "~/merged/.gdrive_token.json",
+    "upload_interval": "1s",
+    "parent_folder_id": "1J-NkR0WlEQ2Sqz8Z7yFXruyAlxQWjd73",
+    "state_file_path": "",
+    "delete_after_upload": false
+  },
+  "telegram": {
+    "enabled": true,
+    "bot_token": "8763217188:AAHQCttBHBskdaCqLiUkqqYAWnSg4c3SiRw",
+    "chat_id": "",
+    "webapp_url": "http://localhost:3000",
+    "notify_job_start": true,
+    "notify_job_complete": true,
+    "notify_job_fail": true,
+    "notify_worker_events": false
+  }
+}
