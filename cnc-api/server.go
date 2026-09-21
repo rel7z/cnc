@@ -1577,6 +1577,7 @@ if [ -d "tools" ]; then
 else
 	git clone https://github.com/rel7z/worker-tools.git tools || echo "Failed to clone tools, continuing..."
 fi
+chmod +x tools/* 2>/dev/null || true
 
 echo "[3/4] Creating Configuration..."
 cat << 'EOF' > server_config.json
