@@ -1,18 +1,35 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { X, Play, Loader2 } from "lucide-react";
+import { useDashboard } from "@/components/providers/EventProvider";
 
 interface DeployWorkerModalProps {
   onClose: () => void;
 }
 
 export function DeployWorkerModal({ onClose }: DeployWorkerModalProps) {
+  const { workers } = useDashboard();
   const [ips, setIps] = useState("");
   const [username, setUsername] = useState("root");
   const [password, setPassword] = useState("");
   const [isDeploying, setIsDeploying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (Object.keys(workers).length > 0) {
+      const uniqueIps = Array.from(
+        new Set(
+          Object.values(workers)
+            .map((w) => w.address.split(":")[0])
+            .filter((ip) => ip !== "127.0.0.1" && ip !== "localhost" && ip.length > 0)
+        )
+      );
+      if (uniqueIps.length > 0) {
+        setIps(uniqueIps.join("\n"));
+      }
+    }
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
