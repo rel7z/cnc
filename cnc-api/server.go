@@ -649,7 +649,7 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 
 		switch msg.Type {
 		case MsgTypeRegisterWorker:
-			registeredWorkerID = s.handleRegisterWorker(&msg, sendCh)
+			registeredWorkerID = s.handleRegisterWorker(&msg, sendCh, conn.RemoteAddr().String())
 
 		case MsgTypeWorkerHeartbeat:
 			s.handleWorkerHeartbeat(&msg)
@@ -678,7 +678,7 @@ cleanup:
 
 // ── Message handlers ─────────────────────────────────────────────────────────
 
-func (s *Server) handleRegisterWorker(msg *Message, sendCh chan *Message) string {
+func (s *Server) handleRegisterWorker(msg *Message, sendCh chan *Message, remoteAddr string) string {
 	var p RegisterWorkerPayload
 	if err := msg.UnmarshalPayload(&p); err != nil {
 		log.Printf("Invalid register payload: %v", err)
@@ -686,6 +686,11 @@ func (s *Server) handleRegisterWorker(msg *Message, sendCh chan *Message) string
 	}
 
 	s.mu.Lock()
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		p.Worker.Address = host
+	} else {
+		p.Worker.Address = remoteAddr
+	}
 	p.Worker.Registered = time.Now()
 	p.Worker.LastSeen = time.Now()
 	p.Worker.Status = WorkerStatusOnline
