@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { X, Play, Loader2 } from "lucide-react";
 import { useDashboard } from "@/components/providers/EventProvider";
 
@@ -14,7 +14,14 @@ export function DeployWorkerModal({ onClose }: DeployWorkerModalProps) {
   const [username, setUsername] = useState("root");
   const [password, setPassword] = useState("");
   const [isDeploying, setIsDeploying] = useState(false);
+  const [isDone, setIsDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string>("");
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
 
   useEffect(() => {
     if (Object.keys(workers).length > 0) {
@@ -54,8 +61,20 @@ export function DeployWorkerModal({ onClose }: DeployWorkerModalProps) {
         throw new Error("Failed to trigger deployment");
       }
       
-      // Close modal on success (the deployment happens async in background)
-      onClose();
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("Stream not supported");
+      
+      const decoder = new TextDecoder();
+      
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        setLogs(prev => prev + text);
+      }
+      
+      setIsDeploying(false);
+      setIsDone(true);
     } catch (err: any) {
       setError(err.message || "An error occurred");
       setIsDeploying(false);
@@ -126,37 +145,60 @@ export function DeployWorkerModal({ onClose }: DeployWorkerModalProps) {
             </div>
             
             <p className="text-xs text-gray-500 leading-relaxed mt-2">
-              The CNC server will SSH into these IPs in the background, download the latest worker binary, and start the systemd service automatically. Deployments take a few seconds and workers will appear in the table once online.
+              The CNC server will SSH into these IPs, pull the latest worker code, and start the systemd service.
             </p>
           </form>
+
+          {(logs || isDeploying || isDone) && (
+            <div className="mt-6">
+              <h3 className="text-sm font-medium text-gray-300 mb-2">Deployment Logs</h3>
+              <div className="bg-black border border-gray-800 rounded-md p-3 h-48 overflow-y-auto font-mono text-xs text-gray-300 whitespace-pre-wrap break-all shadow-inner">
+                {logs}
+                {isDeploying && <span className="animate-pulse">_</span>}
+                <div ref={logEndRef} />
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="p-4 border-t border-gray-800 bg-gray-900/50 flex justify-end gap-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 text-sm font-medium text-gray-300 hover:text-white transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            form="deploy-form"
-            disabled={isDeploying}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-md transition-colors disabled:opacity-50"
-          >
-            {isDeploying ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Deploying...
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4" />
-                Deploy Workers
-              </>
-            )}
-          </button>
+          {isDone ? (
+            <button
+              onClick={onClose}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-md transition-colors"
+            >
+              Done
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={isDeploying}
+                className="px-4 py-2 text-sm font-medium text-gray-300 hover:text-white transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                form="deploy-form"
+                disabled={isDeploying}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-md transition-colors disabled:opacity-50"
+              >
+                {isDeploying ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Deploying...
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-4 h-4" />
+                    Deploy Workers
+                  </>
+                )}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

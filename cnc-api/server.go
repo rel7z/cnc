@@ -1503,9 +1503,16 @@ func (s *Server) handleDeployWorkerAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// We determine our own IP or domain to pass to the worker.
-	// For simplicity, we can extract it from the Host header.
-	// We'll strip the port and default to port 9090.
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
 	host := r.Host
 	if strings.Contains(host, ":") {
 		host, _, _ = net.SplitHostPort(host)
@@ -1513,22 +1520,40 @@ func (s *Server) handleDeployWorkerAPI(w http.ResponseWriter, r *http.Request) {
 	serverAddr := host + ":9090"
 	serverHTTPAddr := "http://" + serverAddr
 
-	go func() {
-		for _, ip := range req.IPs {
-			ip := strings.TrimSpace(ip)
-			if ip == "" {
-				continue
-			}
-			go s.deployWorkerViaSSH(ip, req.Username, req.Password, serverAddr, serverHTTPAddr)
+	logChan := make(chan string, 100)
+	var wg sync.WaitGroup
+
+	for _, ip := range req.IPs {
+		ip := strings.TrimSpace(ip)
+		if ip == "" {
+			continue
 		}
+		wg.Add(1)
+		go func(targetIP string) {
+			defer wg.Done()
+			s.deployWorkerViaSSH(targetIP, req.Username, req.Password, serverAddr, serverHTTPAddr, logChan)
+		}(ip)
+	}
+
+	go func() {
+		wg.Wait()
+		close(logChan)
 	}()
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "deploying"})
+	for msg := range logChan {
+		fmt.Fprintf(w, "%s\n", msg)
+		flusher.Flush()
+	}
 }
 
-func (s *Server) deployWorkerViaSSH(ip, username, password, serverAddr, serverHTTPAddr string) {
-	log.Printf("Starting worker deployment to %s...", ip)
+func (s *Server) deployWorkerViaSSH(ip, username, password, serverAddr, serverHTTPAddr string, logChan chan<- string) {
+	sendLog := func(format string, args ...interface{}) {
+		msg := fmt.Sprintf("[%s] %s", ip, fmt.Sprintf(format, args...))
+		log.Print(msg)
+		logChan <- msg
+	}
+
+	sendLog("Starting deployment...")
 
 	config := &ssh.ClientConfig{
 		User: username,
@@ -1546,14 +1571,14 @@ func (s *Server) deployWorkerViaSSH(ip, username, password, serverAddr, serverHT
 
 	client, err := ssh.Dial("tcp", target, config)
 	if err != nil {
-		log.Printf("Failed to dial SSH to %s: %v", ip, err)
+		sendLog("Failed to dial SSH: %v", err)
 		return
 	}
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		log.Printf("Failed to create SSH session on %s: %v", ip, err)
+		sendLog("Failed to create SSH session: %v", err)
 		return
 	}
 	defer session.Close()
@@ -1572,7 +1597,7 @@ chmod +x cnc-worker-linux
 echo "[2/4] Setting up Tools..."
 if [ -d "tools" ]; then
 	cd tools
-	git pull origin main || echo "Failed to pull tools, continuing..."
+	git fetch origin main && git reset --hard origin/main || echo "Failed to pull tools, continuing..."
 	cd ..
 else
 	git clone https://github.com/rel7z/worker-tools.git tools || echo "Failed to clone tools, continuing..."
@@ -1613,13 +1638,48 @@ systemctl restart cnc-worker
 
 echo "Deployment successful on $(hostname -I)"
 `, serverAddr)
-
-	output, err := session.CombinedOutput(script)
+	stdoutPipe, err := session.StdoutPipe()
 	if err != nil {
-		log.Printf("Deployment script failed on %s: %v\nOutput: %s", ip, err, string(output))
+		sendLog("Failed to get stdout pipe: %v", err)
 		return
 	}
-	log.Printf("Successfully deployed worker to %s. Output:\n%s", ip, string(output))
+	stderrPipe, err := session.StderrPipe()
+	if err != nil {
+		sendLog("Failed to get stderr pipe: %v", err)
+		return
+	}
+
+	var outputWg sync.WaitGroup
+	outputWg.Add(2)
+
+	go func() {
+		defer outputWg.Done()
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			sendLog("%s", scanner.Text())
+		}
+	}()
+
+	go func() {
+		defer outputWg.Done()
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			sendLog("ERR: %s", scanner.Text())
+		}
+	}()
+
+	if err := session.Start(script); err != nil {
+		sendLog("Deployment script failed to start: %v", err)
+		return
+	}
+
+	outputWg.Wait()
+
+	if err := session.Wait(); err != nil {
+		sendLog("Deployment script finished with error: %v", err)
+		return
+	}
+	sendLog("Deployment script finished successfully.")
 }
 
 func (s *Server) handleJobCancelAPI(w http.ResponseWriter, r *http.Request, jobID string) {
