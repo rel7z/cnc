@@ -356,6 +356,8 @@ def setup_server(install_dir=None):
         log_info(f"Compiling server and tools via Makefile in {api_dir}...")
         run_cmd("export PATH=$PATH:/usr/local/go/bin && make build", cwd=api_dir)
         server_bin = os.path.join(api_dir, "cnc-server")
+        if os.path.exists(server_bin):
+            run_cmd(f"cp -r {api_dir}/tools {install_dir}/")
         log_success("Backend compiled successfully.")
     elif server_bin and os.path.exists(server_bin):
         log_success(f"Using server binary: {server_bin}")
@@ -558,7 +560,9 @@ def setup_update(install_dir=None):
             server_bin = os.path.join(api_dir, "cnc-server")
             if os.path.exists(server_bin):
                 run_cmd(f"rm -f {install_dir}/cnc-server-linux && cp {server_bin} {install_dir}/cnc-server-linux")
-                log_success("Backend recompiled and binary updated.")
+                # Ensure the built tools are copied to the main install directory where the server runs
+                run_cmd(f"cp -r {api_dir}/tools {install_dir}/")
+                log_success("Backend recompiled, binary and tools updated.")
         else:
             log_warn("Could not find cnc-api directory or Makefile. Skipping backend compilation.")
 
