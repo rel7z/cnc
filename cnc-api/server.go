@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // Server is the CNC command-and-control server. It accepts worker connections
@@ -270,6 +272,8 @@ func (s *Server) Start() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/workers", s.handleWorkersAPI)
+	mux.HandleFunc("/api/workers/deploy", s.handleDeployWorkerAPI)
+	mux.HandleFunc("/download/cnc-worker-linux", s.handleDownloadWorker)
 	mux.HandleFunc("/api/jobs", s.handleJobsAPI)
 	mux.HandleFunc("/api/jobs/", s.handleJobsSubAPI)
 	mux.HandleFunc("/api/tasks", s.handleTasksAPI)
@@ -653,6 +657,9 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		case MsgTypeTaskResult:
 			s.handleTaskResult(&msg)
 
+		case MsgTypeTaskStream:
+			s.handleTaskStream(&msg)
+
 		case MsgTypeShutdownWorker:
 			log.Printf("Worker at %s requested shutdown", conn.RemoteAddr())
 			goto cleanup
@@ -728,6 +735,42 @@ func (s *Server) handleWorkerHeartbeat(msg *Message) {
 	}
 }
 
+func (s *Server) handleTaskStream(msg *Message) {
+	var p TaskStreamPayload
+	if err := msg.UnmarshalPayload(&p); err != nil {
+		log.Printf("Invalid task stream payload: %v", err)
+		return
+	}
+
+	s.mu.RLock()
+	task, ok := s.tasks[p.TaskID]
+	if !ok {
+		s.mu.RUnlock()
+		return
+	}
+	jobCopy := s.jobs[task.JobID]
+	s.mu.RUnlock()
+
+	// Only stream stdout to the GDrive watcher if it's enabled and requested
+	if jobCopy != nil && jobCopy.OutputFile != "" && s.config.GDrive != nil && s.config.GDrive.WatchDir != "" {
+		if p.Chunk != "" && !p.IsStderr {
+			watchDir := ExpandPath(s.config.GDrive.WatchDir)
+			outPath := filepath.Join(watchDir, jobCopy.OutputFile)
+			
+			// O_APPEND allows concurrent processes/threads to append atomically
+			f, err := os.OpenFile(outPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				log.Printf("Failed to open watcher output file %s: %v", outPath, err)
+			} else {
+				if _, err := f.WriteString(p.Chunk); err != nil {
+					log.Printf("Failed to write stream to watcher output file %s: %v", outPath, err)
+				}
+				f.Close()
+			}
+		}
+	}
+}
+
 func (s *Server) handleTaskResult(msg *Message) {
 	var p TaskResultPayload
 	if err := msg.UnmarshalPayload(&p); err != nil {
@@ -800,26 +843,7 @@ func (s *Server) handleTaskResult(msg *Message) {
 
 	s.mu.Unlock()
 
-	// Route output to watcher directory if this job specifies an OutputFile.
-	if jobCopy != nil && jobCopy.OutputFile != "" && s.config.GDrive != nil && s.config.GDrive.WatchDir != "" {
-		if p.Result != nil && p.Result.Stdout != "" {
-			watchDir := ExpandPath(s.config.GDrive.WatchDir)
-			outPath := filepath.Join(watchDir, jobCopy.OutputFile)
-			f, err := os.OpenFile(outPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-			if err != nil {
-				log.Printf("Failed to open watcher output file %s: %v", outPath, err)
-			} else {
-				stdout := p.Result.Stdout
-				if !strings.HasSuffix(stdout, "\n") {
-					stdout += "\n"
-				}
-				if _, err := f.WriteString(stdout); err != nil {
-					log.Printf("Failed to write stdout to watcher output file %s: %v", outPath, err)
-				}
-				f.Close()
-			}
-		}
-	}
+	// (Output is now routed to the watcher directory in real-time via handleTaskStream)
 
 	s.broadcast(SSEEvent{Type: SSEEventTask, Payload: taskCopy})
 	if jobCopy != nil {
@@ -1427,6 +1451,244 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	json.NewEncoder(w).Encode(v) //nolint:errcheck
 }
 
+func (s *Server) handleDownloadWorker(w http.ResponseWriter, r *http.Request) {
+	exePath, err := os.Executable()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	dir := filepath.Dir(exePath)
+	workerPath := filepath.Join(dir, "cnc-worker-linux")
+	if _, err := os.Stat(workerPath); os.IsNotExist(err) {
+		// fallback to current directory
+		workerPath = "cnc-worker-linux"
+	}
+	
+	if _, err := os.Stat(workerPath); os.IsNotExist(err) {
+		http.Error(w, "worker binary not found on server", http.StatusNotFound)
+		return
+	}
+	
+	w.Header().Set("Content-Disposition", "attachment; filename=cnc-worker-linux")
+	http.ServeFile(w, r, workerPath)
+}
+
+type DeployWorkerRequest struct {
+	IPs      []string `json:"ips"`
+	Username string   `json:"username"`
+	Password string   `json:"password"`
+}
+
+func (s *Server) handleDeployWorkerAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req DeployWorkerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// We determine our own IP or domain to pass to the worker.
+	// For simplicity, we can extract it from the Host header.
+	// We'll strip the port and default to port 9090.
+	host := r.Host
+	if strings.Contains(host, ":") {
+		host, _, _ = net.SplitHostPort(host)
+	}
+	serverAddr := host + ":9090"
+	serverHTTPAddr := "http://" + serverAddr
+
+	go func() {
+		for _, ip := range req.IPs {
+			ip := strings.TrimSpace(ip)
+			if ip == "" {
+				continue
+			}
+			go s.deployWorkerViaSSH(ip, req.Username, req.Password, serverAddr, serverHTTPAddr)
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "deploying"})
+}
+
+func (s *Server) deployWorkerViaSSH(ip, username, password, serverAddr, serverHTTPAddr string) {
+	log.Printf("Starting worker deployment to %s...", ip)
+
+	config := &ssh.ClientConfig{
+		User: username,
+		Auth: []ssh.AuthMethod{
+			ssh.Password(password),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         10 * time.Second,
+	}
+
+	target := ip
+	if !strings.Contains(target, ":") {
+		target = target + ":22"
+	}
+
+	client, err := ssh.Dial("tcp", target, config)
+	if err != nil {
+		log.Printf("Failed to dial SSH to %s: %v", ip, err)
+		return
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		log.Printf("Failed to create SSH session on %s: %v", ip, err)
+		return
+	}
+	defer session.Close()
+
+	// Robust bash script that sets up the worker environment.
+	script := fmt.Sprintf(`
+set -e
+
+mkdir -p /root/cnc-worker-node
+cd /root/cnc-worker-node
+
+echo "[1/4] Downloading CNC Worker Binary..."
+curl -s -L -o cnc-worker-linux "https://github.com/rel7z/cnc-deploy/raw/refs/heads/main/cnc-worker-linux"
+chmod +x cnc-worker-linux
+
+echo "[2/4] Setting up Tools..."
+if [ -d "tools" ]; then
+	cd tools
+	git pull origin main || echo "Failed to pull tools, continuing..."
+	cd ..
+else
+	git clone https://github.com/rel7z/worker-tools.git tools || echo "Failed to clone tools, continuing..."
+fi
+
+echo "[3/4] Creating Configuration..."
+cat << 'EOF' > server_config.json
+{
+  "server_addr": "%s",
+  "worker_id": "worker_$(hostname -s)_$RANDOM",
+  "max_tasks": 0,
+  "data_dir": "./worker_data"
+}
+EOF
+
+echo "[4/4] Starting systemd service..."
+cat << 'EOF' > /etc/systemd/system/cnc-worker.service
+[Unit]
+Description=CNC Worker Node
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/cnc-worker-node
+ExecStart=/root/cnc-worker-node/cnc-worker-linux -config=/root/cnc-worker-node/server_config.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable cnc-worker
+systemctl restart cnc-worker
+
+echo "Deployment successful on $(hostname -I)"
+`, serverAddr)
+
+	output, err := session.CombinedOutput(script)
+	if err != nil {
+		log.Printf("Deployment script failed on %s: %v\nOutput: %s", ip, err, string(output))
+		return
+	}
+	log.Printf("Successfully deployed worker to %s. Output:\n%s", ip, string(output))
+}
+
+func (s *Server) handleJobCancelAPI(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.mu.Lock()
+	job, ok := s.jobs[jobID]
+	if !ok {
+		s.mu.Unlock()
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	if job.Status != "running" && job.Status != "pending" {
+		s.mu.Unlock()
+		http.Error(w, "job is not in a cancellable state", http.StatusBadRequest)
+		return
+	}
+
+	job.Status = "cancelled"
+	now := time.Now()
+	job.CompletedAt = &now
+
+	// Collect tasks to cancel
+	var tasksToCancel []*Task
+	var workersToNotify []string
+
+	for _, task := range s.tasks {
+		if task.JobID == jobID {
+			if task.Status == TaskStatusPending || task.Status == TaskStatusAssigned || task.Status == TaskStatusRunning {
+				task.Status = TaskStatusCancelled
+				task.CompletedAt = &now
+				
+				if task.AssignedTo != "" {
+					tasksToCancel = append(tasksToCancel, task)
+					workersToNotify = append(workersToNotify, task.AssignedTo)
+					
+					// Free up worker load
+					if worker, ok := s.workers[task.AssignedTo]; ok {
+						worker.CurrentLoad--
+						if worker.CurrentLoad < 0 {
+							worker.CurrentLoad = 0
+						}
+						if worker.CurrentLoad < worker.MaxTasks {
+							worker.Status = WorkerStatusOnline
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	jobCopy := *job
+	s.mu.Unlock()
+
+	// Notify workers to kill their running processes
+	for i, task := range tasksToCancel {
+		workerID := workersToNotify[i]
+		msg, _ := NewMessage(MsgTypeCancelTask, CancelTaskPayload{TaskID: task.ID})
+		
+		s.mu.RLock()
+		worker, ok := s.workers[workerID]
+		s.mu.RUnlock()
+		
+		if ok && worker.SendCh != nil {
+			select {
+			case worker.SendCh <- msg:
+			default:
+			}
+		}
+	}
+
+	s.broadcast(SSEEvent{Type: SSEEventJob, Payload: jobCopy})
+	s.broadcastStats()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "cancelled"})
+}
+
 func (s *Server) handleWorkersAPI(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	list := make([]*Worker, 0, len(s.workers))
@@ -1480,6 +1742,11 @@ func (s *Server) handleJobsSubAPI(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(path, "/tasks") {
 		jobID := strings.TrimSuffix(path, "/tasks")
 		s.handleJobTasksAPI(w, r, jobID)
+		return
+	}
+	if strings.HasSuffix(path, "/cancel") {
+		jobID := strings.TrimSuffix(path, "/cancel")
+		s.handleJobCancelAPI(w, r, jobID)
 		return
 	}
 	s.handleJobByIDAPI(w, r)

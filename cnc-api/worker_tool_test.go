@@ -10,7 +10,9 @@ import (
 
 func TestWorkerExecuteTaskToolsResolution(t *testing.T) {
 	agent := &WorkerAgent{
-		ctx: context.Background(),
+		ctx:         context.Background(),
+		taskCancels: make(map[string]context.CancelFunc),
+		config:      &WorkerConfig{WorkerID: "test-worker"},
 	}
 
 	// 1. Test running an unknown command produces exit 127 with diagnostic hint

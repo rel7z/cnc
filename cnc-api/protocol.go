@@ -38,6 +38,7 @@ const (
 	TaskStatusRunning   TaskStatus = "running"
 	TaskStatusCompleted TaskStatus = "completed"
 	TaskStatusFailed    TaskStatus = "failed"
+	TaskStatusCancelled TaskStatus = "cancelled"
 )
 
 // WorkerStatus tracks whether a worker is available.
@@ -163,7 +164,9 @@ const (
 	MsgTypeRegisterWorker  = "register_worker"
 	MsgTypeWorkerHeartbeat = "worker_heartbeat"
 	MsgTypeAssignTask      = "assign_task"
+	MsgTypeTaskStream      = "task_stream"
 	MsgTypeTaskResult      = "task_result"
+	MsgTypeCancelTask      = "cancel_task"
 	MsgTypeShutdownWorker  = "shutdown_worker"
 )
 
@@ -179,8 +182,19 @@ type WorkerHeartbeatPayload struct {
 	CurrentLoad int          `json:"current_load"`
 }
 
+type TaskStreamPayload struct {
+	TaskID   string `json:"task_id"`
+	WorkerID string `json:"worker_id"`
+	Chunk    string `json:"chunk"`
+	IsStderr bool   `json:"is_stderr"`
+}
+
 type AssignTaskPayload struct {
 	Task Task `json:"task"`
+}
+
+type CancelTaskPayload struct {
+	TaskID string `json:"task_id"`
 }
 
 type TaskResultPayload struct {

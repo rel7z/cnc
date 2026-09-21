@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import { useDashboard } from "@/components/providers/EventProvider";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TaskTable } from "@/components/dashboard/TaskTable";
@@ -87,7 +89,22 @@ interface JobDetailProps {
 
 export function JobDetail({ jobId }: JobDetailProps) {
   const { jobs, tasks } = useDashboard();
+  const [isCancelling, setIsCancelling] = useState(false);
   const job = jobs[jobId];
+
+  const handleCancel = async () => {
+    if (!confirm("Are you sure you want to forcefully cancel this job? All running tasks will be killed.")) return;
+    setIsCancelling(true);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+      if (!res.ok) throw new Error("Failed to cancel job");
+    } catch (err) {
+      console.error(err);
+      alert("Error cancelling job");
+    } finally {
+      setIsCancelling(false);
+    }
+  };
 
   if (!job) {
     return (
@@ -120,7 +137,18 @@ export function JobDetail({ jobId }: JobDetailProps) {
             <h2 className="text-base font-semibold text-white">{job.name || job.id}</h2>
             <p className="font-mono text-xs text-gray-500 mt-0.5">{job.id}</p>
           </div>
-          <StatusBadge status={job.status} className="shrink-0" />
+          <div className="flex items-center gap-3">
+            <StatusBadge status={job.status} className="shrink-0" />
+            {(job.status === "running" || job.status === "pending") && (
+              <button
+                onClick={handleCancel}
+                disabled={isCancelling}
+                className="px-3 py-1 bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 rounded-md text-xs font-medium transition-colors disabled:opacity-50"
+              >
+                {isCancelling ? "Cancelling..." : "Cancel Job"}
+              </button>
+            )}
+          </div>
         </div>
         <JobProgressBar job={job} />
       </div>

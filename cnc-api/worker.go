@@ -29,6 +29,10 @@ type WorkerAgent struct {
 
 	// active tasks: taskID → *Task
 	tasks map[string]*Task
+	
+	// task cancellation functions: taskID -> cancel func
+	taskCancels   map[string]context.CancelFunc
+	taskCancelsMu sync.Mutex
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -112,10 +116,11 @@ func NewWorkerAgent(config *WorkerConfig) *WorkerAgent {
 			MaxTasks:   config.MaxTasks,
 			Registered: time.Now(),
 		},
-		tasks:  make(map[string]*Task),
-		ctx:    ctx,
-		cancel: cancel,
-		stats:  workerStats{StartTime: time.Now()},
+		tasks:       make(map[string]*Task),
+		taskCancels: make(map[string]context.CancelFunc),
+		ctx:         ctx,
+		cancel:      cancel,
+		stats:       workerStats{StartTime: time.Now()},
 	}
 }
 
@@ -351,6 +356,16 @@ func (w *WorkerAgent) handleMessage(msg *Message) {
 		}
 	case MsgTypeAssignTask:
 		w.handleAssignTask(msg)
+	case MsgTypeCancelTask:
+		var p CancelTaskPayload
+		if err := msg.UnmarshalPayload(&p); err == nil {
+			log.Printf("Received cancellation request for task %s", p.TaskID)
+			w.taskCancelsMu.Lock()
+			if c, ok := w.taskCancels[p.TaskID]; ok {
+				c()
+			}
+			w.taskCancelsMu.Unlock()
+		}
 	case MsgTypeShutdownWorker:
 		log.Println("Received shutdown from server")
 		w.cancel()
@@ -451,7 +466,17 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 		}
 		ctx, cancel = context.WithTimeout(w.ctx, timeout)
 	}
-	defer cancel()
+	
+	w.taskCancelsMu.Lock()
+	w.taskCancels[task.ID] = cancel
+	w.taskCancelsMu.Unlock()
+	
+	defer func() {
+		cancel()
+		w.taskCancelsMu.Lock()
+		delete(w.taskCancels, task.ID)
+		w.taskCancelsMu.Unlock()
+	}()
 
 	// ── 4. Run the command ────────────────────────────────────────────────
 	cwd, _ := os.Getwd()
@@ -488,8 +513,12 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	
+	stdoutStream := &streamWriter{w: w, taskID: task.ID, isStderr: false}
+	stderrStream := &streamWriter{w: w, taskID: task.ID, isStderr: true}
+	
+	cmd.Stdout = io.MultiWriter(&stdout, stdoutStream)
+	cmd.Stderr = io.MultiWriter(&stderr, stderrStream)
 
 	runErr := cmd.Run()
 
@@ -565,4 +594,27 @@ func backoff(attempt int) time.Duration {
 		d = 30 * time.Second
 	}
 	return d
+}
+
+// ── Streaming support ─────────────────────────────────────────────────────────
+
+type streamWriter struct {
+	w        *WorkerAgent
+	taskID   string
+	isStderr bool
+}
+
+func (s *streamWriter) Write(p []byte) (n int, err error) {
+	msg, err := NewMessage(MsgTypeTaskStream, TaskStreamPayload{
+		TaskID:   s.taskID,
+		WorkerID: s.w.config.WorkerID,
+		Chunk:    string(p),
+		IsStderr: s.isStderr,
+	})
+	if err == nil {
+		// send returns quickly because it's just encoding JSON and writing to net.Conn
+		// If it fails, we ignore the error and keep reading the stream
+		_ = s.w.send(msg)
+	}
+	return len(p), nil
 }

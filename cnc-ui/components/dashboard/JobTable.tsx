@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useDashboard } from "@/components/providers/EventProvider";
@@ -73,6 +74,23 @@ function formatDate(isoString: string): string {
 export function JobTable() {
   const { jobs } = useDashboard();
   const router = useRouter();
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
+
+  const handleCancel = async (e: React.MouseEvent, jobId: string) => {
+    e.stopPropagation();
+    if (!confirm("Are you sure you want to forcefully cancel this job? All running tasks will be killed.")) return;
+    setCancellingJobId(jobId);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+      if (!res.ok) throw new Error("Failed to cancel job");
+    } catch (err) {
+      console.error(err);
+      alert("Error cancelling job");
+    } finally {
+      setCancellingJobId(null);
+    }
+  };
+
   const jobList = Object.values(jobs).sort(
     (a, b) =>
       new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
@@ -99,6 +117,7 @@ export function JobTable() {
             <th className="py-3 px-4 font-medium">Status</th>
             <th className="py-3 px-4 font-medium">Progress</th>
             <th className="py-3 px-4 font-medium">Created</th>
+            <th className="py-3 px-4 font-medium">Actions</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-800">
@@ -136,6 +155,17 @@ export function JobTable() {
               </td>
               <td className="py-3 px-4 text-xs text-gray-400 whitespace-nowrap">
                 {formatDate(job.created_at)}
+              </td>
+              <td className="py-3 px-4">
+                {(job.status === "running" || job.status === "pending") && (
+                  <button
+                    onClick={(e) => handleCancel(e, job.id)}
+                    disabled={cancellingJobId === job.id}
+                    className="px-2 py-1 bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 rounded text-xs font-medium transition-colors disabled:opacity-50"
+                  >
+                    {cancellingJobId === job.id ? "Cancelling..." : "Cancel"}
+                  </button>
+                )}
               </td>
             </tr>
           ))}

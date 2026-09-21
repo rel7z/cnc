@@ -143,6 +143,40 @@ def ensure_node20():
         else:
             log_warn("Continuing without automatic Node.js installation. UI build may fail if Node is missing.")
 
+def ensure_golang():
+    """Ensure Go is installed for compiling the server and tools."""
+    if shutil.which("go"):
+        log_success(f"Go is already installed: {run_cmd('go version', capture=True)}")
+        return True
+
+    log_info("Go is required to compile the backend server and tools.")
+    install_go = ask_yes_no("Install Go 1.23.0 automatically?", default_yes=True)
+    if install_go:
+        sudo = "" if is_root() else "sudo "
+        log_info("Downloading and installing Go 1.23.0...")
+        run_cmd("wget -q -O /tmp/go.tar.gz https://go.dev/dl/go1.23.0.linux-amd64.tar.gz")
+        run_cmd(f"{sudo}rm -rf /usr/local/go && {sudo}tar -C /usr/local -xzf /tmp/go.tar.gz")
+        
+        # Add to path for the current session
+        os.environ["PATH"] += os.pathsep + "/usr/local/go/bin"
+        
+        # Add to global profile for future sessions
+        try:
+            profile_path = "/etc/profile.d/golang.sh"
+            tmp_profile = "/tmp/golang.sh"
+            with open(tmp_profile, "w") as f:
+                f.write('export PATH=$PATH:/usr/local/go/bin\n')
+            run_cmd(f"{sudo}mv {tmp_profile} {profile_path}")
+            run_cmd(f"{sudo}chmod +x {profile_path}")
+        except Exception as e:
+            log_warn(f"Could not add Go to global profile: {e}")
+            
+        log_success(f"Go installed: {run_cmd('/usr/local/go/bin/go version', capture=True)}")
+        return True
+    else:
+        log_warn("Continuing without Go. Backend compilation will fail.")
+        return False
+
 # ── Service Management ────────────────────────────────────────────────────────
 def setup_systemd_service(service_name, exec_start, working_dir, description, user=None):
     """Create and enable a systemd service."""
@@ -209,6 +243,7 @@ def setup_server(install_dir=None):
     log_step(1, total_steps, "Installing System Dependencies")
     ensure_apt_packages(["git", "curl", "wget", "jq", "build-essential", "python3"])
     ensure_node20()
+    ensure_golang()
 
     # Step 2: Repositories & Binaries
     log_step(2, total_steps, "Checking Server Binary & UI Repository")
@@ -311,10 +346,15 @@ def setup_server(install_dir=None):
     log_step(4, total_steps, "Building Server & Frontend Dashboard")
     
     # Build Backend
-    api_dir = os.path.join(install_dir, "cnc-api")
-    if os.path.exists(api_dir):
-        log_info("Compiling server and tools via Makefile...")
-        run_cmd("make build", cwd=api_dir)
+    api_dir = None
+    if os.path.exists(os.path.join(install_dir, "cnc-api", "Makefile")):
+        api_dir = os.path.join(install_dir, "cnc-api")
+    elif 'ui_target' in locals() and os.path.exists(os.path.join(ui_target, "cnc-api", "Makefile")):
+        api_dir = os.path.join(ui_target, "cnc-api")
+        
+    if api_dir:
+        log_info(f"Compiling server and tools via Makefile in {api_dir}...")
+        run_cmd("export PATH=$PATH:/usr/local/go/bin && make build", cwd=api_dir)
         server_bin = os.path.join(api_dir, "cnc-server")
         log_success("Backend compiled successfully.")
     elif server_bin and os.path.exists(server_bin):
@@ -372,10 +412,20 @@ def setup_worker(install_dir=None, server_addr=None):
     # Step 1: Dependencies
     log_step(1, total_steps, "Installing System Dependencies")
     ensure_apt_packages(["git", "wget", "curl", "build-essential"])
+    ensure_node20()
+
+    sudo = "" if is_root() else "sudo "
+    if shutil.which("systemctl"):
+        log_info("Stopping worker service before update...")
+        run_cmd(f"{sudo}systemctl stop cnc-worker || true")
 
     # Step 2: Binary acquisition
     log_step(2, total_steps, "Downloading / Setting Up Worker Binary")
     worker_bin = os.path.join(install_dir, "cnc-worker-linux")
+    
+    # Remove existing binary to prevent 'Text file busy'
+    if os.path.exists(worker_bin):
+        run_cmd(f"rm -f {worker_bin}")
     
     # Check if existing local binary exists in parent workspace
     local_worker = Path(__file__).resolve().parent.parent / "cnc-api" / "cnc-worker-linux"
@@ -399,7 +449,10 @@ def setup_worker(install_dir=None, server_addr=None):
             run_cmd(f"chmod -R +x {tools_dir}/* 2>/dev/null || true")
             log_success("Worker tools installed into ./tools.")
     else:
-        log_success("./tools directory already present.")
+        log_info("./tools directory already present. Updating tools...")
+        run_cmd("git pull origin main", cwd=tools_dir)
+        run_cmd(f"chmod -R +x {tools_dir}/* 2>/dev/null || true")
+        log_success("Worker tools updated.")
 
     # Also copy cms-scan from local repo if available
     local_cms = Path(__file__).resolve().parent.parent / "cnc-api" / "tools" / "cms-scan"
@@ -458,6 +511,119 @@ def setup_worker(install_dir=None, server_addr=None):
     print(f"  • Concurrency   : {max_tasks} tasks")
     print(f"  • Start Manual  : cd {install_dir} && ./cnc-worker-linux\n")
 
+# ── Role 3: Update Existing Installation ──────────────────────────────────────
+def setup_update(install_dir=None):
+    print(f"\n{Colors.BG_BLUE}{Colors.BOLD} === UPDATE EXISTING CNC INSTALLATION === {Colors.RESET}\n")
+    if not install_dir:
+        default_dir = os.path.abspath(os.path.join(os.getcwd()))
+        if os.path.basename(default_dir) == "bin":
+            default_dir = os.path.dirname(default_dir)
+        install_dir = ask_input("Target installation directory to update", default=default_dir)
+        
+    install_dir = os.path.abspath(install_dir)
+    
+    # Auto-adjust if they pointed to a directory that CONTAINS the worker/server folders
+    if not os.path.exists(os.path.join(install_dir, "cnc-worker-linux")) and os.path.exists(os.path.join(install_dir, "cnc-worker-node", "cnc-worker-linux")):
+        install_dir = os.path.join(install_dir, "cnc-worker-node")
+        log_info(f"Auto-detected worker installation at {install_dir}")
+        
+    # Auto-detect node type based on what exists in install_dir
+    ui_target = os.path.join(install_dir, "cnc")
+    worker_target = os.path.join(install_dir, "cnc-worker-linux")
+    
+    is_server = os.path.exists(ui_target)
+    is_worker = os.path.exists(worker_target) or os.path.basename(install_dir) == "cnc-worker-node"
+
+    if is_server:
+        log_info("Detected CNC Server installation. Updating server...")
+        ensure_golang()
+        ensure_node20()
+
+        sudo = "" if is_root() else "sudo "
+        if shutil.which("systemctl"):
+            log_info("Stopping services during update...")
+            run_cmd(f"{sudo}systemctl stop cnc-server || true")
+            run_cmd(f"{sudo}systemctl stop cnc-ui || true")
+
+        log_step(1, 3, "Pulling Latest Code from GitHub")
+        run_cmd("git pull origin main", cwd=ui_target)
+        log_success("Code updated.")
+
+        log_step(2, 3, "Rebuilding Server & UI")
+        api_dir = os.path.join(ui_target, "cnc-api")
+        if os.path.exists(api_dir) and os.path.exists(os.path.join(api_dir, "Makefile")):
+            log_info(f"Recompiling backend in {api_dir}...")
+            run_cmd("export PATH=$PATH:/usr/local/go/bin && make build", cwd=api_dir)
+            
+            server_bin = os.path.join(api_dir, "cnc-server")
+            if os.path.exists(server_bin):
+                run_cmd(f"rm -f {install_dir}/cnc-server-linux && cp {server_bin} {install_dir}/cnc-server-linux")
+                log_success("Backend recompiled and binary updated.")
+        else:
+            log_warn("Could not find cnc-api directory or Makefile. Skipping backend compilation.")
+
+        ui_dir = os.path.join(ui_target, "cnc-ui")
+        if os.path.exists(ui_dir) and os.path.exists(os.path.join(ui_dir, "package.json")):
+            log_info(f"Rebuilding UI in {ui_dir}...")
+            run_cmd("npm install", cwd=ui_dir)
+            run_cmd("npm run build", cwd=ui_dir)
+            log_success("Frontend UI rebuilt successfully.")
+        else:
+            log_warn("Could not find cnc-ui directory or package.json. Skipping frontend compilation.")
+
+        log_step(3, 3, "Restarting Services")
+        if shutil.which("systemctl"):
+            run_cmd(f"{sudo}systemctl restart cnc-server || true")
+            run_cmd(f"{sudo}systemctl restart cnc-ui || true")
+            log_success("Services restarted.")
+        else:
+            log_warn("systemctl not found. Please restart your processes manually.")
+            
+    elif is_worker:
+        log_info("Detected CNC Worker installation. Updating worker...")
+        ensure_node20()
+        
+        sudo = "" if is_root() else "sudo "
+        if shutil.which("systemctl"):
+            log_info("Stopping worker service before update...")
+            run_cmd(f"{sudo}systemctl stop cnc-worker || true")
+            
+        log_step(1, 3, "Updating Worker Binary")
+        worker_bin = os.path.join(install_dir, "cnc-worker-linux")
+        if os.path.exists(worker_bin):
+            run_cmd(f"rm -f {worker_bin}")
+        
+        download_url = "https://github.com/rel7z/cnc-deploy/raw/refs/heads/main/cnc-worker-linux"
+        log_info(f"Downloading latest worker binary from {download_url}...")
+        run_cmd(f"wget -q -O {worker_bin} {download_url}")
+        run_cmd(f"chmod +x {worker_bin}")
+        log_success("Worker binary updated.")
+        
+        log_step(2, 3, "Updating Worker Tools")
+        tools_dir = os.path.join(install_dir, "tools")
+        if os.path.exists(tools_dir):
+            log_info("Pulling latest tools from GitHub...")
+            run_cmd("git pull origin main", cwd=tools_dir)
+            run_cmd(f"chmod -R +x {tools_dir}/* 2>/dev/null || true")
+            log_success("Worker tools updated.")
+        else:
+            log_warn(f"No tools directory found at {tools_dir}. You might need to run Option 3.")
+            
+        log_step(3, 3, "Restarting Worker Service")
+        if shutil.which("systemctl"):
+            run_cmd(f"{sudo}systemctl restart cnc-worker || true")
+            log_success("Worker service restarted.")
+        else:
+            log_warn("systemctl not found. Please restart cnc-worker manually.")
+            
+    else:
+        log_error(f"Could not identify a CNC Server or Worker installation in {install_dir}.")
+        return
+
+    print(f"\n{Colors.GREEN}{Colors.BOLD}===================================================={Colors.RESET}")
+    print(f"{Colors.GREEN}{Colors.BOLD}  ✓ CNC Update Complete!{Colors.RESET}")
+    print(f"{Colors.GREEN}{Colors.BOLD}===================================================={Colors.RESET}\n")
+
 # ── Main Menu ─────────────────────────────────────────────────────────────────
 def interactive_menu():
     print_banner()
@@ -466,9 +632,10 @@ def interactive_menu():
     print(f"  {Colors.CYAN}2){Colors.RESET} {Colors.BOLD}CNC Worker Node{Colors.RESET}         (Distributed execution agent + Tools)")
     print(f"  {Colors.CYAN}3){Colors.RESET} {Colors.BOLD}Install Worker Tools{Colors.RESET}    (Clone and make worker-tools executable)")
     print(f"  {Colors.CYAN}4){Colors.RESET} {Colors.BOLD}Service Status & Info{Colors.RESET}   (Check systemd status of CNC components)")
-    print(f"  {Colors.CYAN}5){Colors.RESET} {Colors.BOLD}Exit{Colors.RESET}\n")
+    print(f"  {Colors.CYAN}5){Colors.RESET} {Colors.BOLD}Update Existing Node{Colors.RESET}    (Pull latest code & recompile)")
+    print(f"  {Colors.CYAN}6){Colors.RESET} {Colors.BOLD}Exit{Colors.RESET}\n")
 
-    choice = ask_input("Select an option [1-5]", default="1")
+    choice = ask_input("Select an option [1-6]", default="1")
     if choice == "1":
         setup_server()
     elif choice == "2":
@@ -483,6 +650,8 @@ def interactive_menu():
         for svc in ["cnc-server", "cnc-ui", "cnc-worker"]:
             print(f"\n--- {svc} ---")
             run_cmd(f"systemctl status {svc} --no-pager || true")
+    elif choice == "5":
+        setup_update()
     else:
         print("Exiting.")
         sys.exit(0)

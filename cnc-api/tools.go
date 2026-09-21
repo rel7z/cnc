@@ -314,7 +314,11 @@ func GenerateToolCommand(toolID string, inputFile string, options map[string]int
 	}
 
 	var cmdParts []string
-	cmdParts = append(cmdParts, tool.Executable)
+	executable := tool.Executable
+	if !strings.Contains(executable, "/") {
+		executable = "./tools/" + executable
+	}
+	cmdParts = append(cmdParts, executable)
 
 	// Input flag handling
 	inFlag := tool.InputFlag
