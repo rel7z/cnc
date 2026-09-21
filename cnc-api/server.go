@@ -1486,9 +1486,10 @@ func (s *Server) handleDownloadWorker(w http.ResponseWriter, r *http.Request) {
 }
 
 type DeployWorkerRequest struct {
-	IPs      []string `json:"ips"`
-	Username string   `json:"username"`
-	Password string   `json:"password"`
+	IPs        []string `json:"ips"`
+	Username   string   `json:"username"`
+	Password   string   `json:"password"`
+	ServerAddr string   `json:"server_addr"`
 }
 
 func (s *Server) handleDeployWorkerAPI(w http.ResponseWriter, r *http.Request) {
@@ -1513,11 +1514,14 @@ func (s *Server) handleDeployWorkerAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	host := r.Host
-	if strings.Contains(host, ":") {
-		host, _, _ = net.SplitHostPort(host)
+	serverAddr := req.ServerAddr
+	if serverAddr == "" {
+		host := r.Host
+		if strings.Contains(host, ":") {
+			host, _, _ = net.SplitHostPort(host)
+		}
+		serverAddr = host + ":9090"
 	}
-	serverAddr := host + ":9090"
 	serverHTTPAddr := "http://" + serverAddr
 
 	logChan := make(chan string, 100)

@@ -13,6 +13,7 @@ export function DeployWorkerModal({ onClose }: DeployWorkerModalProps) {
   const [ips, setIps] = useState("");
   const [username, setUsername] = useState("root");
   const [password, setPassword] = useState("");
+  const [serverAddr, setServerAddr] = useState("");
   const [isDeploying, setIsDeploying] = useState(false);
   const [isDone, setIsDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,7 +55,7 @@ export function DeployWorkerModal({ onClose }: DeployWorkerModalProps) {
       const res = await fetch("/api/workers/deploy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ips: ipList, username, password })
+        body: JSON.stringify({ ips: ipList, username, password, server_addr: serverAddr })
       });
 
       if (!res.ok) {
@@ -142,6 +143,20 @@ export function DeployWorkerModal({ onClose }: DeployWorkerModalProps) {
                   required
                 />
               </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1.5">
+                CNC Server Address (optional)
+              </label>
+              <input
+                type="text"
+                value={serverAddr}
+                onChange={(e) => setServerAddr(e.target.value)}
+                placeholder="e.g. 198.51.100.5:9090 or my-ngrok.app"
+                className="w-full bg-gray-950 border border-gray-800 rounded-md px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+              <p className="text-xs text-gray-500 mt-1">If blank, it will guess from your current browser URL.</p>
             </div>
             
             <p className="text-xs text-gray-500 leading-relaxed mt-2">
