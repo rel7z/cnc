@@ -295,6 +295,13 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/tools/launch", s.handleToolsLaunchAPI)
 	mux.HandleFunc("/api/tools/wordlists", s.handleToolsWordlistAPI)
 
+	// File Manager & Server Terminal APIs
+	mux.HandleFunc("/api/fs/list", s.handleFSListAPI)
+	mux.HandleFunc("/api/fs/read", s.handleFSReadAPI)
+	mux.HandleFunc("/api/fs/write", s.handleFSWriteAPI)
+	mux.HandleFunc("/api/fs/delete", s.handleFSDeleteAPI)
+	mux.HandleFunc("/api/server/exec", s.handleServerExecAPI)
+
 	s.httpServer = &http.Server{
 		Addr:    s.config.HTTPAddr,
 		Handler: corsMiddleware(mux),
