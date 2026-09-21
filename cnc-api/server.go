@@ -1610,7 +1610,7 @@ fi
 chmod +x tools/* 2>/dev/null || true
 
 echo "[3/4] Creating Configuration..."
-cat << 'EOF' > server_config.json
+cat << EOF > server_config.json
 {
   "server_addr": "%s",
   "worker_id": "worker_$(hostname -s)_$RANDOM",
@@ -1620,7 +1620,7 @@ cat << 'EOF' > server_config.json
 EOF
 
 echo "[4/4] Starting systemd service..."
-cat << 'EOF' > /etc/systemd/system/cnc-worker.service
+cat << EOF > /etc/systemd/system/cnc-worker.service
 [Unit]
 Description=CNC Worker Node
 After=network.target
