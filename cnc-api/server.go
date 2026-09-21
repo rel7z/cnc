@@ -1591,6 +1591,7 @@ mkdir -p /root/cnc-worker-node
 cd /root/cnc-worker-node
 
 echo "[1/4] Downloading CNC Worker Binary..."
+rm -f cnc-worker-linux
 curl -s -L -o cnc-worker-linux "https://github.com/rel7z/cnc-deploy/raw/refs/heads/main/cnc-worker-linux"
 chmod +x cnc-worker-linux
 
