@@ -1745,9 +1745,20 @@ fi
 chmod +x tools/* 2>/dev/null || true
 
 echo "[3/4] Creating Configuration..."
+TARGET_SERVER="%s"
+if [ -z "$TARGET_SERVER" ] || [ "$TARGET_SERVER" = "localhost:9090" ] || [ "$TARGET_SERVER" = "127.0.0.1:9090" ]; then
+	SSH_IP=$(echo $SSH_CLIENT | awk '{print $1}')
+	[ -z "$SSH_IP" ] && SSH_IP=$(echo $SSH_CONNECTION | awk '{print $1}')
+	if [ -n "$SSH_IP" ] && [ "$SSH_IP" != "127.0.0.1" ]; then
+		TARGET_SERVER="${SSH_IP}:9090"
+	fi
+fi
+
+echo "Connecting worker to CNC Server at: $TARGET_SERVER"
+
 cat << EOF > worker_config.json
 {
-  "server_addr": "%s",
+  "server_addr": "$TARGET_SERVER",
   "worker_id": "worker_$(hostname -s)_$RANDOM",
   "max_tasks": 0,
   "data_dir": "./worker_data"
@@ -1780,7 +1791,7 @@ systemctl restart cnc-worker
 
 sleep 2
 if systemctl is-active --quiet cnc-worker; then
-	echo "✓ Deployment successful: CNC Worker is running on $(hostname -I | awk '{print $1}')"
+	echo "✓ Deployment successful: CNC Worker is active on $(hostname -I | awk '{print $1}') (Target: $TARGET_SERVER)"
 else
 	echo "✗ ERROR: cnc-worker service failed to start! Recent logs:"
 	journalctl -u cnc-worker -n 25 --no-pager
