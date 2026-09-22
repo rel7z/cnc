@@ -566,10 +566,10 @@ def setup_update(install_dir=None):
         log_info(f"Auto-detected worker installation at {install_dir}")
         
     # Auto-detect node type based on what exists in install_dir
-    ui_target = os.path.join(install_dir, "cnc")
+    ui_target = install_dir if os.path.exists(os.path.join(install_dir, "cnc-ui", "package.json")) else os.path.join(install_dir, "cnc")
     worker_target = os.path.join(install_dir, "cnc-worker-linux")
     
-    is_server = os.path.exists(ui_target)
+    is_server = os.path.exists(ui_target) and (os.path.exists(os.path.join(ui_target, "cnc-ui")) or os.path.exists(os.path.join(ui_target, "cnc-api")))
     is_worker = os.path.exists(worker_target) or os.path.basename(install_dir) == "cnc-worker-node"
 
     if is_server:
@@ -702,7 +702,7 @@ def interactive_menu():
 
 def main():
     parser = argparse.ArgumentParser(description="CNC Automated Installer & Setup Tool")
-    parser.add_argument("--role", choices=["server", "worker"], help="Specify role to install directly")
+    parser.add_argument("--role", choices=["server", "worker", "update"], help="Specify role to install directly")
     parser.add_argument("--dir", help="Target installation directory")
     parser.add_argument("--server-addr", help="Server address for worker setup (host:port)")
     args = parser.parse_args()
@@ -713,6 +713,9 @@ def main():
     elif args.role == "worker":
         print_banner()
         setup_worker(args.dir, args.server_addr)
+    elif args.role == "update":
+        print_banner()
+        setup_update(args.dir)
     else:
         interactive_menu()
 
