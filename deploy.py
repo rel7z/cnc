@@ -626,11 +626,17 @@ def setup_update(install_dir=None):
 
         log_step(3, 3, "Restarting Services")
         if shutil.which("systemctl"):
-            run_cmd(f"{sudo}systemctl restart cnc-ui || true")
+            # Restart cnc-ui non-blocking with 15s timeout
+            run_cmd(f"{sudo}systemctl restart cnc-ui --no-block || {sudo}systemctl restart cnc-ui || true")
             log_success("Frontend UI service restarted.")
-            # Restart cnc-server after a small delay so output stream finishes cleanly
-            run_cmd(f"nohup bash -c 'sleep 2 && {sudo}systemctl restart cnc-server' >/dev/null 2>&1 &")
-            log_success("CNC Server restart scheduled in 2 seconds.")
+            # Restart cnc-server cleanly in background so the script process can exit immediately
+            subprocess.Popen(
+                ["bash", "-c", f"sleep 1 && {sudo}systemctl restart cnc-server"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            log_success("CNC Server restart scheduled.")
         else:
             log_warn("systemctl not found. Please restart your processes manually.")
             
