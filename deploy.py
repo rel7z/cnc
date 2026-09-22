@@ -486,7 +486,7 @@ def setup_worker(install_dir=None, server_addr=None):
             log_success("Worker tools installed into ./tools.")
     else:
         log_info("./tools directory already present. Updating tools...")
-        run_cmd("git pull origin main", cwd=tools_dir)
+        run_cmd("git fetch origin main && git reset --hard origin/main || git pull origin main || true", cwd=tools_dir)
         run_cmd(f"chmod -R +x {tools_dir}/* 2>/dev/null || true")
         log_success("Worker tools updated.")
 
@@ -580,7 +580,15 @@ def setup_update(install_dir=None):
         sudo = "" if is_root() else "sudo "
 
         log_step(1, 3, "Pulling Latest Code from GitHub")
-        run_cmd("git pull origin main", cwd=ui_target)
+        run_cmd("git fetch origin main", cwd=ui_target)
+        try:
+            run_cmd("git pull origin main", cwd=ui_target)
+        except Exception as e:
+            log_warn(f"Standard git pull encountered untracked or conflicting files: {e}")
+            log_info("Automatically stashing local changes, clearing conflicted build artifacts, and resetting to origin/main...")
+            run_cmd("git stash || true", cwd=ui_target)
+            run_cmd("rm -rf cnc-api/tools cnc-api/cnc-worker-linux cnc-api/cnc-server-linux cnc-server-linux cnc-worker-linux || true", cwd=ui_target)
+            run_cmd("git reset --hard origin/main", cwd=ui_target)
         log_success("Code updated.")
 
         log_step(2, 3, "Rebuilding Server & UI")
@@ -650,7 +658,7 @@ def setup_update(install_dir=None):
         tools_dir = os.path.join(install_dir, "tools")
         if os.path.exists(tools_dir):
             log_info("Pulling latest tools from GitHub...")
-            run_cmd("git pull origin main", cwd=tools_dir)
+            run_cmd("git fetch origin main && git reset --hard origin/main || git pull origin main || true", cwd=tools_dir)
             run_cmd(f"chmod -R +x {tools_dir}/* 2>/dev/null || true")
             log_success("Worker tools updated.")
         else:
