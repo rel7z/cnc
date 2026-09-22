@@ -514,13 +514,15 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 
 	var stdout, stderr bytes.Buffer
 	
-	stdoutStream := &streamWriter{w: w, taskID: task.ID, isStderr: false}
-	stderrStream := &streamWriter{w: w, taskID: task.ID, isStderr: true}
+	stdoutStream := &BufferedStreamWriter{w: w, taskID: task.ID, isStderr: false}
+	stderrStream := &BufferedStreamWriter{w: w, taskID: task.ID, isStderr: true}
 	
 	cmd.Stdout = io.MultiWriter(&stdout, stdoutStream)
 	cmd.Stderr = io.MultiWriter(&stderr, stderrStream)
 
 	runErr := cmd.Run()
+	stdoutStream.Close()
+	stderrStream.Close()
 
 	exitCode := 0
 	if runErr != nil {
@@ -598,23 +600,62 @@ func backoff(attempt int) time.Duration {
 
 // ── Streaming support ─────────────────────────────────────────────────────────
 
-type streamWriter struct {
+type BufferedStreamWriter struct {
 	w        *WorkerAgent
 	taskID   string
 	isStderr bool
+	mu       sync.Mutex
+	buf      bytes.Buffer
+	timer    *time.Timer
 }
 
-func (s *streamWriter) Write(p []byte) (n int, err error) {
+func (b *BufferedStreamWriter) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.buf.Write(p)
+
+	if b.timer == nil {
+		b.timer = time.AfterFunc(250*time.Millisecond, b.flush)
+	}
+
+	if b.buf.Len() >= 4096 {
+		b.flushLocked()
+	}
+
+	return len(p), nil
+}
+
+func (b *BufferedStreamWriter) flush() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.flushLocked()
+}
+
+func (b *BufferedStreamWriter) flushLocked() {
+	if b.timer != nil {
+		b.timer.Stop()
+		b.timer = nil
+	}
+	if b.buf.Len() == 0 {
+		return
+	}
+	
+	chunk := b.buf.String()
+	b.buf.Reset()
+
 	msg, err := NewMessage(MsgTypeTaskStream, TaskStreamPayload{
-		TaskID:   s.taskID,
-		WorkerID: s.w.config.WorkerID,
-		Chunk:    string(p),
-		IsStderr: s.isStderr,
+		TaskID:   b.taskID,
+		WorkerID: b.w.config.WorkerID,
+		Chunk:    chunk,
+		IsStderr: b.isStderr,
 	})
 	if err == nil {
-		// send returns quickly because it's just encoding JSON and writing to net.Conn
-		// If it fails, we ignore the error and keep reading the stream
-		_ = s.w.send(msg)
+		_ = b.w.send(msg)
 	}
-	return len(p), nil
+}
+
+func (b *BufferedStreamWriter) Close() error {
+	b.flush()
+	return nil
 }
