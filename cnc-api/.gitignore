@@ -21,6 +21,7 @@ token.json
 
 # OS files
 .DS_Store
+*.log
 
 # IDE
 .vscode/

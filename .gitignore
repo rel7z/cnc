@@ -11,3 +11,5 @@ cnc-ui/.next/
 .DS_Store
 server_config.json
 cnc_data/
+*.log
+scratch/

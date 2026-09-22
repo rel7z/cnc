@@ -12,7 +12,7 @@ import { ApifyClient } from 'apify-client';
 import fs from 'fs';
 import path from 'path';
 
-const DEFAULT_API_TOKEN = "apify_api_87e0keim4LdlPQcNn2p3c3ROlyEAJN2k2cZL";
+const DEFAULT_API_TOKEN = process.env.APIFY_TOKEN || "";
 
 const args = process.argv.slice(2);
 

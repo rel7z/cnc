@@ -952,7 +952,19 @@ func (s *Server) processServerJob(job *Job) {
 		currPath := os.Getenv("PATH")
 		exeDir, _ := os.Getwd()
 		toolsDir := filepath.Join(exeDir, "tools")
-		cmd.Env = append(os.Environ(), fmt.Sprintf("PATH=%s:%s:%s", toolsDir, exeDir, currPath))
+		newPath := fmt.Sprintf("%s:%s:%s", toolsDir, exeDir, currPath)
+		cmd.Env = os.Environ()
+		pathFound := false
+		for i, env := range cmd.Env {
+			if strings.HasPrefix(env, "PATH=") {
+				cmd.Env[i] = "PATH=" + newPath
+				pathFound = true
+				break
+			}
+		}
+		if !pathFound {
+			cmd.Env = append(cmd.Env, "PATH="+newPath)
+		}
 
 		var stdoutBuf, stderrBuf bytes.Buffer
 		cmd.Stdout = &stdoutBuf

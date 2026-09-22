@@ -1,10 +1,10 @@
 package cnc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -121,6 +121,10 @@ func (s *Server) handleFSWriteAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filePath := ExpandPath(req.File)
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create parent directory: %v", err), http.StatusInternalServerError)
+		return
+	}
 	if err := os.WriteFile(filePath, []byte(req.Content), 0644); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to write file: %v", err), http.StatusInternalServerError)
 		return
@@ -217,19 +221,11 @@ func (s *Server) handleServerExecAPI(w http.ResponseWriter, r *http.Request) {
 		cmd.Dir = ExpandPath(req.Cwd)
 	}
 
-	// Capture output
-	stdoutPipe, _ := cmd.StdoutPipe()
-	stderrPipe, _ := cmd.StderrPipe()
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
 
-	if err := cmd.Start(); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to start command: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	stdout, _ := io.ReadAll(stdoutPipe)
-	stderr, _ := io.ReadAll(stderrPipe)
-
-	err := cmd.Wait()
+	err := cmd.Run()
 	
 	exitCode := 0
 	if err != nil {
@@ -237,7 +233,7 @@ func (s *Server) handleServerExecAPI(w http.ResponseWriter, r *http.Request) {
 			exitCode = exitError.ExitCode()
 		} else {
 			exitCode = -1
-			stderr = append(stderr, []byte(fmt.Sprintf("\n%v", err))...)
+			stderrBuf.WriteString(fmt.Sprintf("\n%v", err))
 		}
 	}
 
@@ -249,8 +245,8 @@ func (s *Server) handleServerExecAPI(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"stdout":    string(stdout),
-		"stderr":    string(stderr),
+		"stdout":    stdoutBuf.String(),
+		"stderr":    stderrBuf.String(),
 		"cwd":       cwd,
 		"exit_code": exitCode,
 	})

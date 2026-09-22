@@ -63,14 +63,14 @@ func (p *ProgressUI) render() {
 	valid := atomic.LoadInt64(&p.validIPs)
 	elapsed := time.Since(p.startTime).Round(time.Second)
 
-	fmt.Fprintf(os.Stderr, "\033[2J\033[HDomains: %d/%d | CIDRs: %d | Total IPs: %d | Pinged: %d | Alive: %d | Elapsed: %v",
+	fmt.Fprintf(os.Stderr, "\r[*] Domains: %d/%d | CIDRs: %d | Total IPs: %d | Pinged: %d | Alive: %d | Elapsed: %v",
 		res, dom, cidrs, ips, pinged, valid, elapsed)
 }
 
 func (p *ProgressUI) renderFinal() {
 	valid := atomic.LoadInt64(&p.validIPs)
 	elapsed := time.Since(p.startTime).Round(time.Second)
-	fmt.Fprintf(os.Stderr, "\033[2J\033[H[DONE] Found %d valid IPs in %v\n", valid, elapsed)
+	fmt.Fprintf(os.Stderr, "\n[+] Done. Found %d valid alive IPs in %v\n", valid, elapsed)
 }
 
 // RipeStatResponse models the JSON from stat.ripe.net/data/network-info/data.json
@@ -138,16 +138,23 @@ func isAlive(ip string, timeout time.Duration) bool {
 	if err != nil {
 		return false
 	}
-	// Important for linux: use unprivileged datagram ICMP if raw sockets fail.
-	// But pro-bing handles it nicely if we set SetPrivileged(true) and we run as root.
-	// We'll set Privileged = true for accurate raw ICMP, which is standard for CNC tools running as root.
 	pinger.SetPrivileged(true)
 	pinger.Count = 1
 	pinger.Timeout = timeout
 
 	err = pinger.Run() // Blocks until finished
 	if err != nil {
-		return false
+		// Fallback to unprivileged datagram ICMP if raw sockets are restricted
+		pinger, err = probing.NewPinger(ip)
+		if err != nil {
+			return false
+		}
+		pinger.SetPrivileged(false)
+		pinger.Count = 1
+		pinger.Timeout = timeout
+		if err := pinger.Run(); err != nil {
+			return false
+		}
 	}
 	stats := pinger.Statistics()
 	return stats.PacketsRecv > 0
@@ -313,6 +320,7 @@ func main() {
 					atomic.AddInt64(&ui.validIPs, 1)
 					outMu.Lock()
 					fmt.Fprintln(outF, ip)
+					fmt.Println(ip)
 					outMu.Unlock()
 				}
 				atomic.AddInt64(&ui.pingedIPs, 1)

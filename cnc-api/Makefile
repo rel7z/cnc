@@ -51,6 +51,6 @@ run: build
 
 # ── Clean ────────────────────────────────────────────────────────────────────
 clean:
-	rm -f cnc-server cnc-worker cnc tools/cms-scan tools/reverseip-domain tools/reverseip-thc tools/wp-bruter
-	rm -f cnc-server-linux cnc-worker-linux cnc-linux tools/cms-scan-linux tools/reverseip-domain-linux tools/reverseip-thc-linux tools/wp-bruter-linux
+	rm -f cnc-server cnc-worker cnc tools/cms-scan tools/reverseip-domain tools/reverseip-thc tools/wp-bruter tools/cnc-enum tools/bgp-scanner
+	rm -f cnc-server-linux cnc-worker-linux cnc-linux tools/cms-scan-linux tools/reverseip-domain-linux tools/reverseip-thc-linux tools/wp-bruter-linux tools/cnc-enum-linux tools/bgp-scanner-linux
 	@echo "Cleaned"
