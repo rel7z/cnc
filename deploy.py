@@ -178,7 +178,7 @@ def ensure_golang():
         return False
 
 # ── Service Management ────────────────────────────────────────────────────────
-def setup_systemd_service(service_name, exec_start, working_dir, description, user=None):
+def setup_systemd_service(service_name, exec_start, working_dir, description, user=None, env_vars=None):
     """Create and enable a systemd service."""
     if not is_root() and not shutil.which("sudo"):
         log_warn("Root or sudo privileges required to configure systemd service.")
@@ -186,6 +186,11 @@ def setup_systemd_service(service_name, exec_start, working_dir, description, us
 
     if not user:
         user = os.environ.get("SUDO_USER") or os.environ.get("USER") or "root"
+
+    env_lines = ""
+    if env_vars:
+        for k, v in env_vars.items():
+            env_lines += f'Environment="{k}={v}"\n'
 
     service_content = f"""[Unit]
 Description={description}
@@ -195,7 +200,7 @@ After=network.target
 Type=simple
 User={user}
 WorkingDirectory={working_dir}
-ExecStart={exec_start}
+{env_lines}ExecStart={exec_start}
 Restart=always
 RestartSec=5s
 LimitNOFILE=65535
@@ -240,10 +245,24 @@ def setup_server(install_dir=None):
 
     total_steps = 5
     # Step 1: Dependencies
-    log_step(1, total_steps, "Installing System Dependencies")
+    log_step(1, total_steps, "Installing System Dependencies & Firewall")
     ensure_apt_packages(["git", "curl", "wget", "jq", "build-essential", "python3"])
     ensure_node20()
     ensure_golang()
+
+    # Configure UFW if active on Linux/Linode
+    if shutil.which("ufw"):
+        try:
+            ufw_out = run_cmd("ufw status", capture=True)
+            if "Status: active" in ufw_out:
+                log_info("Configuring UFW rules for CNC ports (8080 HTTP, 9090 TCP, 3000 UI)...")
+                sudo = "" if is_root() else "sudo "
+                run_cmd(f"{sudo}ufw allow 8080/tcp")
+                run_cmd(f"{sudo}ufw allow 9090/tcp")
+                run_cmd(f"{sudo}ufw allow 3000/tcp")
+                log_success("UFW firewall ports opened.")
+        except Exception as e:
+            log_warn(f"Could not check/configure UFW: {e}")
 
     # Step 2: Repositories & Binaries
     log_step(2, total_steps, "Checking Server Binary & UI Repository")
@@ -353,11 +372,16 @@ def setup_server(install_dir=None):
         api_dir = os.path.join(ui_target, "cnc-api")
         
     if api_dir:
-        log_info(f"Compiling server and tools via Makefile in {api_dir}...")
-        run_cmd("export PATH=$PATH:/usr/local/go/bin && make build", cwd=api_dir)
+        log_info(f"Compiling server, worker, and tools via Makefile in {api_dir}...")
+        run_cmd("export PATH=$PATH:/usr/local/go/bin && make build && make build-linux", cwd=api_dir)
         server_bin = os.path.join(api_dir, "cnc-server")
         if os.path.exists(server_bin):
             run_cmd(f"cp -r {api_dir}/tools {install_dir}/")
+            # Ensure cnc-worker-linux is available in install_dir for remote download
+            worker_linux = os.path.join(api_dir, "cnc-worker-linux")
+            if os.path.exists(worker_linux):
+                run_cmd(f"cp {worker_linux} {install_dir}/cnc-worker-linux")
+                run_cmd(f"cp {worker_linux} {api_dir}/tools/ 2>/dev/null || true")
         log_success("Backend compiled successfully.")
     elif server_bin and os.path.exists(server_bin):
         log_success(f"Using server binary: {server_bin}")
@@ -379,14 +403,21 @@ def setup_server(install_dir=None):
             "cnc-server",
             f"{server_bin} -config={config_path}",
             os.path.dirname(server_bin) if os.path.dirname(server_bin) else install_dir,
-            "CNC Command and Control Server"
+            "CNC Command and Control Server",
+            env_vars={"PATH": "/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"}
         )
         if ui_dir:
             setup_systemd_service(
                 "cnc-ui",
                 f"{shutil.which('npm') or 'npm'} start",
                 ui_dir,
-                "CNC Web Dashboard"
+                "CNC Web Dashboard",
+                env_vars={
+                    "NODE_ENV": "production",
+                    "PORT": "3000",
+                    "HOSTNAME": "0.0.0.0",
+                    "PATH": "/usr/local/bin:/usr/bin:/bin"
+                }
             )
 
     print(f"\n{Colors.GREEN}{Colors.BOLD}===================================================={Colors.RESET}")
@@ -430,7 +461,10 @@ def setup_worker(install_dir=None, server_addr=None):
         run_cmd(f"rm -f {worker_bin}")
     
     # Check if existing local binary exists in parent workspace
-    local_worker = Path(__file__).resolve().parent.parent / "cnc-api" / "cnc-worker-linux"
+    local_worker = Path(__file__).resolve().parent / "cnc-api" / "cnc-worker-linux"
+    if not local_worker.exists():
+        local_worker = Path(__file__).resolve().parent.parent / "cnc-api" / "cnc-worker-linux"
+
     if local_worker.exists():
         log_info(f"Copying local binary from {local_worker}...")
         shutil.copy2(local_worker, worker_bin)
@@ -457,7 +491,9 @@ def setup_worker(install_dir=None, server_addr=None):
         log_success("Worker tools updated.")
 
     # Also copy cms-scan from local repo if available
-    local_cms = Path(__file__).resolve().parent.parent / "cnc-api" / "tools" / "cms-scan"
+    local_cms = Path(__file__).resolve().parent / "cnc-api" / "tools" / "cms-scan"
+    if not local_cms.exists():
+        local_cms = Path(__file__).resolve().parent.parent / "cnc-api" / "tools" / "cms-scan"
     if local_cms.exists():
         os.makedirs(tools_dir, exist_ok=True)
         shutil.copy2(local_cms, os.path.join(tools_dir, "cms-scan"))
@@ -555,14 +591,18 @@ def setup_update(install_dir=None):
         api_dir = os.path.join(ui_target, "cnc-api")
         if os.path.exists(api_dir) and os.path.exists(os.path.join(api_dir, "Makefile")):
             log_info(f"Recompiling backend in {api_dir}...")
-            run_cmd("export PATH=$PATH:/usr/local/go/bin && make build", cwd=api_dir)
+            run_cmd("export PATH=$PATH:/usr/local/go/bin && make build && make build-linux", cwd=api_dir)
             
             server_bin = os.path.join(api_dir, "cnc-server")
             if os.path.exists(server_bin):
                 run_cmd(f"rm -f {install_dir}/cnc-server-linux && cp {server_bin} {install_dir}/cnc-server-linux")
                 # Ensure the built tools are copied to the main install directory where the server runs
                 run_cmd(f"cp -r {api_dir}/tools {install_dir}/")
-                log_success("Backend recompiled, binary and tools updated.")
+                worker_linux = os.path.join(api_dir, "cnc-worker-linux")
+                if os.path.exists(worker_linux):
+                    run_cmd(f"cp {worker_linux} {install_dir}/cnc-worker-linux")
+                    run_cmd(f"cp {worker_linux} {api_dir}/tools/ 2>/dev/null || true")
+                log_success("Backend recompiled, binaries and tools updated.")
         else:
             log_warn("Could not find cnc-api directory or Makefile. Skipping backend compilation.")
 

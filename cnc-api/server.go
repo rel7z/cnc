@@ -1526,17 +1526,10 @@ func (s *Server) handleDeployWorkerAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	serverAddr := req.ServerAddr
-	if serverAddr == "" {
-		host := r.Host
-		if strings.Contains(host, ":") {
-			host, _, _ = net.SplitHostPort(host)
-		}
-		serverAddr = host + ":9090"
-	}
-	serverHTTPAddr := "http://" + serverAddr
+	serverAddr, serverHTTPAddr := s.resolveServerAddresses(req.ServerAddr, r.Host, r)
+	log.Printf("[Deploy] Target server address: %s (HTTP: %s)", serverAddr, serverHTTPAddr)
 
-	logChan := make(chan string, 100)
+	logChan := make(chan string, 200)
 	var wg sync.WaitGroup
 
 	for _, ip := range req.IPs {
@@ -1562,14 +1555,104 @@ func (s *Server) handleDeployWorkerAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) resolveServerAddresses(reqAddr, reqHost string, r *http.Request) (string, string) {
+	tcpPort := "9090"
+	if strings.Contains(s.config.TCPAddr, ":") {
+		_, p, _ := net.SplitHostPort(s.config.TCPAddr)
+		if p != "" {
+			tcpPort = p
+		}
+	}
+	httpPort := "8080"
+	if strings.Contains(s.config.HTTPAddr, ":") {
+		_, p, _ := net.SplitHostPort(s.config.HTTPAddr)
+		if p != "" {
+			httpPort = p
+		}
+	}
+
+	host := ""
+	if reqAddr != "" {
+		host = reqAddr
+		port := tcpPort
+		if strings.Contains(reqAddr, ":") {
+			h, p, err := net.SplitHostPort(reqAddr)
+			if err == nil {
+				host = h
+				port = p
+			}
+		}
+		if host != "localhost" && host != "127.0.0.1" && host != "::1" && host != "" {
+			return net.JoinHostPort(host, port), fmt.Sprintf("http://%s:%s", host, httpPort)
+		}
+	}
+
+	// Try X-Forwarded-Host from reverse proxies
+	if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
+		h := strings.Split(xfh, ",")[0]
+		if strings.Contains(h, ":") {
+			h, _, _ = net.SplitHostPort(h)
+		}
+		if h != "localhost" && h != "127.0.0.1" && h != "" {
+			host = h
+		}
+	}
+
+	if host == "" {
+		h := reqHost
+		if strings.Contains(h, ":") {
+			h, _, _ = net.SplitHostPort(h)
+		}
+		if h != "localhost" && h != "127.0.0.1" && h != "" {
+			host = h
+		}
+	}
+
+	// If still local/blank, detect Linode server external public IP
+	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		pubIP := getPublicIP()
+		if pubIP != "" {
+			host = pubIP
+		} else {
+			host = "127.0.0.1"
+		}
+	}
+
+	return net.JoinHostPort(host, tcpPort), fmt.Sprintf("http://%s:%s", host, httpPort)
+}
+
+func getPublicIP() string {
+	client := http.Client{Timeout: 3 * time.Second}
+	endpoints := []string{
+		"https://api.ipify.org",
+		"https://ifconfig.me/ip",
+		"https://icanhazip.com",
+	}
+	for _, ep := range endpoints {
+		resp, err := client.Get(ep)
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			ip := strings.TrimSpace(string(body))
+			if ip != "" && !strings.Contains(ip, "<") && len(ip) <= 45 {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
 func (s *Server) deployWorkerViaSSH(ip, username, password, serverAddr, serverHTTPAddr string, logChan chan<- string) {
 	sendLog := func(format string, args ...interface{}) {
 		msg := fmt.Sprintf("[%s] %s", ip, fmt.Sprintf(format, args...))
 		log.Print(msg)
-		logChan <- msg
+		select {
+		case logChan <- msg:
+		default:
+		}
 	}
 
-	sendLog("Starting deployment...")
+	sendLog("Starting deployment to %s (Target CNC Server: %s)...", ip, serverAddr)
 
 	config := &ssh.ClientConfig{
 		User: username,
@@ -1577,7 +1660,7 @@ func (s *Server) deployWorkerViaSSH(ip, username, password, serverAddr, serverHT
 			ssh.Password(password),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         10 * time.Second,
+		Timeout:         12 * time.Second,
 	}
 
 	target := ip
@@ -1599,30 +1682,70 @@ func (s *Server) deployWorkerViaSSH(ip, username, password, serverAddr, serverHT
 	}
 	defer session.Close()
 
-	// Robust bash script that sets up the worker environment.
+	// Robust bash script with dependency auto-install, mirror fallback, and health check
 	script := fmt.Sprintf(`
 set -e
+
+# 1. Ensure basic tools
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+	echo "[1/4] Installing system dependencies (curl, wget, git)..."
+	if command -v apt-get >/dev/null 2>&1; then
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update -qq && apt-get install -y -qq curl wget git
+	elif command -v yum >/dev/null 2>&1; then
+		yum install -y -q curl wget git
+	fi
+fi
 
 mkdir -p /root/cnc-worker-node
 cd /root/cnc-worker-node
 
 echo "[1/4] Downloading CNC Worker Binary..."
 rm -f cnc-worker-linux
-curl -s -L -o cnc-worker-linux "https://github.com/rel7z/cnc-deploy/raw/refs/heads/main/cnc-worker-linux"
+DL_OK=0
+if command -v curl >/dev/null 2>&1; then
+	curl -fsSL -o cnc-worker-linux "%s/download/cnc-worker-linux" 2>/dev/null && DL_OK=1 || true
+elif command -v wget >/dev/null 2>&1; then
+	wget -q -O cnc-worker-linux "%s/download/cnc-worker-linux" 2>/dev/null && DL_OK=1 || true
+fi
+
+if [ $DL_OK -eq 0 ] || [ ! -s cnc-worker-linux ]; then
+	echo "Direct download from server failed, using GitHub mirror..."
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL -o cnc-worker-linux "https://github.com/rel7z/cnc-deploy/raw/refs/heads/main/cnc-worker-linux" || true
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q -O cnc-worker-linux "https://github.com/rel7z/cnc-deploy/raw/refs/heads/main/cnc-worker-linux" || true
+	fi
+fi
+
+if [ ! -s cnc-worker-linux ]; then
+	echo "ERROR: Failed to download worker binary from both server and mirror!"
+	exit 1
+fi
 chmod +x cnc-worker-linux
 
 echo "[2/4] Setting up Tools..."
-if [ -d "tools" ]; then
+if ! command -v git >/dev/null 2>&1; then
+	if command -v apt-get >/dev/null 2>&1; then
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update -qq && apt-get install -y -qq git || true
+	elif command -v yum >/dev/null 2>&1; then
+		yum install -y -q git || true
+	fi
+fi
+
+if [ -d "tools" ] && [ -d "tools/.git" ]; then
 	cd tools
-	git fetch origin main && git reset --hard origin/main || echo "Failed to pull tools, continuing..."
+	git fetch origin main && git reset --hard origin/main || echo "Warning: Failed to update tools repo"
 	cd ..
 else
-	git clone https://github.com/rel7z/worker-tools.git tools || echo "Failed to clone tools, continuing..."
+	rm -rf tools
+	git clone --depth 1 https://github.com/rel7z/worker-tools.git tools || echo "Warning: Failed to clone worker-tools"
 fi
 chmod +x tools/* 2>/dev/null || true
 
 echo "[3/4] Creating Configuration..."
-cat << EOF > server_config.json
+cat << EOF > worker_config.json
 {
   "server_addr": "%s",
   "worker_id": "worker_$(hostname -s)_$RANDOM",
@@ -1630,6 +1753,7 @@ cat << EOF > server_config.json
   "data_dir": "./worker_data"
 }
 EOF
+cp -f worker_config.json server_config.json
 
 echo "[4/4] Starting systemd service..."
 cat << EOF > /etc/systemd/system/cnc-worker.service
@@ -1641,9 +1765,10 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root/cnc-worker-node
-ExecStart=/root/cnc-worker-node/cnc-worker-linux -config=/root/cnc-worker-node/server_config.json
-Restart=on-failure
+ExecStart=/root/cnc-worker-node/cnc-worker-linux -config=/root/cnc-worker-node/worker_config.json
+Restart=always
 RestartSec=5
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
@@ -1653,8 +1778,15 @@ systemctl daemon-reload
 systemctl enable cnc-worker
 systemctl restart cnc-worker
 
-echo "Deployment successful on $(hostname -I)"
-`, serverAddr)
+sleep 2
+if systemctl is-active --quiet cnc-worker; then
+	echo "✓ Deployment successful: CNC Worker is running on $(hostname -I | awk '{print $1}')"
+else
+	echo "✗ ERROR: cnc-worker service failed to start! Recent logs:"
+	journalctl -u cnc-worker -n 25 --no-pager
+	exit 1
+fi
+`, serverHTTPAddr, serverHTTPAddr, serverAddr)
 	stdoutPipe, err := session.StdoutPipe()
 	if err != nil {
 		sendLog("Failed to get stdout pipe: %v", err)

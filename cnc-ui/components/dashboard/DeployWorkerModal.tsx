@@ -25,6 +25,12 @@ export function DeployWorkerModal({ onClose }: DeployWorkerModalProps) {
   }, [logs]);
 
   useEffect(() => {
+    if (typeof window !== "undefined" && window.location.hostname) {
+      const host = window.location.hostname;
+      if (host && host !== "localhost" && host !== "127.0.0.1") {
+        setServerAddr(`${host}:9090`);
+      }
+    }
     if (Object.keys(workers).length > 0) {
       const uniqueIps = Array.from(
         new Set(
