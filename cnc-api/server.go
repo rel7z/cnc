@@ -694,11 +694,21 @@ func (s *Server) handleRegisterWorker(msg *Message, sendCh chan *Message, remote
 	}
 
 	s.mu.Lock()
-	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
-		p.Worker.Address = host
-	} else {
-		p.Worker.Address = remoteAddr
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = h
 	}
+	p.Worker.Address = host
+
+	// Safeguard: Ensure worker ID is unique per host so workers never overwrite each other
+	cleanHost := strings.ReplaceAll(host, ".", "_")
+	cleanHost = strings.ReplaceAll(cleanHost, ":", "_")
+	if p.Worker.ID == "" {
+		p.Worker.ID = fmt.Sprintf("worker_%s", cleanHost)
+	} else if existing, exists := s.workers[p.Worker.ID]; exists && existing.Address != host && existing.Status == WorkerStatusOnline {
+		p.Worker.ID = fmt.Sprintf("%s_%s", p.Worker.ID, cleanHost)
+	}
+
 	p.Worker.Registered = time.Now()
 	p.Worker.LastSeen = time.Now()
 	p.Worker.Status = WorkerStatusOnline
@@ -1700,7 +1710,11 @@ func (s *Server) deployWorkerViaSSH(ip, username, password, serverAddr, serverHT
 	}
 	defer session.Close()
 
-	// Robust bash script with dependency auto-install, mirror fallback, and health check
+	cleanIP := strings.ReplaceAll(ip, ".", "_")
+	cleanIP = strings.ReplaceAll(cleanIP, ":", "_")
+	workerID := fmt.Sprintf("worker_%s", cleanIP)
+
+	// Robust bash script with dependency auto-install, mirror fallback, unique worker ID, and health check
 	script := fmt.Sprintf(`
 set -e
 
@@ -1772,12 +1786,12 @@ if [ -z "$TARGET_SERVER" ] || [ "$TARGET_SERVER" = "localhost:9090" ] || [ "$TAR
 	fi
 fi
 
-echo "Connecting worker to CNC Server at: $TARGET_SERVER"
+echo "Connecting worker (%s) to CNC Server at: $TARGET_SERVER"
 
 cat << EOF > worker_config.json
 {
   "server_addr": "$TARGET_SERVER",
-  "worker_id": "worker_$(hostname -s)_$RANDOM",
+  "worker_id": "%s",
   "max_tasks": 0,
   "data_dir": "./worker_data"
 }
@@ -1809,13 +1823,13 @@ systemctl restart cnc-worker
 
 sleep 2
 if systemctl is-active --quiet cnc-worker; then
-	echo "✓ Deployment successful: CNC Worker is active on $(hostname -I | awk '{print $1}') (Target: $TARGET_SERVER)"
+	echo "✓ Deployment successful: CNC Worker is active on $(hostname -I | awk '{print $1}') (ID: %s, Target: $TARGET_SERVER)"
 else
 	echo "✗ ERROR: cnc-worker service failed to start! Recent logs:"
 	journalctl -u cnc-worker -n 25 --no-pager
 	exit 1
 fi
-`, serverHTTPAddr, serverHTTPAddr, serverAddr)
+`, serverHTTPAddr, serverHTTPAddr, serverAddr, workerID, workerID, workerID)
 	stdoutPipe, err := session.StdoutPipe()
 	if err != nil {
 		sendLog("Failed to get stdout pipe: %v", err)
