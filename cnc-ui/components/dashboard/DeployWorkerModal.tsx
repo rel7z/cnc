@@ -152,21 +152,28 @@ export function DeployWorkerModal({ onClose }: DeployWorkerModalProps) {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">
-                CNC Server Address (optional)
-              </label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-sm font-medium text-gray-300">
+                  CNC Server Address (optional)
+                </label>
+                <span className="text-[11px] font-mono text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
+                  Auto-Detect via SSH Client IP
+                </span>
+              </div>
               <input
                 type="text"
                 value={serverAddr}
                 onChange={(e) => setServerAddr(e.target.value)}
-                placeholder="e.g. 198.51.100.5:9090 or my-ngrok.app"
+                placeholder="Leave blank for automatic public IP detection"
                 className="w-full bg-gray-950 border border-gray-800 rounded-md px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               />
-              <p className="text-xs text-gray-500 mt-1">If blank, it will guess from your current browser URL.</p>
+              <p className="text-xs text-gray-400 mt-1">
+                If left blank, remote workers automatically discover this server&apos;s true public IP via incoming SSH connection (<span className="font-mono text-gray-300">$SSH_CLIENT</span>).
+              </p>
             </div>
             
             <p className="text-xs text-gray-500 leading-relaxed mt-2">
-              The CNC server will SSH into these IPs, pull the latest worker code, and start the systemd service.
+              The CNC server will SSH into these IPs, install the latest worker binary, configure auto-connection to port 9090, and start the systemd service.
             </p>
           </form>
 

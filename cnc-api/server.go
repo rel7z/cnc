@@ -288,6 +288,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/config/telegram", s.handleTelegramConfigAPI)
 	mux.HandleFunc("/api/config/telegram/test", s.handleTestTelegramAPI)
 	mux.HandleFunc("/api/server/restart", s.handleServerRestartAPI)
+	mux.HandleFunc("/api/server/update", s.handleServerUpdateAPI)
 	mux.HandleFunc("/api/status", s.handleStatusAPI)
 	mux.HandleFunc("/api/events", s.handleEventsAPI)
 	mux.HandleFunc("/api/files/", s.handleFilesAPI)
@@ -1476,23 +1477,40 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 }
 
 func (s *Server) handleDownloadWorker(w http.ResponseWriter, r *http.Request) {
-	exePath, err := os.Executable()
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+	cwd, _ := os.Getwd()
+	candidates := []string{
+		filepath.Join(cwd, "cnc-worker-linux"),
+		filepath.Join(cwd, "cnc-api", "cnc-worker-linux"),
+		filepath.Join(cwd, "..", "cnc-worker-linux"),
+		filepath.Join(cwd, "..", "cnc-api", "cnc-worker-linux"),
+		"/root/cnc/cnc-worker-linux",
+		"/root/cnc/cnc-api/cnc-worker-linux",
+		"/root/cnc-worker-node/cnc-worker-linux",
 	}
-	dir := filepath.Dir(exePath)
-	workerPath := filepath.Join(dir, "cnc-worker-linux")
-	if _, err := os.Stat(workerPath); os.IsNotExist(err) {
-		// fallback to current directory
-		workerPath = "cnc-worker-linux"
+
+	if exePath, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exePath)
+		candidates = append([]string{
+			filepath.Join(dir, "cnc-worker-linux"),
+			filepath.Join(dir, "cnc-api", "cnc-worker-linux"),
+			filepath.Join(dir, "..", "cnc-worker-linux"),
+			filepath.Join(dir, "..", "cnc-api", "cnc-worker-linux"),
+		}, candidates...)
 	}
-	
-	if _, err := os.Stat(workerPath); os.IsNotExist(err) {
+
+	var workerPath string
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() && info.Size() > 0 {
+			workerPath = c
+			break
+		}
+	}
+
+	if workerPath == "" {
 		http.Error(w, "worker binary not found on server", http.StatusNotFound)
 		return
 	}
-	
+
 	w.Header().Set("Content-Disposition", "attachment; filename=cnc-worker-linux")
 	http.ServeFile(w, r, workerPath)
 }

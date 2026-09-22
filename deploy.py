@@ -578,10 +578,6 @@ def setup_update(install_dir=None):
         ensure_node20()
 
         sudo = "" if is_root() else "sudo "
-        if shutil.which("systemctl"):
-            log_info("Stopping services during update...")
-            run_cmd(f"{sudo}systemctl stop cnc-server || true")
-            run_cmd(f"{sudo}systemctl stop cnc-ui || true")
 
         log_step(1, 3, "Pulling Latest Code from GitHub")
         run_cmd("git pull origin main", cwd=ui_target)
@@ -593,14 +589,19 @@ def setup_update(install_dir=None):
             log_info(f"Recompiling backend in {api_dir}...")
             run_cmd("export PATH=$PATH:/usr/local/go/bin && make build && make build-linux", cwd=api_dir)
             
-            server_bin = os.path.join(api_dir, "cnc-server")
+            server_bin = os.path.join(api_dir, "cnc-server-linux")
+            if not os.path.exists(server_bin):
+                server_bin = os.path.join(api_dir, "cnc-server")
             if os.path.exists(server_bin):
-                run_cmd(f"rm -f {install_dir}/cnc-server-linux && cp {server_bin} {install_dir}/cnc-server-linux")
+                run_cmd(f"rm -f {install_dir}/cnc-server-linux && cp {server_bin} {install_dir}/cnc-server-linux && chmod +x {install_dir}/cnc-server-linux")
+                run_cmd(f"cp {server_bin} {install_dir}/cnc-server 2>/dev/null || true")
                 # Ensure the built tools are copied to the main install directory where the server runs
                 run_cmd(f"cp -r {api_dir}/tools {install_dir}/")
                 worker_linux = os.path.join(api_dir, "cnc-worker-linux")
+                if not os.path.exists(worker_linux):
+                    worker_linux = os.path.join(api_dir, "cnc-worker")
                 if os.path.exists(worker_linux):
-                    run_cmd(f"cp {worker_linux} {install_dir}/cnc-worker-linux")
+                    run_cmd(f"cp {worker_linux} {install_dir}/cnc-worker-linux && chmod +x {install_dir}/cnc-worker-linux")
                     run_cmd(f"cp {worker_linux} {api_dir}/tools/ 2>/dev/null || true")
                 log_success("Backend recompiled, binaries and tools updated.")
         else:
@@ -617,9 +618,11 @@ def setup_update(install_dir=None):
 
         log_step(3, 3, "Restarting Services")
         if shutil.which("systemctl"):
-            run_cmd(f"{sudo}systemctl restart cnc-server || true")
             run_cmd(f"{sudo}systemctl restart cnc-ui || true")
-            log_success("Services restarted.")
+            log_success("Frontend UI service restarted.")
+            # Restart cnc-server after a small delay so output stream finishes cleanly
+            run_cmd(f"nohup bash -c 'sleep 2 && {sudo}systemctl restart cnc-server' >/dev/null 2>&1 &")
+            log_success("CNC Server restart scheduled in 2 seconds.")
         else:
             log_warn("systemctl not found. Please restart your processes manually.")
             

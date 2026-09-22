@@ -1,6 +1,7 @@
 package cnc
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -250,4 +252,119 @@ func (s *Server) handleServerExecAPI(w http.ResponseWriter, r *http.Request) {
 		"cwd":       cwd,
 		"exit_code": exitCode,
 	})
+}
+
+// handleServerUpdateAPI handles triggering a full git pull, recompile, and restart
+// POST /api/server/update
+func (s *Server) handleServerUpdateAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, hasFlusher := w.(http.Flusher)
+	flush := func() {
+		if hasFlusher {
+			flusher.Flush()
+		}
+	}
+
+	writeLog := func(msg string) {
+		w.Write([]byte(msg + "\n"))
+		flush()
+	}
+
+	writeLog("[INFO] Initiating server update and recompile...")
+
+	// Locate deploy.py
+	cwd, _ := os.Getwd()
+	candidates := []string{
+		filepath.Join(cwd, "deploy.py"),
+		filepath.Join(cwd, "..", "deploy.py"),
+		"/root/cnc/deploy.py",
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates, filepath.Join(exeDir, "deploy.py"), filepath.Join(exeDir, "..", "deploy.py"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, "cnc", "deploy.py"))
+	}
+
+	var deployScript string
+	for _, c := range candidates {
+		abs, err := filepath.Abs(c)
+		if err == nil {
+			if info, err := os.Stat(abs); err == nil && !info.IsDir() {
+				deployScript = abs
+				break
+			}
+		}
+	}
+
+	if deployScript == "" {
+		writeLog("[ERROR] deploy.py not found in working directory or candidate locations.")
+		return
+	}
+
+	deployDir := filepath.Dir(deployScript)
+	writeLog(fmt.Sprintf("[INFO] Found deployment script at: %s", deployScript))
+	writeLog(fmt.Sprintf("[INFO] Working directory: %s", deployDir))
+	writeLog("[INFO] Executing: python3 deploy.py --role update")
+
+	cmd := exec.Command("python3", deployScript, "--role", "update")
+	cmd.Dir = deployDir
+	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1", "PATH="+os.Getenv("PATH")+":/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin")
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		writeLog(fmt.Sprintf("[ERROR] Failed to get stdout pipe: %v", err))
+		return
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		writeLog(fmt.Sprintf("[ERROR] Failed to get stderr pipe: %v", err))
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		writeLog(fmt.Sprintf("[ERROR] Failed to start update process: %v", err))
+		return
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			w.Write(append(scanner.Bytes(), '\n'))
+			flush()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			w.Write([]byte("[STDERR] " + scanner.Text() + "\n"))
+			flush()
+		}
+	}()
+
+	wg.Wait()
+	err = cmd.Wait()
+
+	if err != nil {
+		writeLog(fmt.Sprintf("\n[ERROR] Update failed: %v", err))
+	} else {
+		writeLog("\n[SUCCESS] Update and rebuild completed successfully! Server is restarting...")
+	}
 }
