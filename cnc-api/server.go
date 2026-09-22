@@ -1091,6 +1091,7 @@ func (s *Server) processSpreadJob(job *Job) {
 	s.mu.Lock()
 	job.TotalTasks = len(splitFiles)
 	taskIDs := make([]string, 0, len(splitFiles))
+	createdTasks := make([]Task, 0, len(splitFiles))
 
 	for i, chunkPath := range splitFiles {
 		taskID := fmt.Sprintf("task_%s_%d", job.ID, i)
@@ -1111,9 +1112,18 @@ func (s *Server) processSpreadJob(job *Job) {
 		}
 		s.tasks[taskID] = task
 		taskIDs = append(taskIDs, taskID)
+		createdTasks = append(createdTasks, *task)
 	}
 	s.jobTasks[job.ID] = taskIDs
+	jobCopy = *job
 	s.mu.Unlock()
+
+	// Broadcast the updated job (with total_tasks) and all newly created tasks.
+	s.broadcast(SSEEvent{Type: SSEEventJob, Payload: jobCopy})
+	for _, t := range createdTasks {
+		s.broadcast(SSEEvent{Type: SSEEventTask, Payload: t})
+	}
+	s.broadcastStats()
 
 	// Enqueue tasks after releasing the lock.
 	for _, taskID := range taskIDs {
@@ -1161,6 +1171,7 @@ func (s *Server) processBroadcastJob(job *Job) {
 	job.Workers = len(onlineWorkerIDs)
 
 	taskIDs := make([]string, 0, len(onlineWorkerIDs))
+	createdTasks := make([]Task, 0, len(onlineWorkerIDs))
 	for i, workerID := range onlineWorkerIDs {
 		taskID := fmt.Sprintf("task_%s_%d", job.ID, i)
 		task := &Task{
@@ -1177,12 +1188,17 @@ func (s *Server) processBroadcastJob(job *Job) {
 		}
 		s.tasks[taskID] = task
 		taskIDs = append(taskIDs, taskID)
+		createdTasks = append(createdTasks, *task)
 	}
 	s.jobTasks[job.ID] = taskIDs
 	jobCopy := *job
 	s.mu.Unlock()
 
 	s.broadcast(SSEEvent{Type: SSEEventJob, Payload: jobCopy})
+	for _, t := range createdTasks {
+		s.broadcast(SSEEvent{Type: SSEEventTask, Payload: t})
+	}
+	s.broadcastStats()
 
 	// Enqueue all tasks.
 	for _, taskID := range taskIDs {
@@ -1297,6 +1313,8 @@ func (s *Server) dispatchTask(task *Task) {
 	if chosen.CurrentLoad >= chosen.MaxTasks {
 		chosen.Status = WorkerStatusBusy
 	}
+	taskCopy := *task
+	workerCopy := *chosen
 
 	msg, err := NewMessage(MsgTypeAssignTask, AssignTaskPayload{Task: *task})
 	if err != nil {
@@ -1308,6 +1326,9 @@ func (s *Server) dispatchTask(task *Task) {
 	select {
 	case chosen.SendCh <- msg:
 		log.Printf("Dispatched task %s → worker %s", task.ID, chosen.ID)
+		s.broadcast(SSEEvent{Type: SSEEventTask, Payload: taskCopy})
+		s.broadcast(SSEEvent{Type: SSEEventWorker, Payload: workerCopy})
+		s.broadcastStats()
 	default:
 		log.Printf("Worker %s send buffer full, requeueing task %s", chosen.ID, task.ID)
 		s.requeueTask(task, chosen)
@@ -1317,12 +1338,24 @@ func (s *Server) dispatchTask(task *Task) {
 func (s *Server) requeueTask(task *Task, w *Worker) {
 	task.Status = TaskStatusPending
 	task.AssignedTo = ""
+	var workerCopy *Worker
 	if w != nil {
 		w.CurrentLoad--
 		if w.CurrentLoad < 0 {
 			w.CurrentLoad = 0
 		}
+		if w.CurrentLoad < w.MaxTasks {
+			w.Status = WorkerStatusOnline
+		}
+		cp := *w
+		workerCopy = &cp
 	}
+	taskCopy := *task
+	s.broadcast(SSEEvent{Type: SSEEventTask, Payload: taskCopy})
+	if workerCopy != nil {
+		s.broadcast(SSEEvent{Type: SSEEventWorker, Payload: *workerCopy})
+	}
+	s.broadcastStats()
 	go func() { s.taskQueue <- task }()
 }
 

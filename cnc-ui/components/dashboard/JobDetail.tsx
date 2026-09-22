@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 import { useDashboard } from "@/components/providers/EventProvider";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -20,7 +20,7 @@ function JobProgressBar({ job }: { job: Job }) {
           ? "Executing on server host…"
           : job.mode === "broadcast"
           ? "Waiting for workers…"
-          : "No tasks yet — splitting file…"}
+          : "Preparing tasks…"}
       </p>
     );
 
@@ -88,9 +88,45 @@ interface JobDetailProps {
 }
 
 export function JobDetail({ jobId }: JobDetailProps) {
-  const { jobs, tasks } = useDashboard();
+  const { jobs, tasks, dispatch } = useDashboard();
   const [isCancelling, setIsCancelling] = useState(false);
   const job = jobs[jobId];
+
+  // Self-healing polling:
+  // If the job has 0 total tasks, or is still running/pending, poll every 2.5s
+  // so the user never gets stuck if an SSE event was dropped or missed before mounting.
+  useEffect(() => {
+    if (job && job.total_tasks > 0 && job.status !== "running" && job.status !== "pending") {
+      return;
+    }
+
+    const poll = async () => {
+      try {
+        const [jobRes, tasksRes] = await Promise.all([
+          fetch(`/api/jobs/${jobId}`),
+          fetch("/api/tasks"),
+        ]);
+        if (jobRes.ok) {
+          const j = await jobRes.json();
+          dispatch({ type: "JOB_UPDATE", payload: j });
+        }
+        if (tasksRes.ok) {
+          const allTasks: Task[] = await tasksRes.json();
+          for (const t of allTasks) {
+            if (t.job_id === jobId) {
+              dispatch({ type: "TASK_UPDATE", payload: t });
+            }
+          }
+        }
+      } catch {
+        // ignore network error
+      }
+    };
+
+    poll();
+    const interval = setInterval(poll, 2500);
+    return () => clearInterval(interval);
+  }, [jobId, job?.total_tasks, job?.status, dispatch]);
 
   const handleCancel = async () => {
     if (!confirm("Are you sure you want to forcefully cancel this job? All running tasks will be killed.")) return;
