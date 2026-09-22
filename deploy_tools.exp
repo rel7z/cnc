@@ -1,0 +1,13 @@
+#!/usr/bin/expect -f
+set timeout 60
+set password "12345Surabaya"
+set ip "157.230.57.107"
+
+spawn rsync -avz --progress /Users/fahrel/Documents/GitHub/cnc/cnc-api/tools/ root@$ip:/root/tools/
+expect {
+    "*assword:*" {
+        send "$password\r"
+        exp_continue
+    }
+    eof
+}

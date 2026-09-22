@@ -3,16 +3,19 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	probing "github.com/prometheus-community/pro-bing"
@@ -22,7 +25,6 @@ type ProgressUI struct {
 	totalDomains int64
 	resolvedIPs  int64
 	fetchedCIDRs int64
-	totalIPs     int64
 	pingedIPs    int64
 	validIPs     int64
 	startTime    time.Time
@@ -37,7 +39,7 @@ func NewProgressUI() *ProgressUI {
 }
 
 func (p *ProgressUI) Start() {
-	ticker := time.NewTicker(200 * time.Millisecond)
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -58,13 +60,12 @@ func (p *ProgressUI) render() {
 	dom := atomic.LoadInt64(&p.totalDomains)
 	res := atomic.LoadInt64(&p.resolvedIPs)
 	cidrs := atomic.LoadInt64(&p.fetchedCIDRs)
-	ips := atomic.LoadInt64(&p.totalIPs)
 	pinged := atomic.LoadInt64(&p.pingedIPs)
 	valid := atomic.LoadInt64(&p.validIPs)
 	elapsed := time.Since(p.startTime).Round(time.Second)
 
-	fmt.Fprintf(os.Stderr, "\r[*] Domains: %d/%d | CIDRs: %d | Total IPs: %d | Pinged: %d | Alive: %d | Elapsed: %v",
-		res, dom, cidrs, ips, pinged, valid, elapsed)
+	fmt.Fprintf(os.Stderr, "\r[*] Domains: %d/%d | CIDRs: %d | Pinged: %d | Alive: %d | Elapsed: %v   ",
+		res, dom, cidrs, pinged, valid, elapsed)
 }
 
 func (p *ProgressUI) renderFinal() {
@@ -104,11 +105,16 @@ func fetchCIDR(ip string, client *http.Client) (string, error) {
 	return data.Data.Prefix, nil
 }
 
-// expandCIDR generates all IP addresses in the given CIDR (excluding network and broadcast if > /31)
 func expandCIDR(cidr string) ([]string, error) {
 	ip, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return nil, err
+	}
+
+	ones, bits := ipnet.Mask.Size()
+	// Restrict to /20 (4096 IPs) max to prevent huge cloud block expansions
+	if bits == 32 && ones < 20 {
+		return nil, fmt.Errorf("subnet %s too large (/%d), skipping", cidr, ones)
 	}
 
 	var ips []string
@@ -176,7 +182,7 @@ func main() {
 	flag.Parse()
 
 	if fileInput == "" {
-		fmt.Fprintln(os.Stderr, "Usage: bgp-scanner -l domains.txt [-c 100] [-timeout 2s] [-out valid.txt]")
+		fmt.Fprintln(os.Stderr, "Usage: subnet-finder -l domains.txt [-c 100] [-timeout 2s] [-out valid.txt]")
 		os.Exit(1)
 	}
 
@@ -197,7 +203,7 @@ func main() {
 	}
 
 	if len(domains) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: bgp-scanner -l domains.txt [-c 100] [-timeout 2s] [-out valid.txt]")
+		fmt.Fprintln(os.Stderr, "Usage: subnet-finder -l domains.txt [-c 100] [-timeout 2s] [-out valid.txt]")
 		os.Exit(1)
 	}
 
@@ -208,126 +214,162 @@ func main() {
 	}
 	defer outF.Close()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Fprintln(os.Stderr, "\n[!] Received interrupt, shutting down gracefully...")
+		cancel()
+	}()
+
 	ui := NewProgressUI()
 	atomic.StoreInt64(&ui.totalDomains, int64(len(domains)))
 	go ui.Start()
 
-	// 1. Resolve Domains to IPs
-	var resolvedIPs []string
-	var mu sync.Mutex
-
-	var wg sync.WaitGroup
+	// Pipeline channels
 	domainCh := make(chan string, len(domains))
-	for _, d := range domains {
-		domainCh <- d
-	}
-	close(domainCh)
+	ipToCidrCh := make(chan string, 1000)
+	cidrToExpandCh := make(chan string, 1000)
+	ipToPingCh := make(chan string, 10000)
 
-	// Small concurrency for DNS resolution
+	var dnsWg, ripeWg, expandWg, pingWg sync.WaitGroup
+
+	var seenIPs sync.Map
+	var seenCIDRs sync.Map
+	var seenExpandedIPs sync.Map
+	outMu := sync.Mutex{}
+
+	// Stage 1: DNS Resolution
 	for i := 0; i < 50; i++ {
-		wg.Add(1)
+		dnsWg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer dnsWg.Done()
 			for d := range domainCh {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
 				ips, _ := net.LookupHost(d)
-				if len(ips) > 0 {
-					mu.Lock()
-					resolvedIPs = append(resolvedIPs, ips[0]) // just take the first IP
-					mu.Unlock()
+				for _, ip := range ips {
+					if _, loaded := seenIPs.LoadOrStore(ip, true); !loaded {
+						select {
+						case ipToCidrCh <- ip:
+						case <-ctx.Done():
+							return
+						}
+					}
 				}
 				atomic.AddInt64(&ui.resolvedIPs, 1)
 			}
 		}()
 	}
-	wg.Wait()
 
-	// Unique IPs
-	ipSet := make(map[string]bool)
-	for _, ip := range resolvedIPs {
-		ipSet[ip] = true
-	}
-	var uniqueIPs []string
-	for ip := range ipSet {
-		uniqueIPs = append(uniqueIPs, ip)
-	}
-
-	// 2. Fetch CIDRs
+	// Stage 2: Fetch CIDRs from RIPE Stat
 	client := &http.Client{Timeout: 10 * time.Second}
-	var cidrs []string
-	ipCh := make(chan string, len(uniqueIPs))
-	for _, ip := range uniqueIPs {
-		ipCh <- ip
-	}
-	close(ipCh)
-
-	// Small concurrency for API so we don't spam RIPE Stat
 	for i := 0; i < 10; i++ {
-		wg.Add(1)
+		ripeWg.Add(1)
 		go func() {
-			defer wg.Done()
-			for ip := range ipCh {
+			defer ripeWg.Done()
+			for ip := range ipToCidrCh {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
 				cidr, err := fetchCIDR(ip, client)
 				if err == nil && cidr != "" {
-					mu.Lock()
-					cidrs = append(cidrs, cidr)
-					mu.Unlock()
-					atomic.AddInt64(&ui.fetchedCIDRs, 1)
+					if _, loaded := seenCIDRs.LoadOrStore(cidr, true); !loaded {
+						select {
+						case cidrToExpandCh <- cidr:
+						case <-ctx.Done():
+							return
+						}
+						atomic.AddInt64(&ui.fetchedCIDRs, 1)
+					}
+				}
+				time.Sleep(100 * time.Millisecond) // Rate limit
+			}
+		}()
+	}
+
+	// Stage 3: Expand CIDRs
+	for i := 0; i < 2; i++ {
+		expandWg.Add(1)
+		go func() {
+			defer expandWg.Done()
+			for cidr := range cidrToExpandCh {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				expanded, err := expandCIDR(cidr)
+				if err == nil {
+					for _, ip := range expanded {
+						if _, loaded := seenExpandedIPs.LoadOrStore(ip, true); !loaded {
+							select {
+							case ipToPingCh <- ip:
+							case <-ctx.Done():
+								return
+							}
+						}
+					}
 				}
 			}
 		}()
 	}
-	wg.Wait()
 
-	// Unique CIDRs
-	cidrSet := make(map[string]bool)
-	for _, c := range cidrs {
-		cidrSet[c] = true
-	}
-
-	// 3. Expand CIDRs
-	var allIPs []string
-	for c := range cidrSet {
-		expanded, _ := expandCIDR(c)
-		allIPs = append(allIPs, expanded...)
-	}
-
-	// Unique expanded IPs
-	expandedSet := make(map[string]bool)
-	for _, ip := range allIPs {
-		expandedSet[ip] = true
-	}
-	var finalIPs []string
-	for ip := range expandedSet {
-		finalIPs = append(finalIPs, ip)
-	}
-
-	atomic.StoreInt64(&ui.totalIPs, int64(len(finalIPs)))
-
-	// 4. Ping Sweep
-	pingCh := make(chan string, len(finalIPs))
-	for _, ip := range finalIPs {
-		pingCh <- ip
-	}
-	close(pingCh)
-
-	outMu := sync.Mutex{}
+	// Stage 4: Ping Sweep
 	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
+		pingWg.Add(1)
 		go func() {
-			defer wg.Done()
-			for ip := range pingCh {
+			defer pingWg.Done()
+			for ip := range ipToPingCh {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
 				if isAlive(ip, timeout) {
 					atomic.AddInt64(&ui.validIPs, 1)
 					outMu.Lock()
 					fmt.Fprintln(outF, ip)
-					fmt.Println(ip)
+					fmt.Println(ip) // Streams directly to stdout (worker picks this up and streams to server)
 					outMu.Unlock()
 				}
 				atomic.AddInt64(&ui.pingedIPs, 1)
 			}
 		}()
 	}
-	wg.Wait()
 
+	// Coordinator
+	go func() {
+		// Feed domains
+		for _, d := range domains {
+			select {
+			case domainCh <- d:
+			case <-ctx.Done():
+				break
+			}
+		}
+		close(domainCh)
+
+		// Wait for stages to finish sequentially closing downstream channels
+		dnsWg.Wait()
+		close(ipToCidrCh)
+
+		ripeWg.Wait()
+		close(cidrToExpandCh)
+
+		expandWg.Wait()
+		close(ipToPingCh)
+	}()
+
+	// Wait for pings to finish
+	pingWg.Wait()
 	ui.Stop()
 }

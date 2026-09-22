@@ -114,11 +114,11 @@ var ToolsRegistry = map[string]ToolDefinition{
 			},
 		},
 	},
-	"bgp-scanner": {
-		ID:               "bgp-scanner",
-		Name:             "BGP Subnet Scanner",
+	"subnet-finder": {
+		ID:               "subnet-finder",
+		Name:             "Subnet Finder",
 		Description:      "Resolves domains, fetches CIDRs from RIPE Stat, expands them, and ICMP pings all IPs. Spread mode.",
-		Executable:       "bgp-scanner",
+		Executable:       "subnet-finder",
 		Scope:            "worker",
 		DefaultMode:      JobModeSpread,
 		InputFlag:        "-l",

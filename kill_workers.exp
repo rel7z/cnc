@@ -1,0 +1,24 @@
+#!/usr/bin/expect -f
+set timeout 10
+set password "12345Surabaya"
+set command "killall -9 subnet-finder"
+
+set ips {
+    "134.209.70.199"
+    "68.183.118.125"
+    "104.248.114.10"
+    "137.184.216.19"
+    "137.184.73.76"
+    "157.230.57.107"
+}
+
+foreach ip $ips {
+    spawn ssh -o StrictHostKeyChecking=no root@$ip $command
+    expect {
+        "*assword:*" {
+            send "$password\r"
+            exp_continue
+        }
+        eof
+    }
+}

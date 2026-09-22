@@ -1,4 +1,4 @@
-module bgp-scanner
+module subnet-finder
 
 go 1.27.1
 
