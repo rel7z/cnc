@@ -175,6 +175,7 @@ interface SpreadFields {
   workers: string;
   timeout_seconds: string;
   no_timeout: boolean;
+  output_file: string;
 }
 
 const spreadDefaults: SpreadFields = {
@@ -183,6 +184,7 @@ const spreadDefaults: SpreadFields = {
   workers: "",
   timeout_seconds: "300",
   no_timeout: false,
+  output_file: "",
 };
 
 function SpreadForm({
@@ -250,6 +252,16 @@ function SpreadForm({
         />
       </Field>
 
+      <Field label="Watcher Output Filename" hint="Optional — if your tool writes to a file instead of stdout, enter the filename here to auto-stream it to Google Drive (e.g. out.txt)">
+        <input
+          type="text"
+          className={inputClass}
+          placeholder="out.txt"
+          value={form.output_file}
+          onChange={(e) => set("output_file", e.target.value)}
+        />
+      </Field>
+
       <TimeoutField
         value={form.timeout_seconds}
         noTimeout={form.no_timeout}
@@ -290,6 +302,7 @@ interface BroadcastFields {
   command: string;
   timeout_seconds: string;
   no_timeout: boolean;
+  output_file: string;
 }
 
 const broadcastDefaults: BroadcastFields = {
@@ -297,6 +310,7 @@ const broadcastDefaults: BroadcastFields = {
   command: "",
   timeout_seconds: "300",
   no_timeout: false,
+  output_file: "",
 };
 
 function BroadcastForm({
@@ -338,6 +352,16 @@ function BroadcastForm({
           placeholder="my-broadcast"
           value={form.name}
           onChange={(e) => set("name", e.target.value)}
+        />
+      </Field>
+
+      <Field label="Watcher Output Filename" hint="Optional — if your tool writes to a file instead of stdout, enter the filename here to auto-stream it to Google Drive (e.g. out.txt)">
+        <input
+          type="text"
+          className={inputClass}
+          placeholder="out.txt"
+          value={form.output_file}
+          onChange={(e) => set("output_file", e.target.value)}
         />
       </Field>
 
@@ -627,6 +651,10 @@ export function SubmitJobForm() {
       timeout_seconds: timeoutValue,
     };
 
+    if (fields.output_file) {
+      body.output_file = fields.output_file;
+    }
+
     const w = parseInt(fields.workers, 10);
     if (w > 0) body.workers = w;
 
@@ -648,6 +676,10 @@ export function SubmitJobForm() {
       mode: "broadcast",
       timeout_seconds: timeoutValue,
     };
+
+    if (fields.output_file) {
+      body.output_file = fields.output_file;
+    }
 
     await submitAndRedirect("/api/jobs", body);
   }

@@ -933,6 +933,7 @@ func (s *Server) processServerJob(job *Job) {
 		Payload: map[string]interface{}{
 			"command":         job.Command,
 			"timeout_seconds": float64(job.TimeoutSeconds),
+			"output_file":     job.OutputFile,
 		},
 		Status:     TaskStatusRunning,
 		AssignedTo: "server",
@@ -1106,6 +1107,7 @@ func (s *Server) processSpreadJob(job *Job) {
 				"dest_name":       originalName,
 				"chunk_path":      chunkPath,
 				"timeout_seconds": float64(job.TimeoutSeconds),
+				"output_file":     job.OutputFile,
 			},
 			Status:    TaskStatusPending,
 			CreatedAt: time.Now(),
@@ -1181,6 +1183,7 @@ func (s *Server) processBroadcastJob(job *Job) {
 			Payload: map[string]interface{}{
 				"command":         job.Command,
 				"timeout_seconds": float64(job.TimeoutSeconds),
+				"output_file":     job.OutputFile,
 			},
 			Status:     TaskStatusPending,
 			AssignedTo: workerID,
