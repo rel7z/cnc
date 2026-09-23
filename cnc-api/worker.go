@@ -427,6 +427,7 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 	downloadURL, _ := task.Payload["download_url"].(string)
 	destName, _ := task.Payload["dest_name"].(string)
 	timeoutSec, _ := task.Payload["timeout_seconds"].(float64)
+	outputFile, _ := task.Payload["output_file"].(string)
 
 	if command == "" {
 		return nil, fmt.Errorf("task payload missing 'command'")
@@ -519,6 +520,35 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 	
 	cmd.Stdout = io.MultiWriter(&stdout, stdoutStream)
 	cmd.Stderr = io.MultiWriter(&stderr, stderrStream)
+
+	// If the task specifies an output file, the tool might write to it instead of stdout.
+	// We'll poll this file and stream its contents to stdoutStream.
+	if outputFile != "" {
+		go func() {
+			var offset int64 = 0
+			for {
+				select {
+				case <-ctx.Done():
+					// One last read
+					if f, err := os.Open(outputFile); err == nil {
+						f.Seek(offset, io.SeekStart)
+						io.Copy(stdoutStream, f)
+						f.Close()
+					}
+					return
+				case <-time.After(500 * time.Millisecond):
+					if f, err := os.Open(outputFile); err == nil {
+						f.Seek(offset, io.SeekStart)
+						n, _ := io.Copy(stdoutStream, f)
+						if n > 0 {
+							offset += n
+						}
+						f.Close()
+					}
+				}
+			}
+		}()
+	}
 
 	runErr := cmd.Run()
 	stdoutStream.Close()

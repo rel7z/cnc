@@ -1264,9 +1264,9 @@ func (s *Server) taskDispatcher() {
 
 func (s *Server) dispatchTask(task *Task) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if task.Status != TaskStatusPending {
+		s.mu.Unlock()
 		return
 	}
 
@@ -1277,6 +1277,7 @@ func (s *Server) dispatchTask(task *Task) {
 		w, ok := s.workers[task.AssignedTo]
 		if !ok || w.Status == WorkerStatusOffline || w.SendCh == nil {
 			// Worker unavailable — requeue after a short delay.
+			s.mu.Unlock()
 			go func() {
 				time.Sleep(200 * time.Millisecond)
 				s.taskQueue <- task
@@ -1297,6 +1298,7 @@ func (s *Server) dispatchTask(task *Task) {
 		}
 
 		if chosen == nil {
+			s.mu.Unlock()
 			go func() {
 				time.Sleep(200 * time.Millisecond)
 				s.taskQueue <- task
@@ -1320,25 +1322,40 @@ func (s *Server) dispatchTask(task *Task) {
 	if err != nil {
 		log.Printf("Failed to build assign-task message: %v", err)
 		s.requeueTask(task, chosen)
+		taskCopy = *task
+		workerCopy = *chosen
+		s.mu.Unlock()
+		
+		s.broadcast(SSEEvent{Type: SSEEventTask, Payload: taskCopy})
+		s.broadcast(SSEEvent{Type: SSEEventWorker, Payload: workerCopy})
+		s.broadcastStats()
+		go func() { s.taskQueue <- task }()
 		return
 	}
 
 	select {
 	case chosen.SendCh <- msg:
 		log.Printf("Dispatched task %s → worker %s", task.ID, chosen.ID)
+		s.mu.Unlock()
 		s.broadcast(SSEEvent{Type: SSEEventTask, Payload: taskCopy})
 		s.broadcast(SSEEvent{Type: SSEEventWorker, Payload: workerCopy})
 		s.broadcastStats()
 	default:
 		log.Printf("Worker %s send buffer full, requeueing task %s", chosen.ID, task.ID)
 		s.requeueTask(task, chosen)
+		taskCopy = *task
+		workerCopy = *chosen
+		s.mu.Unlock()
+		s.broadcast(SSEEvent{Type: SSEEventTask, Payload: taskCopy})
+		s.broadcast(SSEEvent{Type: SSEEventWorker, Payload: workerCopy})
+		s.broadcastStats()
+		go func() { s.taskQueue <- task }()
 	}
 }
 
 func (s *Server) requeueTask(task *Task, w *Worker) {
 	task.Status = TaskStatusPending
 	task.AssignedTo = ""
-	var workerCopy *Worker
 	if w != nil {
 		w.CurrentLoad--
 		if w.CurrentLoad < 0 {
@@ -1347,16 +1364,7 @@ func (s *Server) requeueTask(task *Task, w *Worker) {
 		if w.CurrentLoad < w.MaxTasks {
 			w.Status = WorkerStatusOnline
 		}
-		cp := *w
-		workerCopy = &cp
 	}
-	taskCopy := *task
-	s.broadcast(SSEEvent{Type: SSEEventTask, Payload: taskCopy})
-	if workerCopy != nil {
-		s.broadcast(SSEEvent{Type: SSEEventWorker, Payload: *workerCopy})
-	}
-	s.broadcastStats()
-	go func() { s.taskQueue <- task }()
 }
 
 // ── Heartbeat checker ─────────────────────────────────────────────────────────
