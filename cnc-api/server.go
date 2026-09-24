@@ -30,6 +30,7 @@ type Server struct {
 	tasks       map[string]*Task
 	jobTasks    map[string][]string // jobID -> []taskID
 	taskQueue   chan *Task
+	taskBuffers map[string]string // taskID -> buffer for partial lines
 	httpServer  *http.Server
 	tcpListener net.Listener
 	config      *ServerConfig
@@ -774,18 +775,75 @@ func (s *Server) handleTaskStream(msg *Message) {
 	jobCopy := s.jobs[task.JobID]
 	s.mu.RUnlock()
 
-	// Only stream stdout to the GDrive watcher if it's enabled and requested
-	if jobCopy != nil && jobCopy.OutputFile != "" && s.config.GDrive != nil && s.config.GDrive.WatchDir != "" {
-		if p.Chunk != "" && !p.IsStderr {
-			watchDir := ExpandPath(s.config.GDrive.WatchDir)
-			outPath := filepath.Join(watchDir, jobCopy.OutputFile)
-			
-			// O_APPEND allows concurrent processes/threads to append atomically
+	if jobCopy == nil || s.config.GDrive == nil || s.config.GDrive.WatchDir == "" {
+		return
+	}
+
+	if p.Chunk != "" && !p.IsStderr {
+		watchDir := ExpandPath(s.config.GDrive.WatchDir)
+
+		s.mu.Lock()
+		if s.taskBuffers == nil {
+			s.taskBuffers = make(map[string]string)
+		}
+		s.taskBuffers[p.TaskID] += p.Chunk
+		data := s.taskBuffers[p.TaskID]
+		s.mu.Unlock()
+
+		var remaining string
+		lines := strings.Split(data, "\n")
+		if !strings.HasSuffix(data, "\n") {
+			remaining = lines[len(lines)-1]
+			lines = lines[:len(lines)-1]
+		}
+
+		s.mu.Lock()
+		if remaining == "" {
+			delete(s.taskBuffers, p.TaskID)
+		} else {
+			s.taskBuffers[p.TaskID] = remaining
+		}
+		s.mu.Unlock()
+
+		fileChunks := make(map[string]strings.Builder)
+
+		for _, line := range lines {
+			if line == "" {
+				// preserve empty lines unless we have logic against it, 
+				// but usually tools just emit complete lines.
+				// Wait, if it's completely empty, maybe skip? Let's keep it.
+			}
+			targetFile := jobCopy.OutputFile
+			content := line + "\n"
+
+			if strings.HasPrefix(line, "[FILE:") {
+				if endIdx := strings.Index(line, "]"); endIdx > 6 {
+					targetFile = line[6:endIdx]
+					content = line[endIdx+1:] + "\n"
+					content = strings.TrimPrefix(content, " ")
+				}
+			}
+
+			if targetFile == "" {
+				continue
+			}
+
+            log.Printf("[DEBUG] Routing line to %s: %s", targetFile, content)
+			b := fileChunks[targetFile]
+			b.WriteString(content)
+			fileChunks[targetFile] = b
+		}
+
+		for filename, b := range fileChunks {
+			if b.Len() == 0 {
+				continue
+			}
+			outPath := filepath.Join(watchDir, filename)
 			f, err := os.OpenFile(outPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
 				log.Printf("Failed to open watcher output file %s: %v", outPath, err)
 			} else {
-				if _, err := f.WriteString(p.Chunk); err != nil {
+				if _, err := f.WriteString(b.String()); err != nil {
 					log.Printf("Failed to write stream to watcher output file %s: %v", outPath, err)
 				}
 				f.Close()
@@ -2751,34 +2809,36 @@ func (s *Server) handleToolsLaunchAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Redirect stdout to stderr for enum to avoid polluting the GDrive output
+	// with progress bars, since enum writes its actual results to the output file.
+	if req.ToolID == "enum" {
+		cmd += " >&2"
+	}
+
 	// When wordlists are provided, wrap the tool command so the worker:
 	// 1. Downloads each wordlist file from the server using curl
 	// 2. Passes the local file path to cnc-enum via the appropriate flag
 	if wlFlags != "" {
 		var dlCmds []string
 		if req.WPPlugins != "" {
-			dlCmds = append(dlCmds, fmt.Sprintf(
-				"curl -sfo /tmp/cnc_wp_plugins.txt %s/api/files/wordlist/wp_plugins.txt",
-				s.config.HTTPAddr,
-			))
+			dlCmds = append(dlCmds,
+				"curl -sfo /tmp/cnc_wp_plugins.txt {http_addr}/api/files/wordlist/wp_plugins.txt",
+			)
 		}
 		if req.JoomlaExts != "" {
-			dlCmds = append(dlCmds, fmt.Sprintf(
-				"curl -sfo /tmp/cnc_joomla_exts.txt %s/api/files/wordlist/joomla_exts.txt",
-				s.config.HTTPAddr,
-			))
+			dlCmds = append(dlCmds,
+				"curl -sfo /tmp/cnc_joomla_exts.txt {http_addr}/api/files/wordlist/joomla_exts.txt",
+			)
 		}
 		if req.PassList != "" {
-			dlCmds = append(dlCmds, fmt.Sprintf(
-				"curl -sfo /tmp/cnc_wp_passlist.txt %s/api/files/wordlist/wp_passlist.txt",
-				s.config.HTTPAddr,
-			))
+			dlCmds = append(dlCmds,
+				"curl -sfo /tmp/cnc_wp_passlist.txt {http_addr}/api/files/wordlist/wp_passlist.txt",
+			)
 		}
 		if req.UserList != "" {
-			dlCmds = append(dlCmds, fmt.Sprintf(
-				"curl -sfo /tmp/cnc_wp_userlist.txt %s/api/files/wordlist/wp_userlist.txt",
-				s.config.HTTPAddr,
-			))
+			dlCmds = append(dlCmds,
+				"curl -sfo /tmp/cnc_wp_userlist.txt {http_addr}/api/files/wordlist/wp_userlist.txt",
+			)
 		}
 		cmd += wlFlags
 		cmd = strings.ReplaceAll(cmd, "{wp_plugins_path}", "/tmp/cnc_wp_plugins.txt")

@@ -283,14 +283,14 @@ func scanURL(inputURL string, files map[string]*os.File, fileMutex *sync.Mutex, 
 	}
 	file.WriteString(url + "\n")
 	if cmsType != "unknown" {
-		fmt.Printf("[+] %s -> %s\n", url, cmsType)
+		fmt.Printf("%s|%s\n", url, cmsType)
 	}
 	fileMutex.Unlock()
 
 	// Update counter
 	count := atomic.AddInt64(processed, 1)
 	if count%100 == 0 {
-		fmt.Printf("[*] Processed: %d targets\n", count)
+		fmt.Fprintf(os.Stderr, "[*] Processed: %d targets\n", count)
 	}
 }
 
@@ -328,16 +328,16 @@ func main() {
 	flag.Parse()
 
 	if *help || inputFile == "" {
-		fmt.Println("Usage: cms-scan -l <input_file> -o <output_dir> -t <threads>")
-		fmt.Println()
-		fmt.Println("Options:")
-		fmt.Println("  -l, -f string   Input file with URLs (required)")
-		fmt.Println("  -o string       Output directory (default: ./results)")
-		fmt.Println("  -t, -c int      Concurrent requests / threads (default: 50)")
-		fmt.Println("  -h              Show this help message")
-		fmt.Println()
-		fmt.Println("Example:")
-		fmt.Println("  cms-scan -l urls.txt -o ./results -t 50")
+		fmt.Fprintln(os.Stderr, "Usage: cms-scan -l <input_file> -o <output_dir> -t <threads>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Options:")
+		fmt.Fprintln(os.Stderr, "  -l, -f string   Input file with URLs (required)")
+		fmt.Fprintln(os.Stderr, "  -o string       Output directory (default: ./results)")
+		fmt.Fprintln(os.Stderr, "  -t, -c int      Concurrent requests / threads (default: 50)")
+		fmt.Fprintln(os.Stderr, "  -h              Show this help message")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Example:")
+		fmt.Fprintln(os.Stderr, "  cms-scan -l urls.txt -o ./results -t 50")
 		os.Exit(0)
 	}
 
@@ -380,10 +380,10 @@ func main() {
 	}
 	defer file.Close()
 
-	fmt.Printf("[*] Starting CMS detection with %d concurrent threads...\n", concurrency)
-	fmt.Printf("[*] Input: %s\n", inputFile)
-	fmt.Printf("[*] Output: %s\n", *outputDir)
-	fmt.Println(strings.Repeat("=", 60))
+	fmt.Fprintf(os.Stderr, "[*] Starting CMS detection with %d concurrent threads...\n", concurrency)
+	fmt.Fprintf(os.Stderr, "[*] Input: %s\n", inputFile)
+	fmt.Fprintf(os.Stderr, "[*] Output: %s\n", *outputDir)
+	fmt.Fprintln(os.Stderr, strings.Repeat("=", 60))
 
 	// Worker pool: start exactly `concurrency` goroutines.
 	// URLs are fed through the jobs channel one at a time as workers become free,
@@ -411,9 +411,9 @@ func main() {
 	wg.Wait()
 
 	// Print summary
-	fmt.Println("\n" + strings.Repeat("=", 60))
-	fmt.Println("✅ Scan complete!")
-	fmt.Println()
+	fmt.Fprintln(os.Stderr, "\n"+strings.Repeat("=", 60))
+	fmt.Fprintln(os.Stderr, "✅ Scan complete!")
+	fmt.Fprintln(os.Stderr, "")
 
 	// Count results for each CMS
 	for cms := range cmsSignatures {
@@ -425,7 +425,7 @@ func main() {
 			count = len(strings.Split(trimmed, "\n"))
 		}
 		if count > 0 {
-			fmt.Printf("📊 %s: %d sites\n", strings.ToUpper(cms), count)
+			fmt.Fprintf(os.Stderr, "📊 %s: %d sites\n", strings.ToUpper(cms), count)
 		}
 	}
 
@@ -436,9 +436,9 @@ func main() {
 		unknownCount = len(strings.Split(trimmed, "\n"))
 	}
 	if unknownCount > 0 {
-		fmt.Printf("📊 UNKNOWN: %d sites\n", unknownCount)
+		fmt.Fprintf(os.Stderr, "📊 UNKNOWN: %d sites\n", unknownCount)
 	}
 
-	fmt.Println(strings.Repeat("=", 60))
-	fmt.Printf("📁 Results saved to: %s\n", *outputDir)
+	fmt.Fprintln(os.Stderr, strings.Repeat("=", 60))
+	fmt.Fprintf(os.Stderr, "📁 Results saved to: %s\n", *outputDir)
 }

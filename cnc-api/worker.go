@@ -454,6 +454,7 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 	if localPath != "" {
 		command = strings.ReplaceAll(command, "{input}", localPath)
 	}
+	command = strings.ReplaceAll(command, "{http_addr}", w.getServerHTTPAddr())
 
 	// ── 3. Build execution context ────────────────────────────────────────
 	var ctx context.Context
