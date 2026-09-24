@@ -348,7 +348,7 @@ var ToolsRegistry = map[string]ToolDefinition{
 		Executable:       "wp-plugins-detector",
 		Scope:            "worker",
 		DefaultMode:      "spread",
-		InputFlag:        "-l",
+		InputFlag:        "-domains",
 		InputLabel:       "Target Domains File (Worker Path)",
 		InputPlaceholder: "/root/merged/wordpress.txt",
 		Options: []ToolOption{
