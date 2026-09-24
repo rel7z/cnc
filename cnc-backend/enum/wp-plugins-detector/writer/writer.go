@@ -164,6 +164,7 @@ func (w *Writer) Write(r scanner.Result) {
 		}
 		fmt.Fprintln(h.fullBuf, r.Domain)
 		h.fullBuf.Flush()
+		fmt.Printf("[FILE:%s.txt] %s\n", h.entry.Slug, r.Domain)
 
 		// Version-filtered file: only exact version matches
 		if h.entry.TargetVersion != "" && r.Version == h.entry.TargetVersion {
@@ -174,6 +175,8 @@ func (w *Writer) Write(r scanner.Result) {
 			}
 			fmt.Fprintln(h.filtBuf, r.Domain)
 			h.filtBuf.Flush()
+			safeVer := strings.ReplaceAll(h.entry.TargetVersion, "/", "-")
+			fmt.Printf("[FILE:%s-%s.txt] %s\n", h.entry.Slug, safeVer, r.Domain)
 		}
 
 	case scanner.StatusBlocked:

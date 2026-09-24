@@ -174,6 +174,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "[*] Progress: %d/%d IPs processed (domains found: %d, failed: %d)\n",
 				d, total, atomic.LoadInt64(&totalDomains), atomic.LoadInt64(&failed))
 		}
+		
+		writer.Flush() // Flush after each IP to ensure real-time streaming
 	}
 
 	writer.Flush()

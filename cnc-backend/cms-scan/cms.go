@@ -283,7 +283,7 @@ func scanURL(inputURL string, files map[string]*os.File, fileMutex *sync.Mutex, 
 	}
 	file.WriteString(url + "\n")
 	if cmsType != "unknown" {
-		fmt.Printf("%s|%s\n", url, cmsType)
+		fmt.Printf("[FILE:%s.txt] %s|%s\n", cmsType, url, cmsType)
 	}
 	fileMutex.Unlock()
 

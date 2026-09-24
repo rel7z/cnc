@@ -40,6 +40,7 @@ var ToolsRegistry = map[string]ToolDefinition{
 		Executable:       "cnc-enum",
 		Scope:            "worker",
 		InputFlag:        "-l",
+		OutputFlag:       "-o",
 		InputLabel:       "Target Domains File (Worker Path)",
 		InputPlaceholder: "/root/file/domains.txt",
 		Options: []ToolOption{
@@ -329,6 +330,32 @@ var ToolsRegistry = map[string]ToolDefinition{
 				Description: "Enumerate usernames via ?author=N and REST API",
 				Type:        "boolean",
 				Default:     true,
+			},
+			{
+				Name:        "extra_args",
+				Flag:        "",
+				Description: "Additional arguments to pass to the tool",
+				Type:        "string",
+				Default:     "",
+			},
+		},
+	},
+	"wp-plugins-detector": {
+		ID:               "wp-plugins-detector",
+		Name:             "WP Plugins Detector",
+		Description:      "Detects installed WordPress plugins by probing standard plugin directories and tracking successful responses.",
+		Executable:       "wp-plugins-detector",
+		Scope:            "worker",
+		InputFlag:        "-l",
+		InputLabel:       "Target Domains File (Worker Path)",
+		InputPlaceholder: "/root/merged/wordpress.txt",
+		Options: []ToolOption{
+			{
+				Name:        "threads",
+				Flag:        "-t",
+				Description: "Number of concurrent threads",
+				Type:        "number",
+				Default:     50,
 			},
 			{
 				Name:        "extra_args",

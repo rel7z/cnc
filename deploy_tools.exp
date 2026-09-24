@@ -1,13 +1,24 @@
 #!/usr/bin/expect -f
-set timeout 60
+set timeout 120
 set password "12345Surabaya"
-set ip "157.230.57.107"
 
-spawn rsync -avz --progress /Users/fahrel/Documents/GitHub/cnc/cnc-api/tools/ root@$ip:/root/tools/
-expect {
-    "*assword:*" {
-        send "$password\r"
-        exp_continue
+set ips {
+    "157.230.57.107"
+    "134.209.70.199"
+    "68.183.118.125"
+    "104.248.114.10"
+    "137.184.216.19"
+    "137.184.73.76"
+}
+
+foreach ip $ips {
+    puts "Deploying tools to $ip..."
+    spawn scp -o StrictHostKeyChecking=no ../worker-tools/cms-scan ../worker-tools/wp-plugins-detector root@$ip:/root/cnc-worker-node/tools/
+    expect {
+        "*assword:*" {
+            send "$password\r"
+            exp_continue
+        }
+        eof
     }
-    eof
 }
