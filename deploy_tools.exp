@@ -13,7 +13,7 @@ set ips {
 
 foreach ip $ips {
     puts "Deploying tools to $ip..."
-    spawn scp -o StrictHostKeyChecking=no ../worker-tools/cms-scan ../worker-tools/wp-plugins-detector root@$ip:/root/cnc-worker-node/tools/
+    spawn scp -o StrictHostKeyChecking=no build_tools/cms-scan build_tools/wp-plugins-detector build_tools/cnc-enum root@$ip:/root/cnc-worker-node/tools/
     expect {
         "*assword:*" {
             send "$password\r"

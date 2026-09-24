@@ -40,8 +40,8 @@ var ToolsRegistry = map[string]ToolDefinition{
 		Description:      "Auto-cascading pipeline: detects WordPress → plugin scan, Joomla → extension scan, Unknown → 3rd-party admin panel enum. Results piped to watcher folder.",
 		Executable:       "cnc-enum",
 		Scope:            "worker",
+		DefaultMode:      "spread",
 		InputFlag:        "-l",
-		OutputFlag:       "-o",
 		InputLabel:       "Target Domains File (Worker Path)",
 		InputPlaceholder: "/root/file/domains.txt",
 		Options: []ToolOption{

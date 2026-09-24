@@ -320,7 +320,7 @@ func runWPPluginScanner(domains, plugins []string, concurrency int, timeout time
 			for j := range jobs {
 				ver, detected := probeWPPlugin(client, j.domain, j.slug)
 				if detected {
-					line := fmt.Sprintf("[WP-PLUGIN] https://%s/wp-content/plugins/%s  version=%s", j.domain, j.slug, ver)
+					line := fmt.Sprintf("[FILE:enum-wp-plugins.txt] https://%s/wp-content/plugins/%s  version=%s", j.domain, j.slug, ver)
 					out.writeLine(line)
 					atomic.AddInt64(&found, 1)
 				}
@@ -432,7 +432,7 @@ func runJoomlaScanner(domains, extensions []string, concurrency int, timeout tim
 			for j := range jobs {
 				ver, detected := probeJoomlaExt(client, j.domain, j.ext)
 				if detected {
-					line := fmt.Sprintf("[JOOMLA-EXT] https://%s  ext=%s  version=%s", j.domain, j.ext, ver)
+					line := fmt.Sprintf("[FILE:enum-joomla-exts.txt] https://%s  ext=%s  version=%s", j.domain, j.ext, ver)
 					out.writeLine(line)
 					atomic.AddInt64(&found, 1)
 				}
@@ -582,7 +582,7 @@ func runAdminEnum(domains []string, concurrency int, timeout time.Duration, out 
 			for j := range jobs {
 				url, detected := probeAdminPath(client, j.domain, j.path)
 				if detected {
-					line := fmt.Sprintf("[ADMIN] %s", url)
+					line := fmt.Sprintf("[FILE:enum-admin.txt] %s", url)
 					out.writeLine(line)
 					atomic.AddInt64(&found, 1)
 				}
@@ -610,15 +610,11 @@ func runAdminEnum(domains []string, concurrency int, timeout time.Duration, out 
 type resultWriter struct {
 	mu  sync.Mutex
 	buf *bufio.Writer
-	f   *os.File
 }
 
 func newResultWriter(path string) (*resultWriter, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, err
-	}
-	return &resultWriter{f: f, buf: bufio.NewWriterSize(f, 8192)}, nil
+	// Ignore path, write directly to stdout
+	return &resultWriter{buf: bufio.NewWriterSize(os.Stdout, 8192)}, nil
 }
 
 func (rw *resultWriter) writeLine(line string) {
@@ -632,7 +628,6 @@ func (rw *resultWriter) close() {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
 	rw.buf.Flush()
-	rw.f.Close()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
