@@ -353,6 +353,13 @@ var ToolsRegistry = map[string]ToolDefinition{
 		InputPlaceholder: "/root/merged/wordpress.txt",
 		Options: []ToolOption{
 			{
+				Name:        "plugins",
+				Flag:        "-plugins",
+				Description: "Path to plugins list",
+				Type:        "string",
+				Default:     "./tools/plugins.txt",
+			},
+			{
 				Name:        "threads",
 				Flag:        "-c",
 				Description: "Number of concurrent threads",
