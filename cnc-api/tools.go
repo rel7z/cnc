@@ -354,7 +354,7 @@ var ToolsRegistry = map[string]ToolDefinition{
 		Options: []ToolOption{
 			{
 				Name:        "threads",
-				Flag:        "-t",
+				Flag:        "-c",
 				Description: "Number of concurrent threads",
 				Type:        "number",
 				Default:     50,
