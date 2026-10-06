@@ -169,12 +169,18 @@ func TestServerJobExecution(t *testing.T) {
 	}
 }
 
-func TestToolsLaunchAPIServerMode(t *testing.T) {
+func TestToolsLaunchAPISpreadModeReverseIPTHC(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cnc_server_api_test_*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tempDir)
+
+	// Create a temporary input file with IPs
+	inputFile := filepath.Join(tempDir, "ips.txt")
+	if err := os.WriteFile(inputFile, []byte("8.8.8.8\n1.1.1.1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := &ServerConfig{
 		HTTPAddr: ":0",
@@ -189,8 +195,8 @@ func TestToolsLaunchAPIServerMode(t *testing.T) {
 
 	payload := map[string]interface{}{
 		"tool_id":     "reverseip-thc",
-		"input_file":  "/tmp/dummy_ips.txt",
-		"output_file": "dummy_out.txt",
+		"input_file":  inputFile,
+		"output_file": "reverseip_results.txt",
 		"options": map[string]interface{}{
 			"threads": 2,
 			"delay":   "100ms",
@@ -213,8 +219,9 @@ func TestToolsLaunchAPIServerMode(t *testing.T) {
 		t.Fatalf("invalid json response: %v", err)
 	}
 
-	if resp["mode"] != "server" {
-		t.Errorf("expected mode 'server', got %v", resp["mode"])
+	// reverseip-thc is now a spread mode tool for load balancing
+	if resp["mode"] != "spread" {
+		t.Errorf("expected mode 'spread' (load-balanced), got %v", resp["mode"])
 	}
 	jobID, ok := resp["job_id"].(string)
 	if !ok || jobID == "" {
