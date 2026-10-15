@@ -226,6 +226,43 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(m.ManagerError,'account'):m.sync_tools(self.aws,self.config)
         archive.assert_not_called()
 
+    def test_complete_aws_sync_transport(self):
+        _, _, manifest=self.fixture_archive()
+        m.private_json(self.root/'.aws-cnc/state.json',{'account':'expected','release_bucket':'private-fixture'})
+        receipt={'folder':'divi','files':manifest,'verified':True,'activated':False,'rollback':'/private-backup'}
+        def run(command,**kwargs):
+            operation=command[1:3]
+            responses={('sts','get-caller-identity'):{'Account':'expected'},
+                ('s3api','get-public-access-block'):{'PublicAccessBlockConfiguration':{k:True for k in ('BlockPublicAcls','IgnorePublicAcls','BlockPublicPolicy','RestrictPublicBuckets')}},
+                ('s3api','put-object'):{},('ssm','send-command'):{'Command':{'CommandId':'new-command'}},
+                ('ssm','get-command-invocation'):{'Status':'Success','StandardOutputContent':json.dumps(receipt)}}
+            if operation==['s3','presign']:return subprocess.CompletedProcess(command,0,'https://fixture.invalid/private-download')
+            return subprocess.CompletedProcess(command,0,json.dumps(responses[tuple(operation)]))
+        with patch.object(m,'repo_path',return_value=self.root), patch.object(m,'executable',return_value='aws'), \
+             patch.object(m.subprocess,'run',side_effect=run) as runner:
+            m.sync_tools(self.aws,self.config)
+        calls=[c.args[0] for c in runner.call_args_list]
+        upload=next(c for c in calls if c[1:3]==['s3api','put-object'])
+        self.assertIn('AES256',upload)
+        send=next(c for c in calls if c[1:3]==['ssm','send-command'])
+        commands=json.loads(send[send.index('--parameters')+1])['commands'][0]
+        self.assertIn('https://fixture.invalid/private-download',commands)
+        self.assertNotIn('opaque synthetic fixture',commands)
+        self.assertEqual(m.read_json(self.root/'last-sync.json'),receipt)
+
+    def test_complete_linode_sync_transport(self):
+        _, _, manifest=self.fixture_archive()
+        ssh=self.root/'ssh_config';ssh.write_text('')
+        cfg=dict(provider='linode',ssh_config=str(ssh),ssh_alias='server',local_port=8081,remote_port=3000)
+        receipt={'folder':'divi','files':manifest,'verified':True,'activated':False,'rollback':'/private-backup'}
+        def run(command,**kwargs):
+            return subprocess.CompletedProcess(command,0,json.dumps(receipt) if command[0].endswith('ssh') else '')
+        with patch.object(m,'repo_path',return_value=self.root),patch.object(m,'executable',side_effect=lambda name,*args:'/bin/'+name), \
+             patch.object(m.subprocess,'run',side_effect=run) as runner:
+            m.sync_tools(cfg,self.config)
+        self.assertEqual([c.args[0][0] for c in runner.call_args_list],['/bin/scp','/bin/ssh'])
+        self.assertEqual(m.read_json(self.root/'last-sync.json'),receipt)
+
 
 def repr_path(path):
     return 'Path(' + repr(str(path)) + ')'
