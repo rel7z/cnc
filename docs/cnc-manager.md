@@ -42,16 +42,17 @@ Review the displayed estimate. Only typing `DEPLOY` authorizes resource creation
 Then choose the dashboard username/password. The algorithm provisions or resumes
 recorded nodes, waits for SSM/SSH, packages the allowed repository source, builds
 and deploys the controller and workers, installs dashboard authentication, checks
-the deployment, saves the local tunnel configuration, and opens a tunnel.
+the deployment, saves the local tunnel configuration, synchronizes the complete
+local tools tree, and opens a tunnel.
 Existing verified deployments are refused by this first-time flow; use setup
 instead. Partial deployments retain their state for another deploy attempt.
 Interrupting deployment does not delete billed resources or cancel remote work
 already accepted by the provider. Inspect the private setup log before resuming.
 
 AWS uses a source archive and SSM; Linode transfers a source Git revision over
-SSH. Private `processor/tools/` contents are never packaged or executed by this
-manager. Optional private tools and Google Drive authorization require separate
-setup after a fresh deployment.
+SSH. Private `processor/tools/` files are transferred separately as opaque bytes
+through the private sync path. Tools are never executed by the manager. Route
+registration and Google Drive authorization require separate setup.
 
 ## Commands and files
 
@@ -64,7 +65,8 @@ python3 ~/Desktop/CNC_Manager.py stop
 python3 ~/Desktop/CNC_Manager.py sync
 ```
 
-`connect` runs in the foreground if no managed launcher is installed. Leave its
+`connect` synchronizes the complete tools tree before opening the dashboard. It
+runs in the foreground if no managed launcher is installed. Leave its
 terminal open. `install` enables automatic reconnection on macOS. `stop` stops
 the current managed tunnel; it does not delete cloud resources or uninstall the
 login launcher. Run `install` to start it again, or use foreground `connect`.
@@ -74,15 +76,20 @@ macOS. Other systems use `~/.config/cnc-manager/` and foreground connections.
 `--config PATH` selects a separate configuration; `--no-browser` suppresses browser
 opening. Deployment credentials remain in private provider state directories in
 the local checkout. Keep these directories and the setup log out of Git.
+Use `--no-sync connect` for tunnel-only access. The diagnostic `--once connect`
+also skips sync. The background tunnel supervisor does not copy files on each
+reconnect; normal dashboard opening and first-time deployment perform the sync.
 
 The replaced legacy macOS tunnel plist is retained under the support directory
 as `com.cnc.aws-dashboard-tunnel.plist.rollback`.
 
 ## Private tool synchronization
 
-Menu **7**, or `sync`, copies only the currently owner-authorized folder
-`processor/tools/divi/` to `/opt/cnc-processor/tools/divi/` on the configured
-controller. Source files are copied as opaque bytes: no parsing, imports,
+Menu **7**, or `sync`, recursively discovers **all files and folders** beneath
+`processor/tools/` and copies them to `/opt/cnc-processor/tools/` on the configured
+controller. This includes `bf`, `divi`, their supporting files, and newly added
+folders without editing the launcher. Nested directory paths and owner execute
+permissions are preserved. Source files are copied as opaque bytes: no parsing, imports,
 execution, route registration, or tool tests. Existing destination files have
 rollback copies; unrelated destination files are retained. Symlinks are refused.
 

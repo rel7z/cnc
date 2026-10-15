@@ -3,7 +3,7 @@
 
 Python 3.9+, standard library only. Run with no arguments for the menu.
 Deployment uses the CNC repository's source installers. The separate sync
-command copies only the owner-authorized divi folder without running tools.
+command automatically discovers and copies the complete tools tree without running tools.
 """
 import argparse
 import getpass
@@ -35,19 +35,18 @@ AWS_DOC = 'https://docs.aws.amazon.com/systems-manager/latest/userguide/session-
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 # Sync is intentionally separate from deployment and program activation.
-SYNC_FOLDER = 'divi'
 REMOTE_SYNC = r'''
 import hashlib,json,os,shutil,stat,sys,tarfile,tempfile,time
 from pathlib import Path,PurePosixPath
 archive=Path(sys.argv[1]);expected=sys.argv[2]
 if hashlib.sha256(archive.read_bytes()).hexdigest()!=expected:raise RuntimeError('Archive checksum mismatch')
-destination=Path('/opt/cnc-processor/tools/divi')
+destination=Path('/opt/cnc-processor/tools')
 for p in [destination,*destination.parents]:
  if p.is_symlink():raise RuntimeError('Symlink destination refused')
 base=Path('/opt/cnc-processor/sync-rollback')
 base.mkdir(mode=0o700,parents=True,exist_ok=True)
 if base.is_symlink():raise RuntimeError('Symlink rollback directory refused')
-run=Path(tempfile.mkdtemp(prefix='divi-',dir=base));stage=run/'incoming';stage.mkdir(mode=0o700)
+run=Path(tempfile.mkdtemp(prefix='tools-',dir=base));stage=run/'incoming';stage.mkdir(mode=0o700)
 with tarfile.open(archive,'r:gz') as package:
  members=package.getmembers()
  if len({x.name for x in members})!=len(members):raise RuntimeError('Duplicate archive paths')
@@ -83,7 +82,7 @@ except BaseException:
   if backup.exists():shutil.copy2(backup,target)
   # New files are retained: sync authorization forbids deleting tool files.
  raise
-receipt={'folder':'divi','files':manifest,'rollback':str(run/'previous'),'verified':True,'activated':False}
+receipt={'folder':'tools','files':manifest,'rollback':str(run/'previous'),'verified':True,'activated':False}
 (run/'receipt.json').write_text(json.dumps(receipt,indent=2));(run/'receipt.json').chmod(0o600)
 print(json.dumps(receipt))
 '''
@@ -504,8 +503,8 @@ def sync_archive(root, archive):
     """Opaque byte copy only: never import or parse the named tool files."""
     import io
     import stat
-    source = root / 'processor/tools' / SYNC_FOLDER
-    for path in (root / 'processor', source.parent, source):
+    source = root / 'processor/tools'
+    for path in (root / 'processor', source):
         if path.is_symlink():
             raise ManagerError('Symlink source directory refused.')
     if not source.is_dir():
@@ -553,7 +552,7 @@ def sync_archive(root, archive):
 
 
 def sync_tools(cfg, path):
-    """Sync the currently owner-authorized folder without enabling any route."""
+    """Discover and sync all tool files without enabling any route."""
     root = repo_path(config=cfg)
     receipt_file = Path(path).parent / 'last-sync.json'
     pending_file = Path(path).parent / 'pending-sync.json'
@@ -606,7 +605,7 @@ def sync_tools(cfg, path):
             manifest = sync_archive(root, archive)
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
             if cfg['provider'] == 'aws':
-                key = 'private-tool-sync/divi-' + digest + '.tar.gz'
+                key = 'private-tool-sync/tools-' + digest + '.tar.gz'
                 aws('s3api', 'put-object', '--bucket', bucket, '--key', key, '--body', str(archive), '--server-side-encryption', 'AES256')
                 signed = subprocess.run([executable('aws',root), 's3', 'presign', f's3://{bucket}/{key}', '--expires-in', '900',
                     '--profile',cfg['aws_profile'],'--region',cfg['region']], capture_output=True,text=True,timeout=90)
@@ -616,13 +615,13 @@ def sync_tools(cfg, path):
                 script = 'set -eu\numask 077\ncurl -fsSL --max-time 120 ' + shlex.quote(signed.stdout.strip()) + ' -o ' + shlex.quote(remote_archive)
                 script += '\npython3 - ' + shlex.quote(remote_archive) + ' ' + digest + " <<'CNC_SYNC_PY'\n" + REMOTE_SYNC + '\nCNC_SYNC_PY\n'
                 command = aws('ssm', 'send-command', '--instance-ids', cfg['instance_id'], '--document-name','AWS-RunShellScript',
-                    '--comment','CNC owner-authorized divi file sync only', '--parameters',json.dumps({'commands':[script],'executionTimeout':['600']}))['Command']['CommandId']
+                    '--comment','CNC owner-authorized complete tools file sync only', '--parameters',json.dumps({'commands':[script],'executionTimeout':['600']}))['Command']['CommandId']
                 private_json(pending_file,dict(command_id=command,instance_id=cfg['instance_id'],region=cfg['region'],manifest=manifest))
                 receipt = poll(command)
             else:
                 # Validate alias/config using exactly the same rules as the tunnel.
                 tunnel_command(cfg)
-                remote_archive = '/tmp/cnc-divi-' + secrets.token_hex(12) + '.tar.gz'
+                remote_archive = '/tmp/cnc-tools-' + secrets.token_hex(12) + '.tar.gz'
                 destination = cfg['ssh_alias'] + ':' + remote_archive
                 scp = subprocess.run([executable('scp'),'-F',cfg['ssh_config'],'-o','BatchMode=yes',str(archive),destination],capture_output=True,timeout=120)
                 if scp.returncode:raise ManagerError('SSH archive transfer failed.')
@@ -638,11 +637,25 @@ def sync_tools(cfg, path):
     if pending_file.exists():
         if receipt.get('files') != read_json(pending_file)['manifest']:
             raise ManagerError('Remote receipt does not match the pending source manifest.')
+    if receipt.get('folder') == 'divi':
+        # Finish observing a command from the old version before starting the
+        # newly requested full-tree sync. Never mistake it for full coverage.
+        private_json(Path(path).parent / 'last-divi-sync.json', receipt)
+        pending_file.unlink(missing_ok=True)
+        return sync_tools(cfg, path)
+    if receipt.get('folder') != 'tools':
+        raise ManagerError('Remote receipt has an unexpected sync scope.')
     private_json(receipt_file, receipt)
     pending_file.unlink(missing_ok=True)
-    print(f"Synced {len(receipt['files'])} files to /opt/cnc-processor/tools/divi; hashes verified.")
+    print(f"Synced {len(receipt['files'])} files to /opt/cnc-processor/tools; hashes verified.")
     print('Rollback:', receipt['rollback'])
     print('Routes unchanged; no private program was activated or run.')
+
+
+def open_dashboard(cfg, path, no_browser=False, once=False, no_sync=False):
+    if not once and not no_sync:
+        sync_tools(cfg, path)
+    connect(cfg, path, no_browser=no_browser, once=once)
 
 
 def deploy(path, repo=None, no_browser=False):
@@ -721,6 +734,7 @@ def deploy(path, repo=None, no_browser=False):
         raise ManagerError('Deployment state was not generated.')
     private_json(path, cfg)
     print('Deployment complete. Google Drive can be connected from the dashboard.')
+    sync_tools(cfg, path)
     connect(cfg, path, no_browser=no_browser)
 
 
@@ -730,13 +744,14 @@ def main():
     parser.add_argument('--repo', type=Path)
     parser.add_argument('--no-browser', action='store_true')
     parser.add_argument('--once', action='store_true', help='Check/recover an existing managed tunnel, then return')
+    parser.add_argument('--no-sync', action='store_true', help='Open the dashboard without the normal tools sync')
     parser.add_argument('action', nargs='?', choices=('connect', 'setup', 'deploy', 'doctor', 'install', 'stop', 'sync', '_supervise'))
     args = parser.parse_args()
     action = args.action
     if action is None:
         if not sys.stdin.isatty():
             parser.print_help();return
-        print('CNC Manager\n1. Open dashboard\n2. Configure an existing server\n3. First-time AWS/Linode deployment\n4. Diagnose connection\n5. Install macOS auto-reconnect\n6. Stop managed tunnel\n7. Sync approved divi folder (files only)\nq. Quit')
+        print('CNC Manager\n1. Open dashboard\n2. Configure an existing server\n3. First-time AWS/Linode deployment\n4. Diagnose connection\n5. Install macOS auto-reconnect\n6. Stop managed tunnel\n7. Sync all tools (files only)\nq. Quit')
         choice = ask('Choice', '1')
         action = {'1':'connect','2':'setup','3':'deploy','4':'doctor','5':'install','6':'stop','7':'sync','q':None}.get(choice)
         if action is None:
@@ -752,7 +767,7 @@ def main():
             launchctl('bootout', f'gui/{os.getuid()}/{LABEL}', check=True)
         print('Managed tunnel stopped. Cloud services are unchanged.');return
     cfg = load_config(args.config, args.repo)
-    if action == 'connect':connect(cfg, args.config, args.no_browser, args.once)
+    if action == 'connect':open_dashboard(cfg, args.config, args.no_browser, args.once, args.no_sync)
     elif action == 'doctor':doctor(cfg)
     elif action == 'install':install(cfg, args.config, args.no_browser)
     elif action == 'sync':sync_tools(cfg, args.config)

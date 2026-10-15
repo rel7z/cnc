@@ -30,3 +30,30 @@ excluded from that PR.
 AWS/Linode transfer simulations, opaque copy/installed hashes, replaced-file
 rollback, preservation of unrelated files, corruption and symlink rejection,
 expired/cross-account credentials, and resuming an existing SSM command.
+
+## Complete tools tree and automatic sync
+
+The owner subsequently expanded sync permission to all files in
+`processor/tools/`, including both `bf` and `divi`. The manager now discovers
+the complete tree recursively, without maintaining a list of tool folder names.
+It preserves supporting files, nested paths, and owner execute permissions.
+Source access remains limited to filenames, metadata, and opaque copying.
+
+Explicit sync command `27983f4c-a237-414e-8e7a-20261fdf0bc6` successfully copied
+ten files to `/opt/cnc-processor/tools/`, including both tools and root files,
+with matching installed hashes. The updated Desktop launcher's normal
+`--no-browser connect` path then automatically performed another complete sync
+(`854ea5fd-7e36-46e4-8a19-66b8d860075c`) and opened the existing dashboard tunnel.
+That second sync preserved the replaced files in its private rollback directory.
+
+Normal dashboard opening and successful first-time deployment now call full
+tool sync automatically. Explicit `sync` remains available. Diagnostic `--once`
+and `--no-sync` skip it; the background tunnel supervisor does not repeat file
+transfers whenever the tunnel reconnects. Routes remain unchanged and no tool
+is run by these operations.
+
+The expanded suite has 26 passing tests, including discovery of both tool
+folders plus a newly introduced nested folder, executable permission
+preservation, automatic dashboard sync ordering, sync after each provider's
+deployment, diagnostic bypass, and safe completion of a pending command from
+the older single-folder manager before starting a complete sync.
