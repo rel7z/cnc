@@ -1,0 +1,117 @@
+[
+  {
+    "id": "default-20261025-1",
+    "name": "",
+    "target": "wordpress:core",
+    "identifier": "",
+    "group": "",
+    "clauses": [
+      {
+        "operator": ">=",
+        "version": "6.9.0"
+      },
+      {
+        "operator": "<",
+        "version": "6.9.5"
+      }
+    ]
+  },
+  {
+    "id": "default-20261025-2",
+    "name": "",
+    "target": "wordpress:core",
+    "identifier": "",
+    "group": "",
+    "clauses": [
+      {
+        "operator": ">=",
+        "version": "7.0.0"
+      },
+      {
+        "operator": "<",
+        "version": "7.0.2"
+      }
+    ]
+  },
+  {
+    "id": "default-20261025-3",
+    "name": "",
+    "target": "wordpress:plugin",
+    "identifier": "translatepress-multilingual",
+    "group": "",
+    "clauses": [
+      {
+        "operator": "<=",
+        "version": "3.3.1"
+      }
+    ]
+  },
+  {
+    "id": "default-20261025-4",
+    "name": "",
+    "target": "php:php-src",
+    "identifier": "",
+    "group": "",
+    "clauses": [
+      {
+        "operator": ">=",
+        "version": "8.5.0"
+      },
+      {
+        "operator": "<",
+        "version": "8.5.12"
+      }
+    ]
+  },
+  {
+    "id": "default-20261025-5",
+    "name": "",
+    "target": "php:php-src",
+    "identifier": "",
+    "group": "",
+    "clauses": [
+      {
+        "operator": ">=",
+        "version": "8.4.0"
+      },
+      {
+        "operator": "<",
+        "version": "8.4.27"
+      }
+    ]
+  },
+  {
+    "id": "default-20261025-6",
+    "name": "",
+    "target": "php:php-src",
+    "identifier": "",
+    "group": "",
+    "clauses": [
+      {
+        "operator": ">=",
+        "version": "8.3.0"
+      },
+      {
+        "operator": "<",
+        "version": "8.3.36"
+      }
+    ]
+  },
+  {
+    "id": "default-20261025-7",
+    "name": "",
+    "target": "php:php-src",
+    "identifier": "",
+    "group": "",
+    "clauses": [
+      {
+        "operator": ">=",
+        "version": "8.2.0"
+      },
+      {
+        "operator": "<",
+        "version": "8.2.35"
+      }
+    ]
+  }
+]

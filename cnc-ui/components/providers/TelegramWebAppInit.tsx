@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import Script from "next/script";
 
 declare global {
   interface Window {
@@ -25,8 +25,8 @@ declare global {
 }
 
 export function TelegramWebAppInit() {
-  useEffect(() => {
-    if (typeof window !== "undefined" && window.Telegram?.WebApp) {
+  function initialize() {
+    if (typeof window !== "undefined" && window.Telegram?.WebApp?.initDataUnsafe?.user) {
       try {
         const tg = window.Telegram.WebApp;
         tg.ready();
@@ -41,7 +41,7 @@ export function TelegramWebAppInit() {
         console.error("Telegram WebApp initialization failed:", err);
       }
     }
-  }, []);
+  }
 
-  return null;
+  return <Script src="https://telegram.org/js/telegram-web-app.js" strategy="afterInteractive" onReady={initialize} />;
 }

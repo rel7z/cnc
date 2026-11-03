@@ -1,7 +1,9 @@
 package cnc
 
 import (
+	"cnc-enum/version"
 	"encoding/json"
+	"github.com/user/cnc-processor/cluster"
 	"time"
 )
 
@@ -33,12 +35,13 @@ const (
 type TaskStatus string
 
 const (
-	TaskStatusPending   TaskStatus = "pending"
-	TaskStatusAssigned  TaskStatus = "assigned"
-	TaskStatusRunning   TaskStatus = "running"
-	TaskStatusCompleted TaskStatus = "completed"
-	TaskStatusFailed    TaskStatus = "failed"
-	TaskStatusCancelled TaskStatus = "cancelled"
+	TaskStatusPending             TaskStatus = "pending"
+	TaskStatusAssigned            TaskStatus = "assigned"
+	TaskStatusRunning             TaskStatus = "running"
+	TaskStatusCompleted           TaskStatus = "completed"
+	TaskStatusCompletedWithErrors TaskStatus = "completed_with_errors"
+	TaskStatusFailed              TaskStatus = "failed"
+	TaskStatusCancelled           TaskStatus = "cancelled"
 )
 
 // WorkerStatus tracks whether a worker is available.
@@ -55,62 +58,77 @@ const (
 //
 //	"command"         string  — shell command with {input} placeholder
 //	"download_url"    string  — URL path for the worker to download its chunk (spread only)
-//	"dest_name"       string  — filename worker saves to ~/<dest_name> (spread only)
+//	"dest_name"       string  — filename inside this task's temporary HOME (spread only)
 //	"chunk_path"      string  — server-side path, for logging (spread only)
 //	"timeout_seconds" float64 — kill timeout (-1 = no deadline)
 type Task struct {
-	ID          string                 `json:"id"`
-	JobID       string                 `json:"job_id"`
-	Type        string                 `json:"type"` // always "shell"
-	Payload     map[string]interface{} `json:"payload"`
-	Status      TaskStatus             `json:"status"`
-	AssignedTo  string                 `json:"assigned_to,omitempty"`
-	CreatedAt   time.Time              `json:"created_at"`
-	StartedAt   *time.Time             `json:"started_at,omitempty"`
-	CompletedAt *time.Time             `json:"completed_at,omitempty"`
-	Result      *TaskResult            `json:"result,omitempty"`
-	Error       string                 `json:"error,omitempty"`
-	RetryCount  int                    `json:"retry_count"`
-	Priority    int                    `json:"priority"`
+	ExecutionResources  *cluster.Resources     `json:"execution_resources,omitempty"`
+	QueueReason         string                 `json:"queue_reason,omitempty"`
+	ProcessorAssignment *cluster.Assignment    `json:"-"`
+	ProcessorInstall    *cluster.Install       `json:"-"`
+	EnumPublication     string                 `json:"enum_publication,omitempty"`
+	ID                  string                 `json:"id"`
+	JobID               string                 `json:"job_id"`
+	Type                string                 `json:"type"` // always "shell"
+	Payload             map[string]interface{} `json:"payload"`
+	Status              TaskStatus             `json:"status"`
+	AssignedTo          string                 `json:"assigned_to,omitempty"`
+	CreatedAt           time.Time              `json:"created_at"`
+	StartedAt           *time.Time             `json:"started_at,omitempty"`
+	CompletedAt         *time.Time             `json:"completed_at,omitempty"`
+	Result              *TaskResult            `json:"result,omitempty"`
+	Error               string                 `json:"error,omitempty"`
+	RetryCount          int                    `json:"retry_count"`
+	Priority            int                    `json:"priority"`
 }
 
 // TaskResult holds the outcome of a completed task.
 type TaskResult struct {
-	Stdout   string `json:"stdout,omitempty"`
-	Stderr   string `json:"stderr,omitempty"`
-	ExitCode int    `json:"exit_code"`
+	Stdout            string `json:"stdout,omitempty"`
+	Stderr            string `json:"stderr,omitempty"`
+	ExitCode          int    `json:"exit_code"`
+	PublicationStatus string `json:"publication_status,omitempty"`
 }
 
 // Worker represents a connected worker agent.
 type Worker struct {
-	ID          string            `json:"id"`
-	Address     string            `json:"address"`
-	Status      WorkerStatus      `json:"status"`
-	MaxTasks    int               `json:"max_tasks"`
-	CurrentLoad int               `json:"current_load"`
-	LastSeen    time.Time         `json:"last_seen"`
-	Registered  time.Time         `json:"registered"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	SendCh      chan *Message      `json:"-"` // non-blocking send channel; not serialised
+	EnumRequests        map[string]version.BudgetMetrics `json:"enum_requests,omitempty"`
+	Resources           cluster.ResourceSnapshot         `json:"resources"`
+	ProcessorProtocol   string                           `json:"processor_protocol,omitempty"`
+	ProcessorVersions   []string                         `json:"processor_versions,omitempty"`
+	ProcessorAttempts   []string                         `json:"processor_attempts,omitempty"`
+	ProcessorWorkspaces []string                         `json:"processor_workspaces,omitempty"`
+	ID                  string                           `json:"id"`
+	Address             string                           `json:"address"`
+	Status              WorkerStatus                     `json:"status"`
+	MaxTasks            int                              `json:"max_tasks"`
+	CurrentLoad         int                              `json:"current_load"`
+	LastSeen            time.Time                        `json:"last_seen"`
+	Registered          time.Time                        `json:"registered"`
+	Metadata            map[string]string                `json:"metadata,omitempty"`
+	SendCh              chan *Message                    `json:"-"` // non-blocking send channel; not serialised
 }
 
 // Job is a user-submitted unit of work.
 type Job struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	Command        string     `json:"command"`          // e.g. "node index.js {input}"
-	Mode           JobMode    `json:"mode"`             // "spread" or "broadcast"
-	InputFile      string     `json:"input_file"`
-	OutputFile     string     `json:"output_file,omitempty"` // output file in watcher dir for tool jobs
-	Workers        int        `json:"workers"`          // number of parts to split into
-	TimeoutSeconds int        `json:"timeout_seconds"`  // 0 = DefaultTimeout, -1 = no timeout
-	TotalTasks     int        `json:"total_tasks"`
-	Completed      int        `json:"completed"`
-	Failed         int        `json:"failed"`
-	Status         string     `json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	ReverseIP      *ReverseIPInputSummary `json:"reverse_ip_input,omitempty"`
+	Error          string                 `json:"error,omitempty"`
+	Enum           *EnumJobConfig         `json:"enum,omitempty"`
+	ID             string                 `json:"id"`
+	Name           string                 `json:"name"`
+	Command        string                 `json:"command"` // e.g. "node index.js {input}"
+	Mode           JobMode                `json:"mode"`    // "spread" or "broadcast"
+	InputFile      string                 `json:"input_file"`
+	OutputFile     string                 `json:"output_file,omitempty"` // output file in watcher dir for tool jobs
+	Workers        int                    `json:"workers"`               // number of parts to split into
+	TimeoutSeconds int                    `json:"timeout_seconds"`       // 0 = DefaultTimeout, -1 = no timeout
+	TotalTasks     int                    `json:"total_tasks"`
+	Completed      int                    `json:"completed"`
+	Failed         int                    `json:"failed"`
+	Status         string                 `json:"status"`
+	CreatedAt      time.Time              `json:"created_at"`
+	StartedAt      *time.Time             `json:"started_at,omitempty"`
+	CompletedAt    *time.Time             `json:"completed_at,omitempty"`
 }
 
 // ── Tool Schemas ───────────────────────────────────────────────────────────────
@@ -128,26 +146,27 @@ type ToolOption struct {
 // to the CNC server and distributed to workers before execution.
 // Each spec produces a curl pre-download step and a flag injected into the command.
 type SharedFileSpec struct {
-	Name        string `json:"name"`        // field key used in the launch API payload (e.g. "passlist")
-	Label       string `json:"label"`       // human-readable label shown in the UI
-	Flag        string `json:"flag"`        // CLI flag passed to the tool (e.g. "-passlist")
-	Description string `json:"description"` // tooltip / helper text
-	Required    bool   `json:"required"`    // whether the UI should mark this field as required
+	Name        string `json:"name"`           // field key used in the launch API payload
+	Label       string `json:"label"`          // human-readable label shown in the UI
+	Flag        string `json:"flag"`           // CLI flag passed to the tool
+	Description string `json:"description"`    // tooltip / helper text
+	Required    bool   `json:"required"`       // whether the UI should mark this field as required
+	Type        string `json:"type,omitempty"` // "textarea" or "text" (default)
 }
 
 // ToolDefinition defines an external tool that can be executed on workers or on the server.
 type ToolDefinition struct {
-	ID               string           `json:"id"`                        // e.g. "cms-scan"
-	Name             string           `json:"name"`                      // e.g. "CMS Scanner"
-	Description      string           `json:"description"`               // e.g. "Scans CMS targets"
-	Executable       string           `json:"executable"`                // e.g. "cms-scan"
-	Scope            string           `json:"scope,omitempty"`           // "server" or "worker" (default: "worker")
-	DefaultMode      JobMode          `json:"default_mode,omitempty"`    // "spread" or "broadcast" (default for worker tools)
-	InputFlag        string           `json:"input_flag,omitempty"`      // flag for input file (e.g. "-l", "-f", default: "-l")
-	OutputFlag       string           `json:"output_flag,omitempty"`     // flag for output file (e.g. "-o", "-out")
-	InputLabel       string           `json:"input_label,omitempty"`     // UI label for the input file field
+	ID               string           `json:"id"`                          // e.g. "cms-scan"
+	Name             string           `json:"name"`                        // e.g. "CMS Scanner"
+	Description      string           `json:"description"`                 // e.g. "Scans CMS targets"
+	Executable       string           `json:"executable"`                  // e.g. "cms-scan"
+	Scope            string           `json:"scope,omitempty"`             // "server" or "worker" (default: "worker")
+	DefaultMode      JobMode          `json:"default_mode,omitempty"`      // "spread" or "broadcast" (default for worker tools)
+	InputFlag        string           `json:"input_flag,omitempty"`        // flag for input file (e.g. "-l", "-f", default: "-l")
+	OutputFlag       string           `json:"output_flag,omitempty"`       // flag for output file (e.g. "-o", "-out")
+	InputLabel       string           `json:"input_label,omitempty"`       // UI label for the input file field
 	InputPlaceholder string           `json:"input_placeholder,omitempty"` // UI placeholder for the input file field
-	SharedFiles      []SharedFileSpec `json:"shared_files,omitempty"`    // extra server-side files distributed to all workers
+	SharedFiles      []SharedFileSpec `json:"shared_files,omitempty"`      // extra server-side files distributed to all workers
 	Options          []ToolOption     `json:"options"`
 }
 
@@ -177,9 +196,16 @@ type RegisterWorkerPayload struct {
 }
 
 type WorkerHeartbeatPayload struct {
-	WorkerID    string       `json:"worker_id"`
-	Status      WorkerStatus `json:"status"`
-	CurrentLoad int          `json:"current_load"`
+	EnumRequests        map[string]version.BudgetMetrics `json:"enum_requests,omitempty"`
+	Resources           cluster.ResourceSnapshot         `json:"resources"`
+	ProcessorProtocol   string                           `json:"processor_protocol,omitempty"`
+	ProcessorVersions   []string                         `json:"processor_versions,omitempty"`
+	ActiveTasks         []string                         `json:"active_tasks,omitempty"`
+	ProcessorAttempts   []string                         `json:"processor_attempts,omitempty"`
+	ProcessorWorkspaces []string                         `json:"processor_workspaces,omitempty"`
+	WorkerID            string                           `json:"worker_id"`
+	Status              WorkerStatus                     `json:"status"`
+	CurrentLoad         int                              `json:"current_load"`
 }
 
 type TaskStreamPayload struct {
@@ -190,7 +216,9 @@ type TaskStreamPayload struct {
 }
 
 type AssignTaskPayload struct {
-	Task Task `json:"task"`
+	ProcessorAssignment *cluster.Assignment `json:"processor_assignment,omitempty"`
+	ProcessorInstall    *cluster.Install    `json:"processor_install,omitempty"`
+	Task                Task                `json:"task"`
 }
 
 type CancelTaskPayload struct {

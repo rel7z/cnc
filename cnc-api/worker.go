@@ -2,10 +2,12 @@ package cnc
 
 import (
 	"bytes"
+	"cnc-enum/version"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/user/cnc-processor/cluster"
 	"io"
 	"log"
 	"net"
@@ -17,19 +19,25 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 // WorkerAgent connects to the server, receives shell tasks, executes them
 // as subprocesses, and reports results back.
 type WorkerAgent struct {
-	mu     sync.RWMutex
-	config *WorkerConfig
-	worker *Worker
+	enumGatewayMu   sync.Mutex
+	enumGateway     *version.Gateway
+	enumTransferMu  sync.Mutex
+	enumTransfers   map[string]bool
+	processorRunner *cluster.Runner
+	mu              sync.RWMutex
+	config          *WorkerConfig
+	worker          *Worker
 
 	// active tasks: taskID → *Task
 	tasks map[string]*Task
-	
+
 	// task cancellation functions: taskID -> cancel func
 	taskCancels   map[string]context.CancelFunc
 	taskCancelsMu sync.Mutex
@@ -47,6 +55,9 @@ type WorkerAgent struct {
 	heartbeatTicker *time.Ticker
 	stats           workerStats
 	reconnecting    atomic.Bool
+	draining        atomic.Bool
+	drainQuiet      time.Duration
+	drainPoll       time.Duration
 
 	// serverHTTPAddr is set once from the ack message after registration.
 	// Protected by httpAddrMu.
@@ -55,10 +66,14 @@ type WorkerAgent struct {
 }
 
 type WorkerConfig struct {
-	ServerAddr string `json:"server_addr"`
-	WorkerID   string `json:"worker_id"`
-	MaxTasks   int    `json:"max_tasks"`
-	DataDir    string `json:"data_dir"`
+	ProcessorWorkspaceRoot string `json:"processor_workspace_root,omitempty"`
+	SSHHost                string `json:"ssh_host,omitempty"`
+	SSHUser                string `json:"ssh_user,omitempty"`
+	SSHPort                int    `json:"ssh_port,omitempty"`
+	ServerAddr             string `json:"server_addr"`
+	WorkerID               string `json:"worker_id"`
+	MaxTasks               int    `json:"max_tasks"`
+	DataDir                string `json:"data_dir"`
 }
 
 type workerStats struct {
@@ -70,10 +85,11 @@ type workerStats struct {
 func DefaultWorkerConfig() *WorkerConfig {
 	hostname, _ := os.Hostname()
 	return &WorkerConfig{
-		ServerAddr: "localhost:9090",
-		WorkerID:   fmt.Sprintf("worker_%s_%d", hostname, os.Getpid()),
-		MaxTasks:   runtime.NumCPU() * 2,
-		DataDir:    "./worker_data",
+		ServerAddr:             "localhost:9090",
+		WorkerID:               fmt.Sprintf("worker_%s_%d", hostname, os.Getpid()),
+		MaxTasks:               runtime.NumCPU() * 2,
+		DataDir:                "./worker_data",
+		ProcessorWorkspaceRoot: defaultProcessorWorkspaceRoot(),
 	}
 }
 
@@ -99,7 +115,24 @@ func LoadWorkerConfig(path string) (*WorkerConfig, error) {
 	if cfg.DataDir == "" {
 		cfg.DataDir = "./worker_data"
 	}
+	if cfg.ProcessorWorkspaceRoot == "" {
+		cfg.ProcessorWorkspaceRoot = defaultProcessorWorkspaceRoot()
+	}
+	if cfg.SSHUser == "" {
+		cfg.SSHUser = "root"
+	}
+	if cfg.SSHPort == 0 {
+		cfg.SSHPort = 22
+	}
 	return &cfg, nil
+}
+
+func defaultProcessorWorkspaceRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "/root/processor"
+	}
+	return filepath.Join(home, "processor")
 }
 
 func NewWorkerAgent(config *WorkerConfig) *WorkerAgent {
@@ -150,20 +183,38 @@ func (w *WorkerAgent) getServerHTTPAddr() string {
 // Start connects to the server, registers, and begins processing tasks.
 // It blocks until the worker is stopped or fatally fails to reconnect.
 func (w *WorkerAgent) Start() error {
+	if _, err := w.ensureEnumGateway(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(w.config.DataDir, 0755); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
+	w.prepareProcessorRecovery()
 	if err := w.connect(); err != nil {
 		return fmt.Errorf("connect to server: %w", err)
 	}
 	if err := w.register(); err != nil {
 		return fmt.Errorf("register with server: %w", err)
 	}
+	if err := w.writeDrainCapability(); err != nil {
+		return fmt.Errorf("publish safe shutdown capability: %w", err)
+	}
 
-	w.wg.Add(3)
+	w.wg.Add(4)
+	w.mu.RLock()
+	recovered := []*Task{}
+	for _, task := range w.tasks {
+		recovered = append(recovered, task)
+	}
+	w.mu.RUnlock()
+	for _, task := range recovered {
+		w.wg.Add(1)
+		go func(t *Task) { defer w.wg.Done(); w.executeTask(t) }(task)
+	}
 	go w.heartbeatLoop()
 	go w.messageLoop()
 	go w.statsReporter()
+	go w.publicationDeliveryLoop()
 
 	log.Printf("Worker %s started — server %s  max_tasks=%d",
 		w.config.WorkerID, w.config.ServerAddr, w.config.MaxTasks)
@@ -175,6 +226,11 @@ func (w *WorkerAgent) Start() error {
 func (w *WorkerAgent) Stop() {
 	log.Printf("Stopping worker %s...", w.config.WorkerID)
 	w.cancel()
+	w.enumGatewayMu.Lock()
+	if w.enumGateway != nil {
+		w.enumGateway.Close()
+	}
+	w.enumGatewayMu.Unlock()
 	w.connMu.Lock()
 	if w.conn != nil {
 		w.conn.Close()
@@ -205,7 +261,8 @@ func (w *WorkerAgent) connect() error {
 }
 
 func (w *WorkerAgent) register() error {
-	msg, err := NewMessage(MsgTypeRegisterWorker, RegisterWorkerPayload{Worker: *w.worker})
+	snapshot := w.processorWorkerSnapshot()
+	msg, err := NewMessage(MsgTypeRegisterWorker, RegisterWorkerPayload{Worker: snapshot})
 	if err != nil {
 		return err
 	}
@@ -267,9 +324,16 @@ func (w *WorkerAgent) heartbeatLoop() {
 			w.mu.RUnlock()
 
 			msg, _ := NewMessage(MsgTypeWorkerHeartbeat, WorkerHeartbeatPayload{
-				WorkerID:    w.config.WorkerID,
-				Status:      WorkerStatusOnline,
-				CurrentLoad: load,
+				WorkerID:            w.config.WorkerID,
+				Status:              WorkerStatusOnline,
+				CurrentLoad:         load,
+				Resources:           cluster.SampleResources(),
+				EnumRequests:        w.enumBudgetSnapshot(),
+				ProcessorProtocol:   cluster.ProtocolVersion,
+				ProcessorVersions:   cluster.InstalledVersions(w.processorRoot()),
+				ActiveTasks:         w.activeTaskIDs(),
+				ProcessorAttempts:   w.activeProcessorIDs(),
+				ProcessorWorkspaces: w.activeProcessorWorkspaces(),
 			})
 			if err := w.send(msg); err != nil {
 				log.Printf("Heartbeat send failed: %v", err)
@@ -367,8 +431,8 @@ func (w *WorkerAgent) handleMessage(msg *Message) {
 			w.taskCancelsMu.Unlock()
 		}
 	case MsgTypeShutdownWorker:
-		log.Println("Received shutdown from server")
-		w.cancel()
+		log.Println("Received shutdown from server; draining active tasks")
+		go func() { _ = w.DrainAndStop(context.Background()) }()
 	default:
 		// Unknown types are silently ignored.
 	}
@@ -381,45 +445,64 @@ func (w *WorkerAgent) handleAssignTask(msg *Message) {
 		return
 	}
 	task := &p.Task
+	task.ProcessorAssignment = p.ProcessorAssignment
+	task.ProcessorInstall = p.ProcessorInstall
 	log.Printf("Received task %s (job %s)", task.ID, task.JobID)
 
 	w.mu.Lock()
+	if _, exists := w.tasks[task.ID]; exists {
+		w.mu.Unlock()
+		return
+	}
+	if len(w.tasks) >= w.config.MaxTasks {
+		w.mu.Unlock()
+		w.sendResult(task.ID, nil, "worker capacity exceeded")
+		return
+	}
 	w.tasks[task.ID] = task
 	w.mu.Unlock()
 
-	go w.executeTask(task)
+	w.wg.Add(1)
+	go func() { defer w.wg.Done(); w.executeTask(task) }()
 }
 
 // ── Task execution ────────────────────────────────────────────────────────────
 
 func (w *WorkerAgent) executeTask(task *Task) {
-	result, infraErr := w.executeShellTask(task)
-
-	w.mu.Lock()
-	delete(w.tasks, task.ID)
-	w.mu.Unlock()
+	// Keep the reservation until result delivery has finished, so a drain cannot
+	// close the transport between task completion and its final report.
+	defer func() { w.mu.Lock(); delete(w.tasks, task.ID); w.mu.Unlock() }()
+	var result *TaskResult
+	var infraErr error
+	if task.Type == "processor" || task.Type == "processor_install" {
+		result, infraErr = w.executeProcessorTask(task)
+	} else if task.Type == "enum" {
+		result, infraErr = w.executeEnumTask(task)
+	} else {
+		result, infraErr = w.executeShellTask(task)
+	}
 
 	if infraErr != nil {
 		// Infrastructure error: couldn't even start the task.
 		atomic.AddUint64(&w.stats.TasksFailed, 1)
 		log.Printf("Task %s infrastructure error: %v", task.ID, infraErr)
-		w.sendResult(task.ID, nil, infraErr.Error())
+		w.deliverTaskResult(task.ID, nil, infraErr.Error())
 		return
 	}
 
 	if result.ExitCode != 0 {
 		atomic.AddUint64(&w.stats.TasksFailed, 1)
-		log.Printf("Task %s failed (exit=%d): %s", task.ID, result.ExitCode, result.Stderr)
-		w.sendResult(task.ID, result, "")
+		log.Printf("Task %s failed: %s", task.ID, taskFailureSummary(result))
+		w.deliverTaskResult(task.ID, result, "")
 	} else {
 		atomic.AddUint64(&w.stats.TasksCompleted, 1)
 		log.Printf("Task %s completed (exit=0)", task.ID)
-		w.sendResult(task.ID, result, "")
+		w.deliverTaskResult(task.ID, result, "")
 	}
 }
 
-// executeShellTask downloads the assigned chunk (if present) to the worker's
-// home directory, then runs the command. Returns an infrastructure error if
+// executeShellTask downloads the assigned chunk into an isolated temporary
+// workspace, then runs the command there. Returns an infrastructure error if
 // the task can't be set up at all; otherwise always returns a *TaskResult
 // (with ExitCode reflecting the command's exit status).
 func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
@@ -432,30 +515,6 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 	if command == "" {
 		return nil, fmt.Errorf("task payload missing 'command'")
 	}
-
-	// ── 1. Download chunk to ~/<destName> (spread mode only) ─────────────
-	var localPath string
-	if downloadURL != "" && destName != "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolve home dir: %w", err)
-		}
-		localPath = filepath.Join(home, destName)
-
-		fullURL := w.getServerHTTPAddr() + downloadURL
-
-		log.Printf("Downloading chunk %s → %s", fullURL, localPath)
-		if err := downloadFile(fullURL, localPath); err != nil {
-			return nil, fmt.Errorf("download chunk: %w", err)
-		}
-	}
-
-	// ── 2. Substitute {input} with the local file path ───────────────────
-	if localPath != "" {
-		command = strings.ReplaceAll(command, "{input}", localPath)
-	}
-	command = strings.ReplaceAll(command, "{http_addr}", w.getServerHTTPAddr())
-
 	// ── 3. Build execution context ────────────────────────────────────────
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -468,11 +527,11 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 		}
 		ctx, cancel = context.WithTimeout(w.ctx, timeout)
 	}
-	
+
 	w.taskCancelsMu.Lock()
 	w.taskCancels[task.ID] = cancel
 	w.taskCancelsMu.Unlock()
-	
+
 	defer func() {
 		cancel()
 		w.taskCancelsMu.Lock()
@@ -480,13 +539,53 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 		w.taskCancelsMu.Unlock()
 	}()
 
-	// ── 4. Run the command ────────────────────────────────────────────────
-	cwd, _ := os.Getwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("resolve worker directory: %w", err)
+	}
 	execDir := ""
-	if exe, err := os.Executable(); err == nil {
+	if exe, e := os.Executable(); e == nil {
 		execDir = filepath.Dir(exe)
 	}
+	workspace, err := newShellWorkspace(w.config.DataDir, cwd, execDir)
+	if err != nil {
+		return nil, fmt.Errorf("create task workspace: %w", err)
+	}
+	defer os.RemoveAll(workspace)
+	var watchedOutput string
+	if outputFile != "" {
+		watchedOutput, err = shellWorkspacePath(workspace, outputFile)
+		if err != nil {
+			return nil, fmt.Errorf("output file: %w", err)
+		}
+	}
 
+	// ── 1. Download only this task's input (spread mode only) ────────────
+	var localPath string
+	if downloadURL != "" && destName != "" {
+		localPath, err = shellWorkspacePath(workspace, destName)
+		if err != nil {
+			return nil, fmt.Errorf("input file: %w", err)
+		}
+		if localPath == watchedOutput {
+			return nil, fmt.Errorf("input and output filenames must differ")
+		}
+
+		fullURL := w.getServerHTTPAddr() + downloadURL
+
+		log.Printf("Downloading chunk %s → %s", fullURL, localPath)
+		if err := downloadFileContext(ctx, fullURL, localPath); err != nil {
+			return nil, fmt.Errorf("download chunk: %w", err)
+		}
+	}
+
+	// ── 2. Substitute {input} with the local file path ───────────────────
+	if localPath != "" {
+		command = strings.ReplaceAll(command, "{input}", localPath)
+	}
+	command = strings.ReplaceAll(command, "{http_addr}", w.getServerHTTPAddr())
+
+	// ── 4. Run the command ────────────────────────────────────────────────
 	// Prepare PATH to include local tools and common binary directories
 	pathEnv := os.Getenv("PATH")
 	var extraPaths []string
@@ -501,7 +600,32 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 	newPath := strings.Join(append(extraPaths, pathEnv), string(os.PathListSeparator))
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	cmd.Env = os.Environ()
+	cmd.Dir = workspace
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// Generic shell tools must not exhaust the host or kill the worker service.
+	resources := w.taskExecutionResources(task)
+	cleanupLimits, err := cluster.ConfigureCommandLimits(cmd, "shell-"+filepath.Base(workspace), resources)
+	if err != nil {
+		return nil, fmt.Errorf("configure shell job resource limits: %w", err)
+	}
+	defer cleanupLimits()
+
+	cmd.Env = shellWorkspaceEnv(os.Environ(), workspace)
+	if cms, _ := task.Payload["cms_scanner"].(bool); cms {
+		gateway, e := w.ensureEnumGateway()
+		if e != nil {
+			return nil, e
+		}
+		token, unregister, e := gateway.Register(ctx, version.ArtifactV1{SchemaVersion: 1, JobID: task.JobID})
+		if e != nil {
+			return nil, e
+		}
+		defer unregister()
+		cmd.Env = append(cmd.Env, "ENUM_EVIDENCE_GATEWAY="+gateway.URL, "ENUM_EVIDENCE_TOKEN="+token)
+	}
 	pathFound := false
 	for i, env := range cmd.Env {
 		if strings.HasPrefix(env, "PATH=") {
@@ -515,46 +639,66 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	
+
 	stdoutStream := &BufferedStreamWriter{w: w, taskID: task.ID, isStderr: false}
 	stderrStream := &BufferedStreamWriter{w: w, taskID: task.ID, isStderr: true}
-	
-	cmd.Stdout = io.MultiWriter(&stdout, stdoutStream)
+
+	streamRecords, _ := task.Payload["file_records"].(bool)
+	if streamRecords {
+		watchedOutput = ""
+	}
+	cmd.Stdout = &stdout
+	if outputFile == "" || streamRecords {
+		cmd.Stdout = io.MultiWriter(&stdout, stdoutStream)
+	}
 	cmd.Stderr = io.MultiWriter(&stderr, stderrStream)
 
 	// If the task specifies an output file, the tool might write to it instead of stdout.
 	// We'll poll this file and stream its contents to stdoutStream.
-	if outputFile != "" {
+	watchStop := make(chan struct{})
+	watchDone := make(chan struct{})
+	outputSeen := false
+	if watchedOutput != "" {
 		go func() {
+			defer close(watchDone)
 			var offset int64 = 0
+			read := func() {
+				if f, e := os.Open(watchedOutput); e == nil {
+					defer f.Close()
+					if info, e := f.Stat(); e != nil || !info.Mode().IsRegular() {
+						return
+					} else if info.Size() < offset {
+						offset = 0
+					}
+					outputSeen = true
+					f.Seek(offset, io.SeekStart)
+					n, _ := io.Copy(stdoutStream, f)
+					offset += n
+				}
+			}
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
 			for {
 				select {
-				case <-ctx.Done():
-					// One last read
-					if f, err := os.Open(outputFile); err == nil {
-						f.Seek(offset, io.SeekStart)
-						io.Copy(stdoutStream, f)
-						f.Close()
-					}
+				case <-watchStop:
+					read()
 					return
-				case <-time.After(500 * time.Millisecond):
-					if f, err := os.Open(outputFile); err == nil {
-						f.Seek(offset, io.SeekStart)
-						n, _ := io.Copy(stdoutStream, f)
-						if n > 0 {
-							offset += n
-						}
-						f.Close()
-					}
+				case <-ticker.C:
+					read()
 				}
 			}
 		}()
 	}
 
 	runErr := cmd.Run()
-	stdoutStream.Close()
-	stderrStream.Close()
-
+	if watchedOutput != "" {
+		close(watchStop)
+		<-watchDone
+		if !outputSeen {
+			// Some shell commands only emit stdout even with output_file set.
+			stdoutStream.Write(stdout.Bytes())
+		}
+	}
 	exitCode := 0
 	if runErr != nil {
 		var exitErr *exec.ExitError
@@ -567,10 +711,19 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 	}
 
 	stderrOutput := stderr.String()
-	if exitCode == 127 && !strings.Contains(stderrOutput, "[diagnostic]") {
-		stderrOutput = strings.TrimRight(stderrOutput, "\n") +
-			"\n[diagnostic] Command not found (exit 127). Ensure the tool is built in ./tools/ or installed in worker PATH.\n"
+	if exitCode != 0 {
+		prefix := ""
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			prefix = "[diagnostic] Execution timed out.\n"
+		} else if errors.Is(ctx.Err(), context.Canceled) {
+			prefix = "[diagnostic] Execution cancelled.\n"
+		}
+		diagnostic := "\n" + prefix + "[diagnostic] " + taskFailureSummary(&TaskResult{ExitCode: exitCode, Stderr: prefix + stderrOutput}) + "\n"
+		stderrOutput = strings.TrimRight(stderrOutput, "\n") + diagnostic
+		stderrStream.Write([]byte(diagnostic))
 	}
+	stdoutStream.Close()
+	stderrStream.Close()
 
 	result := &TaskResult{
 		Stdout:   stdout.String(),
@@ -582,7 +735,15 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 
 // downloadFile fetches url and writes it to dest, creating or truncating the file.
 func downloadFile(url, dest string) error {
-	resp, err := http.Get(url) //nolint:gosec
+	return downloadFileContext(context.Background(), url, dest)
+}
+
+func downloadFileContext(ctx context.Context, url, dest string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -596,14 +757,16 @@ func downloadFile(url, dest string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
 	_, err = io.Copy(f, resp.Body)
-	return err
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 // sendResult reports the task outcome back to the server.
-func (w *WorkerAgent) sendResult(taskID string, result *TaskResult, errMsg string) {
+func (w *WorkerAgent) sendResult(taskID string, result *TaskResult, errMsg string) error {
 	msg, err := NewMessage(MsgTypeTaskResult, TaskResultPayload{
 		TaskID:   taskID,
 		WorkerID: w.config.WorkerID,
@@ -612,11 +775,13 @@ func (w *WorkerAgent) sendResult(taskID string, result *TaskResult, errMsg strin
 	})
 	if err != nil {
 		log.Printf("Failed to build result message for task %s: %v", taskID, err)
-		return
+		return err
 	}
 	if err := w.send(msg); err != nil {
 		log.Printf("Failed to send result for task %s: %v", taskID, err)
+		return err
 	}
+	return nil
 }
 
 // backoff returns a wait duration for reconnect attempt n.
@@ -671,7 +836,7 @@ func (b *BufferedStreamWriter) flushLocked() {
 	if b.buf.Len() == 0 {
 		return
 	}
-	
+
 	chunk := b.buf.String()
 	b.buf.Reset()
 

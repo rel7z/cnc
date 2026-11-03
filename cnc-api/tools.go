@@ -2,6 +2,7 @@ package cnc
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -10,7 +11,7 @@ var ToolsRegistry = map[string]ToolDefinition{
 	"cms-scan": {
 		ID:               "cms-scan",
 		Name:             "CMS Scanner",
-		Description:      "Detects CMS platform (WordPress, Joomla, Drupal…) for each target. Results per-CMS to watcher folder.",
+		Description:      "Detects CMS platform (WordPress, Joomla, Drupal…) for each target. Results per-CMS to watcher folder. Choose CMS & PHP Version Scanner for version checks.",
 		Executable:       "cms-scan",
 		Scope:            "worker",
 		DefaultMode:      "spread",
@@ -18,12 +19,16 @@ var ToolsRegistry = map[string]ToolDefinition{
 		InputLabel:       "Target Domains File (Worker Path)",
 		InputPlaceholder: "/root/file/domains.txt",
 		Options: []ToolOption{
+			{Name: "auto_concurrency", Flag: "-auto-concurrency", Description: "Automatically tune concurrency", Type: "boolean", Default: true},
 			{
 				Name:        "threads",
 				Flag:        "-t",
-				Description: "Number of concurrent threads",
+				Description: "Maximum concurrent requests (1–256)",
 				Type:        "number",
-				Default:     50,
+				Default:     256,
+			},
+			{
+				Name: "timeout", Flag: "-timeout", Description: "HTTP timeout in seconds (1–120)", Type: "number", Default: 10,
 			},
 			{
 				Name:        "extra_args",
@@ -36,47 +41,60 @@ var ToolsRegistry = map[string]ToolDefinition{
 	},
 	"enum": {
 		ID:               "enum",
-		Name:             "Smart CMS & Deep Enumerator",
-		Description:      "Auto-cascading pipeline: detects WordPress → plugin scan, Joomla → extension scan, Unknown → 3rd-party admin panel enum. Results piped to watcher folder.",
+		Name:             "CMS & PHP Version Scanner",
+		Description:      "Scan CMS, plugins and disclosed PHP runtime versions using saved version checks. PHP works independently of CMS classification.",
 		Executable:       "cnc-enum",
 		Scope:            "worker",
 		DefaultMode:      "spread",
 		InputFlag:        "-l",
 		InputLabel:       "Target Domains File (Worker Path)",
 		InputPlaceholder: "/root/file/domains.txt",
+		SharedFiles: []SharedFileSpec{
+			{
+				Name:        "wp_plugins",
+				Label:       "WordPress Plugins List",
+				Flag:        "-wp-plugins",
+				Description: "Custom WordPress plugin wordlist (one per line). Handled by server and distributed to workers.",
+				Required:    false,
+				Type:        "textarea",
+			},
+			{
+				Name:        "joomla_exts",
+				Label:       "Joomla Extensions List",
+				Flag:        "-joomla-exts",
+				Description: "Custom Joomla extension wordlist (one per line). Handled by server and distributed to workers.",
+				Required:    false,
+				Type:        "textarea",
+			},
+		},
 		Options: []ToolOption{
+			{Name: "auto_concurrency", Flag: "-auto-concurrency", Description: "Automatically tune concurrency", Type: "boolean", Default: true},
 			{
 				Name:        "threads",
 				Flag:        "-t",
-				Description: "Number of concurrent threads per scanning phase",
+				Description: "Maximum concurrent requests (1–256)",
 				Type:        "number",
-				Default:     50,
+				Default:     256,
 			},
 			{
 				Name:        "timeout",
 				Flag:        "-timeout",
-				Description: "HTTP request timeout per probe (e.g. 10s, 15s)",
-				Type:        "string",
-				Default:     "10s",
-			},
-			{
-				Name:        "extra_args",
-				Flag:        "",
-				Description: "Additional arguments to pass to the tool",
-				Type:        "string",
-				Default:     "",
+				Description: "HTTP request timeout in seconds (1–120)",
+				Type:        "number",
+				Default:     10,
 			},
 		},
 	},
 	"reverseip-domain": {
 		ID:               "reverseip-domain",
 		Name:             "Reverse IP (ReverseIPDomain)",
-		Description:      "Fast Reverse IP lookup using reverseipdomain.com API. Server-side execution.",
+		Description:      "Reverse IP lookup using reverseipdomain.com. Load balances input across worker servers.",
 		Executable:       "reverseip-domain",
-		Scope:            "server",
+		Scope:            "worker",
+		DefaultMode:      JobModeSpread,
 		InputFlag:        "-l",
 		OutputFlag:       "-out",
-		InputLabel:       "IP Address List (Server Path)",
+		InputLabel:       "Domain / IPv4 List (auto-resolve & dedup, server path)",
 		InputPlaceholder: "/root/file/ips.txt",
 		Options: []ToolOption{
 			{
@@ -151,15 +169,34 @@ var ToolsRegistry = map[string]ToolDefinition{
 			},
 		},
 	},
+	"reverseip-dnsrift": {
+		ID:               "reverseip-dnsrift",
+		Name:             "Reverse IP (DNSRift)",
+		Description:      "DNSRift reverse IP lookup. Load balances across workers and streams unique domains to Drive.",
+		Executable:       "reverseip-dnsrift",
+		Scope:            "worker",
+		DefaultMode:      JobModeSpread,
+		InputFlag:        "-f",
+		OutputFlag:       "-o",
+		InputLabel:       "Domain / IPv4 List (auto-resolve & dedup, server path)",
+		InputPlaceholder: "/root/file/ips.txt",
+		Options: []ToolOption{
+			{Name: "threads", Flag: "-w", Description: "Concurrent requests per worker (1-32)", Type: "number", Default: 2},
+			{Name: "delay", Flag: "-delay", Description: "Minimum interval between requests per worker", Type: "string", Default: "500ms"},
+			{Name: "timeout", Flag: "-timeout", Description: "HTTP request timeout", Type: "string", Default: "20s"},
+			{Name: "retries", Flag: "-retries", Description: "Bounded retries for rate limits and transient errors", Type: "number", Default: 2},
+		},
+	},
 	"reverseip-thc": {
 		ID:               "reverseip-thc",
 		Name:             "Reverse IP (THC.org)",
-		Description:      "Public Reverse IP lookup using ip.thc.org with rate limit pacing and 429 retries. Server-side execution.",
+		Description:      "Public Reverse IP lookup using ip.thc.org with rate limit pacing and 429 retries. Load balances across worker servers.",
 		Executable:       "reverseip-thc",
-		Scope:            "server",
+		Scope:            "worker",
+		DefaultMode:      JobModeSpread,
 		InputFlag:        "-f",
 		OutputFlag:       "-o",
-		InputLabel:       "IP Address List (Server Path)",
+		InputLabel:       "Domain / IPv4 List (auto-resolve & dedup, server path)",
 		InputPlaceholder: "/root/file/ips.txt",
 		Options: []ToolOption{
 			{
@@ -262,85 +299,6 @@ var ToolsRegistry = map[string]ToolDefinition{
 			},
 		},
 	},
-	"wp-bruter": {
-		ID:               "wp-bruter",
-		Name:             "WordPress Brute Forcer",
-		Description:      "Brute forces WordPress credentials via XML-RPC multicall and wp-login. Load balances sites across worker servers with shared passlist/userlist.",
-		Executable:       "wp-bruter",
-		Scope:            "worker",
-		DefaultMode:      JobModeSpread,
-		InputFlag:        "-sites",
-		OutputFlag:       "-output",
-		InputLabel:       "WordPress Sites File (Server Path)",
-		InputPlaceholder: "/root/file/sites.txt",
-		SharedFiles: []SharedFileSpec{
-			{
-				Name:        "passlist",
-				Label:       "Password List (Server Path)",
-				Flag:        "-passlist",
-				Description: "Server-side path to password list. Automatically uploaded and distributed to every worker before execution.",
-				Required:    true,
-			},
-			{
-				Name:        "userlist",
-				Label:       "Username List (Server Path, optional)",
-				Flag:        "-userlist",
-				Description: "Server-side path to additional username list. Workers enumerate built-in usernames unless overridden here.",
-				Required:    false,
-			},
-		},
-		Options: []ToolOption{
-			{
-				Name:        "concurrency",
-				Flag:        "-concurrency",
-				Description: "Number of concurrent workers",
-				Type:        "number",
-				Default:     100,
-			},
-			{
-				Name:        "batch",
-				Flag:        "-batch",
-				Description: "Login attempts per multicall batch",
-				Type:        "number",
-				Default:     100,
-			},
-			{
-				Name:        "req_timeout",
-				Flag:        "-timeout",
-				Description: "Request timeout in seconds",
-				Type:        "number",
-				Default:     10,
-			},
-			{
-				Name:        "req_delay",
-				Flag:        "-delay",
-				Description: "Delay between batch requests in milliseconds",
-				Type:        "number",
-				Default:     0,
-			},
-			{
-				Name:        "login_concurrency",
-				Flag:        "-login-concurrency",
-				Description: "Concurrent password attempts per site (wp-login fallback)",
-				Type:        "number",
-				Default:     10,
-			},
-			{
-				Name:        "enum",
-				Flag:        "-enum",
-				Description: "Enumerate usernames via ?author=N and REST API",
-				Type:        "boolean",
-				Default:     true,
-			},
-			{
-				Name:        "extra_args",
-				Flag:        "",
-				Description: "Additional arguments to pass to the tool",
-				Type:        "string",
-				Default:     "",
-			},
-		},
-	},
 	"wp-plugins-detector": {
 		ID:               "wp-plugins-detector",
 		Name:             "WP Plugins Detector",
@@ -407,6 +365,19 @@ func GenerateToolCommand(toolID string, inputFile string, options map[string]int
 		}
 	}
 
+	if toolID == "cms-scan" {
+		if value, ok := options["threads"]; ok {
+			n, e := strconv.Atoi(fmt.Sprint(value))
+			if e != nil || n < 1 || n > 256 {
+				return "", fmt.Errorf("threads must be 1–256")
+			}
+		}
+		if value, ok := options["auto_concurrency"]; ok {
+			if _, valid := optionBool(value); !valid {
+				return "", fmt.Errorf("auto_concurrency must be boolean")
+			}
+		}
+	}
 	// Apply options
 	for _, optDef := range tool.Options {
 		val, ok := options[optDef.Name]
@@ -430,7 +401,15 @@ func GenerateToolCommand(toolID string, inputFile string, options map[string]int
 		}
 
 		if optDef.Flag != "" {
-			cmdParts = append(cmdParts, optDef.Flag, fmt.Sprintf("%v", val))
+			if toolID == "cms-scan" && optDef.Name == "timeout" {
+				n, err := strconv.Atoi(fmt.Sprint(val))
+				if err != nil || n < 1 || n > 120 {
+					return "", fmt.Errorf("timeout must be 1–120 seconds")
+				}
+				cmdParts = append(cmdParts, optDef.Flag, strconv.Itoa(n)+"s")
+			} else {
+				cmdParts = append(cmdParts, optDef.Flag, fmt.Sprintf("%v", val))
+			}
 		} else {
 			// No flag (e.g. extra_args), just append the value
 			valStr := fmt.Sprintf("%v", val)

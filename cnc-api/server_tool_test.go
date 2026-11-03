@@ -18,8 +18,8 @@ func TestToolsRegistryServerTools(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected reverseip-thc to be registered")
 	}
-	if thc.Scope != "server" {
-		t.Errorf("expected reverseip-thc scope to be 'server', got '%s'", thc.Scope)
+	if thc.Scope != "worker" {
+		t.Errorf("expected reverseip-thc scope to be 'worker', got '%s'", thc.Scope)
 	}
 	if thc.InputFlag != "-f" {
 		t.Errorf("expected reverseip-thc input flag to be '-f', got '%s'", thc.InputFlag)
@@ -32,8 +32,8 @@ func TestToolsRegistryServerTools(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected reverseip-domain to be registered")
 	}
-	if domain.Scope != "server" {
-		t.Errorf("expected reverseip-domain scope to be 'server', got '%s'", domain.Scope)
+	if domain.Scope != "worker" || domain.DefaultMode != JobModeSpread {
+		t.Errorf("expected reverseip-domain to use worker spread mode")
 	}
 	if domain.InputFlag != "-l" {
 		t.Errorf("expected reverseip-domain input flag to be '-l', got '%s'", domain.InputFlag)
@@ -169,12 +169,18 @@ func TestServerJobExecution(t *testing.T) {
 	}
 }
 
-func TestToolsLaunchAPIServerMode(t *testing.T) {
+func TestToolsLaunchAPISpreadModeReverseIPTHC(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cnc_server_api_test_*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tempDir)
+
+	// Create a temporary input file with IPs
+	inputFile := filepath.Join(tempDir, "ips.txt")
+	if err := os.WriteFile(inputFile, []byte("8.8.8.8\n1.1.1.1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := &ServerConfig{
 		HTTPAddr: ":0",
@@ -189,8 +195,8 @@ func TestToolsLaunchAPIServerMode(t *testing.T) {
 
 	payload := map[string]interface{}{
 		"tool_id":     "reverseip-thc",
-		"input_file":  "/tmp/dummy_ips.txt",
-		"output_file": "dummy_out.txt",
+		"input_file":  inputFile,
+		"output_file": "reverseip_results.txt",
 		"options": map[string]interface{}{
 			"threads": 2,
 			"delay":   "100ms",
@@ -213,8 +219,9 @@ func TestToolsLaunchAPIServerMode(t *testing.T) {
 		t.Fatalf("invalid json response: %v", err)
 	}
 
-	if resp["mode"] != "server" {
-		t.Errorf("expected mode 'server', got %v", resp["mode"])
+	// reverseip-thc is now a spread mode tool for load balancing
+	if resp["mode"] != "spread" {
+		t.Errorf("expected mode 'spread' (load-balanced), got %v", resp["mode"])
 	}
 	jobID, ok := resp["job_id"].(string)
 	if !ok || jobID == "" {
@@ -327,137 +334,24 @@ func TestToolsLaunchAPISpreadMode(t *testing.T) {
 	}
 }
 
-func TestToolsRegistryWPBruter(t *testing.T) {
-	wpb, ok := ToolsRegistry["wp-bruter"]
-	if !ok {
-		t.Fatalf("expected wp-bruter to be registered in ToolsRegistry")
+func TestRemovedCredentialTool(t *testing.T) {
+	if _, exists := ToolsRegistry["wp-bruter"]; exists {
+		t.Fatal("removed tool remains registered")
 	}
-	if wpb.Scope != "worker" {
-		t.Errorf("expected wp-bruter scope to be 'worker', got '%s'", wpb.Scope)
-	}
-	if wpb.DefaultMode != JobModeSpread {
-		t.Errorf("expected wp-bruter default_mode to be '%s', got '%s'", JobModeSpread, wpb.DefaultMode)
-	}
-	if wpb.InputFlag != "-sites" {
-		t.Errorf("expected wp-bruter input flag to be '-sites', got '%s'", wpb.InputFlag)
-	}
-	if wpb.OutputFlag != "-output" {
-		t.Errorf("expected wp-bruter output flag to be '-output', got '%s'", wpb.OutputFlag)
+	if _, err := GenerateToolCommand("wp-bruter", "{input}", nil); err == nil {
+		t.Fatal("removed tool can still generate commands")
 	}
 }
 
-func TestGenerateToolCommandWPBruter(t *testing.T) {
-	cmd, err := GenerateToolCommand("wp-bruter", "{input}", map[string]interface{}{
-		"concurrency":       200,
-		"batch":             50,
-		"req_timeout":       15,
-		"login_concurrency": 20,
-		"enum":              false,
-		"output_file":       "cracked.txt",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error generating wp-bruter command: %v", err)
+func TestRemovedCredentialToolLaunchRejected(t *testing.T) {
+	srv := NewServer(&ServerConfig{HTTPAddr: ":0", TCPAddr: ":0", DataDir: t.TempDir()})
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/launch", strings.NewReader(`{"tool_id":"wp-bruter","passlist":"/tmp/passwords","options":{}}`))
+	response := httptest.NewRecorder()
+	srv.handleToolsLaunchAPI(response, req)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("removed tool returned %d: %s", response.Code, response.Body.String())
 	}
-	if !strings.Contains(cmd, "wp-bruter") {
-		t.Errorf("expected command to start with wp-bruter, got: %s", cmd)
-	}
-	if !strings.Contains(cmd, "-sites {input}") {
-		t.Errorf("expected command to contain '-sites {input}', got: %s", cmd)
-	}
-	if !strings.Contains(cmd, "-output cracked.txt") {
-		t.Errorf("expected command to contain '-output cracked.txt', got: %s", cmd)
-	}
-	if !strings.Contains(cmd, "-concurrency 200") {
-		t.Errorf("expected command to contain '-concurrency 200', got: %s", cmd)
-	}
-	if !strings.Contains(cmd, "-batch 50") {
-		t.Errorf("expected command to contain '-batch 50', got: %s", cmd)
-	}
-	if !strings.Contains(cmd, "-timeout 15") {
-		t.Errorf("expected command to contain '-timeout 15', got: %s", cmd)
-	}
-	if !strings.Contains(cmd, "-enum=false") {
-		t.Errorf("expected command to contain '-enum=false', got: %s", cmd)
-	}
-}
-
-func TestGenerateToolCommandWPBruterEnumDefault(t *testing.T) {
-	cmd, err := GenerateToolCommand("wp-bruter", "{input}", map[string]interface{}{})
-	if err != nil {
-		t.Fatalf("unexpected error generating wp-bruter command: %v", err)
-	}
-	if strings.Contains(cmd, "-enum=false") {
-		t.Errorf("expected enum to default to enabled (no -enum=false), got: %s", cmd)
-	}
-}
-
-func TestToolsLaunchAPIWPBruterPasslist(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "cnc_wpb_api_test_*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	dummyInput := filepath.Join(tempDir, "sites.txt")
-	if err := os.WriteFile(dummyInput, []byte("example.com\nexample.org\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	passFile := filepath.Join(tempDir, "pass.txt")
-	if err := os.WriteFile(passFile, []byte("password1\npassword2\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &ServerConfig{
-		HTTPAddr: ":0",
-		TCPAddr:  ":0",
-		DataDir:  tempDir,
-	}
-
-	srv := NewServer(cfg)
-	ctx, cancel := context.WithCancel(context.Background())
-	srv.ctx = ctx
-	srv.cancel = cancel
-
-	payload := map[string]interface{}{
-		"tool_id":     "wp-bruter",
-		"input_file":  dummyInput,
-		"output_file": "cracked.txt",
-		"passlist":    passFile,
-		"options": map[string]interface{}{
-			"concurrency": 50,
-		},
-	}
-	body, _ := json.Marshal(payload)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/tools/launch", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	srv.handleToolsLaunchAPI(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected status 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("invalid json response: %v", err)
-	}
-
-	if resp["mode"] != "spread" {
-		t.Errorf("expected mode 'spread', got %v", resp["mode"])
-	}
-	cmd, ok := resp["command"].(string)
-	if !ok {
-		t.Fatalf("expected command in response, got %v", resp["command"])
-	}
-	if !strings.Contains(cmd, "{input}") {
-		t.Errorf("expected command with {input} placeholder, got %v", cmd)
-	}
-	if !strings.Contains(cmd, "-passlist /tmp/cnc_wp_passlist.txt") {
-		t.Errorf("expected command with -passlist /tmp/cnc_wp_passlist.txt, got %v", cmd)
-	}
-	if !strings.Contains(cmd, "curl -sfo /tmp/cnc_wp_passlist.txt") {
-		t.Errorf("expected command to download passlist via curl, got %v", cmd)
+	if len(srv.jobs) != 0 {
+		t.Fatal("removed tool created a job")
 	}
 }

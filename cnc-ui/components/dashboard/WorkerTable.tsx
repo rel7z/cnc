@@ -3,6 +3,7 @@
 import { useDashboard } from "@/components/providers/EventProvider";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { useTick } from "@/lib/utils";
+import { WorkerSSH } from "./WorkerSSH";
 
 function relativeTime(isoString: string): string {
   const diff = Date.now() - new Date(isoString).getTime();
@@ -17,9 +18,9 @@ export function WorkerTable() {
   useTick(1000);
   const { workers } = useDashboard();
   
-  // Filter to only show online workers, sorted by IP address
+  // Busy workers remain connected and must stay visible.
   const onlineWorkers = Object.values(workers)
-    .filter((w) => w.status === "online")
+    .filter((w) => w.status === "online" || w.status === "busy")
     .sort((a, b) => {
       // Sort by address (IP)
       if (a.address < b.address) return -1;
@@ -43,7 +44,9 @@ export function WorkerTable() {
           <tr>
             <th className="py-3 px-4 font-medium">IP Address</th>
             <th className="py-3 px-4 font-medium">Load</th>
+            <th className="py-3 px-4 font-medium">Resources / HTTP requests</th>
             <th className="py-3 px-4 font-medium">Last Seen</th>
+            <th className="py-3 px-4 font-medium">Login</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-800">
@@ -58,6 +61,7 @@ export function WorkerTable() {
                 className="hover:bg-gray-800/50 transition-colors"
               >
                 <td className="py-3 px-4 font-mono text-sm text-gray-200">
+                  <p className="mb-1 text-xs text-gray-500">{worker.id}</p>
                   {worker.address || "—"}
                 </td>
                 <td className="py-3 px-4">
@@ -73,9 +77,14 @@ export function WorkerTable() {
                     </span>
                   </div>
                 </td>
+                <td className="py-3 px-4 text-xs text-gray-400">
+                  {worker.resources && <div>{worker.resources.cpu_percent.toFixed(0)}% CPU · {worker.resources.available_memory_mb} MiB free</div>}
+                  {worker.enum_requests && <div>{Object.values(worker.enum_requests).reduce((n,m)=>n+m.active,0)} active · {Object.values(worker.enum_requests).reduce((n,m)=>n+m.queued,0)} queued requests</div>}
+                </td>
                 <td className="py-3 px-4 text-xs text-gray-400 whitespace-nowrap">
                   {relativeTime(worker.last_seen)}
                 </td>
+                <td className="py-3 px-4"><WorkerSSH worker={worker} /></td>
               </tr>
             );
           })}

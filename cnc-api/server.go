@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -13,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,24 +28,27 @@ import (
 // over TCP, exposes an HTTP API for job management, splits input files into
 // chunks, and dispatches tasks to available workers.
 type Server struct {
-	mu          sync.RWMutex
-	workers     map[string]*Worker
-	jobs        map[string]*Job
-	tasks       map[string]*Task
-	jobTasks    map[string][]string // jobID -> []taskID
-	taskQueue   chan *Task
-	taskBuffers map[string]string // taskID -> buffer for partial lines
-	httpServer  *http.Server
-	tcpListener net.Listener
-	config      *ServerConfig
-	jobCounter  int
-	taskCounter int
-	wg          sync.WaitGroup
-	ctx         context.Context
-	cancel      context.CancelFunc
+	mu              sync.RWMutex
+	workers         map[string]*Worker
+	jobs            map[string]*Job
+	tasks           map[string]*Task
+	jobTasks        map[string][]string // jobID -> []taskID
+	taskQueue       chan *Task
+	taskBuffers     map[string]string // taskID -> buffer for partial lines
+	httpServer      *http.Server
+	tcpListener     net.Listener
+	config          *ServerConfig
+	jobCounter      int
+	enumRecoveryErr error
+	taskCounter     int
+	wg              sync.WaitGroup
+	ctx             context.Context
+	cancel          context.CancelFunc
+	reverseIPLookup reverseIPLookup
 
 	// Google Drive uploader
 	gdriveUploader *GDriveUploader
+	gdriveMu       sync.RWMutex
 
 	// Telegram Bot
 	telegramBot *TelegramBot
@@ -56,6 +63,8 @@ type Server struct {
 }
 
 type ServerConfig struct {
+	configPath       string
+	LocalAdminOnly   bool            `json:"local_admin_only,omitempty"`
 	HTTPAddr         string          `json:"http_addr"`
 	TCPAddr          string          `json:"tcp_addr"`
 	DataDir          string          `json:"data_dir"`
@@ -68,6 +77,7 @@ type ServerConfig struct {
 }
 
 type GDriveWrapper struct {
+	RedirectURL       string `json:"redirect_url"`
 	Enabled           bool   `json:"enabled"`
 	WatchDir          string `json:"watch_dir"`
 	ClientID          string `json:"client_id"`
@@ -127,17 +137,31 @@ func SaveServerConfig(path string, config *ServerConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0644)
+	file, err := os.CreateTemp(filepath.Dir(path), ".config-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if _, err = file.Write(append(data, '\n')); err != nil {
+		file.Close()
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
 }
 
 func LoadServerConfig(path string) (*ServerConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		cfg := DefaultServerConfig()
+		cfg.configPath = path
 		_ = SaveServerConfig(path, cfg)
 		return cfg, err
 	}
 	var config ServerConfig
+	config.configPath = path
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
@@ -187,7 +211,7 @@ func NewServer(config *ServerConfig) *Server {
 		config = DefaultServerConfig()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Server{
+	server := &Server{
 		workers:    make(map[string]*Worker),
 		jobs:       make(map[string]*Job),
 		tasks:      make(map[string]*Task),
@@ -199,10 +223,15 @@ func NewServer(config *ServerConfig) *Server {
 		sseClients: make(map[chan SSEEvent]struct{}),
 		conns:      make(map[net.Conn]struct{}),
 	}
+	server.enumRecoveryErr = server.recoverEnumJobs()
+	return server
 }
 
 // Start runs all server components. It blocks on the HTTP listener.
 func (s *Server) Start() error {
+	if s.enumRecoveryErr != nil {
+		return fmt.Errorf("recover enum jobs: %w", s.enumRecoveryErr)
+	}
 	if err := os.MkdirAll(s.config.DataDir, 0755); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
@@ -219,32 +248,19 @@ func (s *Server) Start() error {
 		}
 	}
 
-	// Start Google Drive uploader if enabled
-	if s.config.GDrive != nil && s.config.GDrive.Enabled {
-		// Convert GDriveWrapper to GDriveConfig
-		watchDir := ExpandPath(s.config.GDrive.WatchDir)
-		tokenPath := ExpandPath(s.config.GDrive.TokenPath)
-		stateFilePath := ExpandPath(s.config.GDrive.StateFilePath)
-
-		gdriveConfig := &GDriveConfig{
-			WatchDir:          watchDir,
-			ClientID:          s.config.GDrive.ClientID,
-			ClientSecret:      s.config.GDrive.ClientSecret,
-			TokenPath:         tokenPath,
-			UploadInterval:    s.config.GDrive.UploadInterval,
-			ParentFolderID:    s.config.GDrive.ParentFolderID,
-			StateFilePath:     stateFilePath,
-			DeleteAfterUpload: s.config.GDrive.DeleteAfterUpload,
-		}
-		
-		uploader, err := NewGDriveUploader(gdriveConfig)
-		if err != nil {
+	// Initialize authorization even when automatic uploads are disabled.
+	if cfg := s.driveConfig(); cfg != nil && cfg.ClientID != "" && cfg.ClientSecret != "" {
+		if uploader, err := buildDriveUploader(cfg); err != nil {
 			log.Printf("[gdrive] Warning: failed to initialize: %v", err)
 		} else {
-			s.gdriveUploader = uploader
-			if err := s.gdriveUploader.Start(); err != nil {
+			if cfg.Enabled {
+				err = uploader.Start()
+			}
+			if err != nil {
+				uploader.Stop()
 				log.Printf("[gdrive] Warning: failed to start: %v", err)
-				s.gdriveUploader = nil
+			} else {
+				s.gdriveUploader = uploader
 			}
 		}
 	}
@@ -272,8 +288,36 @@ func (s *Server) Start() error {
 	go s.tcpServer()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/processor/", s.handleProcessorAPI)
+	linode := newLinodeIntegration(s.config.DataDir)
+	linode.tcpAddr, linode.httpAddr = s.config.TCPAddr, s.config.HTTPAddr
+	linode.prepareTools = refreshWorkerToolsPackage
+	mux.HandleFunc("/api/linode/", func(w http.ResponseWriter, r *http.Request) {
+		remote, _, _ := net.SplitHostPort(r.RemoteAddr)
+		local, _, _ := net.SplitHostPort(s.config.HTTPAddr)
+		if !linodeLocalCaller(remote, local) {
+			http.Error(w, "cloud management requires the local dashboard proxy", http.StatusForbidden)
+			return
+		}
+		linode.handle(w, r)
+	})
+	awsCloud := newAWSIntegration("/opt/cnc/aws-config.json")
+	awsCloud.prepareTools = refreshWorkerToolsPackage
+	awsCloud.dataDir = s.config.DataDir
+	mux.HandleFunc("/api/aws/", func(w http.ResponseWriter, r *http.Request) {
+		remote, _, _ := net.SplitHostPort(r.RemoteAddr)
+		local, _, _ := net.SplitHostPort(s.config.HTTPAddr)
+		if !linodeLocalCaller(remote, local) {
+			http.Error(w, "cloud management requires the local dashboard proxy", http.StatusForbidden)
+			return
+		}
+		awsCloud.handle(w, r)
+	})
+	mux.HandleFunc("/download/cnc-release", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, "/opt/cnc/RELEASE") })
+	mux.HandleFunc("/download/cnc-worker-tools", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, "/opt/cnc/worker-tools.tar.gz") })
 	mux.HandleFunc("/api/workers", s.handleWorkersAPI)
 	mux.HandleFunc("/api/workers/deploy", s.handleDeployWorkerAPI)
+	mux.HandleFunc("/api/workers/login", s.handleWorkerLoginAPI)
 	mux.HandleFunc("/download/cnc-worker-linux", s.handleDownloadWorker)
 	mux.HandleFunc("/api/jobs", s.handleJobsAPI)
 	mux.HandleFunc("/api/jobs/", s.handleJobsSubAPI)
@@ -284,6 +328,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/config/gdrive/test", s.handleTestGDriveAPI)
 	mux.HandleFunc("/api/config/gdrive/auth-url", s.handleGDriveAuthURL)
 	mux.HandleFunc("/api/config/gdrive/auth-status", s.handleGDriveAuthStatus)
+	mux.HandleFunc("/api/config/gdrive/sync", s.handleGDriveSync)
+	mux.HandleFunc("/api/config/gdrive/restore", s.handleGDriveRestore)
 	mux.HandleFunc("/api/config/gdrive/auth-disconnect", s.handleGDriveDisconnect)
 	mux.HandleFunc("/api/config/gdrive/callback", s.handleGDriveCallback)
 	mux.HandleFunc("/api/config/telegram", s.handleTelegramConfigAPI)
@@ -295,10 +341,12 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/files/", s.handleFilesAPI)
 	mux.HandleFunc("/api/tools", s.handleToolsAPI)
 	mux.HandleFunc("/api/tools/launch", s.handleToolsLaunchAPI)
+	mux.HandleFunc("/api/enum/", s.handleEnumAPI)
 	mux.HandleFunc("/api/tools/wordlists", s.handleToolsWordlistAPI)
 
 	// File Manager & Server Terminal APIs
 	mux.HandleFunc("/api/fs/list", s.handleFSListAPI)
+	mux.HandleFunc("/api/fs/upload", s.handleFSUploadAPI)
 	mux.HandleFunc("/api/fs/read", s.handleFSReadAPI)
 	mux.HandleFunc("/api/fs/write", s.handleFSWriteAPI)
 	mux.HandleFunc("/api/fs/delete", s.handleFSDeleteAPI)
@@ -306,7 +354,7 @@ func (s *Server) Start() error {
 
 	s.httpServer = &http.Server{
 		Addr:    s.config.HTTPAddr,
-		Handler: corsMiddleware(mux),
+		Handler: corsMiddleware(s.localAdminMiddleware(mux)),
 	}
 
 	log.Printf("CNC Server starting — HTTP %s  TCP %s", s.config.HTTPAddr, s.config.TCPAddr)
@@ -343,17 +391,19 @@ func (s *Server) TriggerRestart() {
 func (s *Server) Stop() {
 	log.Println("Stopping CNC Server...")
 	s.cancel()
-	
+
 	// Stop Google Drive uploader if running
+	s.gdriveMu.Lock()
 	if s.gdriveUploader != nil {
 		s.gdriveUploader.Stop()
 	}
+	s.gdriveMu.Unlock()
 
 	// Stop Telegram bot if running
 	if s.telegramBot != nil {
 		s.telegramBot.Stop()
 	}
-	
+
 	if s.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -452,10 +502,7 @@ func (s *Server) buildSnapshot() SSEEvent {
 	for _, j := range s.jobs {
 		jobs = append(jobs, j)
 	}
-	tasks := make([]*Task, 0, len(s.tasks))
-	for _, t := range s.tasks {
-		tasks = append(tasks, t)
-	}
+	tasks := s.dashboardTasksLocked(dashboardTaskLimit)
 	stats := s.computeStats()
 	s.mu.RUnlock()
 
@@ -499,7 +546,7 @@ func (s *Server) computeStats() map[string]int {
 			stats["tasks_pending"]++
 		case TaskStatusAssigned, TaskStatusRunning:
 			stats["tasks_running"]++
-		case TaskStatusCompleted:
+		case TaskStatusCompleted, TaskStatusCompletedWithErrors:
 			stats["tasks_completed"]++
 		case TaskStatusFailed:
 			stats["tasks_failed"]++
@@ -749,6 +796,28 @@ func (s *Server) handleWorkerHeartbeat(msg *Message) {
 		w.LastSeen = time.Now()
 		w.Status = p.Status
 		w.CurrentLoad = p.CurrentLoad
+		w.Resources = p.Resources
+		w.EnumRequests = p.EnumRequests
+		w.ProcessorProtocol = p.ProcessorProtocol
+		w.ProcessorVersions = p.ProcessorVersions
+		w.ProcessorAttempts = p.ProcessorAttempts
+		w.ProcessorWorkspaces = p.ProcessorWorkspaces
+		active := map[string]bool{}
+		for _, id := range p.ActiveTasks {
+			active[id] = true
+		}
+		for _, task := range s.tasks {
+			if task.AssignedTo == w.ID && (task.Type == "processor" || task.Type == "processor_install") && (task.Status == TaskStatusAssigned || task.Status == TaskStatusRunning) && task.StartedAt != nil && time.Since(*task.StartedAt) > 10*time.Second && !active[task.ID] {
+				task.Status = TaskStatusFailed
+				task.Error = "worker no longer reports this transport task"
+			}
+		}
+		if reserved := s.reservedLoad(w.ID); reserved > w.CurrentLoad {
+			w.CurrentLoad = reserved
+		}
+		if w.CurrentLoad >= w.MaxTasks {
+			w.Status = WorkerStatusBusy
+		}
 		cp := *w
 		workerCopy = &cp
 	}
@@ -775,20 +844,28 @@ func (s *Server) handleTaskStream(msg *Message) {
 	jobCopy := s.jobs[task.JobID]
 	s.mu.RUnlock()
 
-	if jobCopy == nil || s.config.GDrive == nil || s.config.GDrive.WatchDir == "" {
+	driveConfig := s.driveConfig()
+	if jobCopy == nil || driveConfig == nil || driveConfig.WatchDir == "" {
 		return
 	}
 
-	if p.Chunk != "" && !p.IsStderr {
-		watchDir := ExpandPath(s.config.GDrive.WatchDir)
+	if p.Chunk != "" {
+		watchDir := ExpandPath(driveConfig.WatchDir)
+		bufferKey := p.TaskID
+		chunk := p.Chunk
+		if p.IsStderr {
+			bufferKey += "\x00stderr"
+			// Progress redraws use carriage returns, not newlines. Do not
+			// retain an entire long scan's progress as one partial line.
+			chunk = strings.ReplaceAll(chunk, "\r", "\n")
+		}
 
 		s.mu.Lock()
 		if s.taskBuffers == nil {
 			s.taskBuffers = make(map[string]string)
 		}
-		s.taskBuffers[p.TaskID] += p.Chunk
-		data := s.taskBuffers[p.TaskID]
-		s.mu.Unlock()
+		s.taskBuffers[bufferKey] += chunk
+		data := s.taskBuffers[bufferKey]
 
 		var remaining string
 		lines := strings.Split(data, "\n")
@@ -797,21 +874,23 @@ func (s *Server) handleTaskStream(msg *Message) {
 			lines = lines[:len(lines)-1]
 		}
 
-		s.mu.Lock()
 		if remaining == "" {
-			delete(s.taskBuffers, p.TaskID)
+			delete(s.taskBuffers, bufferKey)
 		} else {
-			s.taskBuffers[p.TaskID] = remaining
+			s.taskBuffers[bufferKey] = remaining
 		}
 		s.mu.Unlock()
 
-		fileChunks := make(map[string]strings.Builder)
+		fileChunks := make(map[string]*strings.Builder)
 
 		for _, line := range lines {
 			if line == "" {
-				// preserve empty lines unless we have logic against it, 
-				// but usually tools just emit complete lines.
-				// Wait, if it's completely empty, maybe skip? Let's keep it.
+				continue
+			}
+			// Enum emits explicit file records. Keep progress/log messages out
+			// of results, while accepting records from older >&2 launchers.
+			if (p.IsStderr || jobCopy.Name == "Tool: enum") && !strings.HasPrefix(line, "[FILE:") {
+				continue
 			}
 			targetFile := jobCopy.OutputFile
 			content := line + "\n"
@@ -827,17 +906,24 @@ func (s *Server) handleTaskStream(msg *Message) {
 			if targetFile == "" {
 				continue
 			}
+			if jobCopy.Enum != nil && (filepath.Base(targetFile) != targetFile || strings.HasSuffix(targetFile, ".jsonl")) {
+				continue
+			}
 
-            log.Printf("[DEBUG] Routing line to %s: %s", targetFile, content)
+			log.Printf("[DEBUG] Routing line to %s: %s", targetFile, content)
 			b := fileChunks[targetFile]
+			if b == nil {
+				b = &strings.Builder{}
+				fileChunks[targetFile] = b
+			}
 			b.WriteString(content)
-			fileChunks[targetFile] = b
 		}
 
 		for filename, b := range fileChunks {
 			if b.Len() == 0 {
 				continue
 			}
+			watcherFileMu.Lock()
 			outPath := filepath.Join(watchDir, filename)
 			f, err := os.OpenFile(outPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
@@ -847,6 +933,10 @@ func (s *Server) handleTaskStream(msg *Message) {
 					log.Printf("Failed to write stream to watcher output file %s: %v", outPath, err)
 				}
 				f.Close()
+			}
+			watcherFileMu.Unlock()
+			if uploader := s.driveUploader(); uploader != nil {
+				uploader.NotifyResults()
 			}
 		}
 	}
@@ -869,10 +959,20 @@ func (s *Server) handleTaskResult(msg *Message) {
 		return
 	}
 
+	if task.Status == TaskStatusCancelled || task.Status == TaskStatusCompleted || task.Status == TaskStatusCompletedWithErrors || task.Status == TaskStatusFailed || task.AssignedTo != p.WorkerID {
+		log.Printf("Ignoring result for cancelled task %s", p.TaskID)
+		s.mu.Unlock()
+		return
+	}
+
 	now := time.Now()
 
 	// Infrastructure error (worker couldn't run the command at all) → retry.
-	if p.Error != "" {
+	if p.Error != "" && (task.Type == "processor" || task.Type == "processor_install" || task.Type == "enum") {
+		task.Status = TaskStatusFailed
+		task.CompletedAt = &now
+		task.Error = p.Error
+	} else if p.Error != "" {
 		task.Error = p.Error
 		task.RetryCount++
 		if task.RetryCount < s.config.MaxRetries {
@@ -884,20 +984,30 @@ func (s *Server) handleTaskResult(msg *Message) {
 			task.Status = TaskStatusFailed
 			log.Printf("Task %s permanently failed after %d retries", task.ID, task.RetryCount)
 		}
+	} else if (task.Type == "enum" || s.jobs[task.JobID] != nil && s.jobs[task.JobID].Name == "Tool: cms-scan") && p.Result != nil && p.Result.ExitCode == 2 {
+		task.Status = TaskStatusCompletedWithErrors
+		task.CompletedAt = &now
+		task.Result = p.Result
 	} else if p.Result != nil && p.Result.ExitCode != 0 {
 		// Command ran but exited non-zero — mark failed without retry.
 		task.Status = TaskStatusFailed
 		task.CompletedAt = &now
 		task.Result = p.Result
-		task.Error = fmt.Sprintf("exit code %d", p.Result.ExitCode)
+		task.Error = taskFailureSummary(p.Result)
 		log.Printf("Task %s failed with exit code %d", task.ID, p.Result.ExitCode)
 	} else {
 		task.Status = TaskStatusCompleted
 		task.CompletedAt = &now
 		task.Result = p.Result
 	}
+	if task.Type == "enum" && p.Result != nil && task.EnumPublication != "accepted" && task.EnumPublication != "conflicted" {
+		task.EnumPublication = p.Result.PublicationStatus
+	}
 
 	s.updateJobProgress(task.JobID)
+	if err := s.persistEnumJobLocked(task.JobID); err != nil {
+		log.Printf("Cannot persist enum result state: %v", err)
+	}
 
 	if w, ok := s.workers[p.WorkerID]; ok {
 		w.CurrentLoad--
@@ -940,17 +1050,25 @@ func (s *Server) handleTaskResult(msg *Message) {
 
 // submitJob validates and stores a job, then kicks off async processing.
 func (s *Server) submitJob(job *Job) {
-	// Only default TimeoutSeconds if unset; -1 means no timeout.
+	// New jobs have no overall deadline unless a timeout is explicitly chosen.
 	if job.TimeoutSeconds == 0 {
-		job.TimeoutSeconds = DefaultTimeout
+		job.TimeoutSeconds = NoTimeout
 	}
 
 	s.mu.Lock()
 	s.jobCounter++
-	job.ID = fmt.Sprintf("job_%d_%d", time.Now().Unix(), s.jobCounter)
+	if job.ID == "" {
+		job.ID = fmt.Sprintf("job_%d_%d", time.Now().Unix(), s.jobCounter)
+	}
 	job.Status = "pending"
 	job.CreatedAt = time.Now()
 	s.jobs[job.ID] = job
+	if err := s.persistEnumJobLocked(job.ID); err != nil {
+		job.Status = "failed"
+		s.mu.Unlock()
+		log.Printf("Cannot persist enum job: %v", err)
+		return
+	}
 	jobCopy := *job
 	s.mu.Unlock()
 
@@ -1009,11 +1127,17 @@ func (s *Server) processServerJob(job *Job) {
 	s.broadcastStats()
 
 	go func() {
-		timeout := time.Duration(job.TimeoutSeconds) * time.Second
-		if timeout <= 0 {
-			timeout = time.Duration(DefaultTimeout) * time.Second
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if job.TimeoutSeconds == NoTimeout {
+			ctx, cancel = context.WithCancel(s.ctx)
+		} else {
+			timeout := time.Duration(job.TimeoutSeconds) * time.Second
+			if timeout <= 0 {
+				timeout = time.Duration(DefaultTimeout) * time.Second
+			}
+			ctx, cancel = context.WithTimeout(s.ctx, timeout)
 		}
-		ctx, cancel := context.WithTimeout(s.ctx, timeout)
 		defer cancel()
 
 		cmd := exec.CommandContext(ctx, "sh", "-c", job.Command)
@@ -1075,14 +1199,23 @@ func (s *Server) processServerJob(job *Job) {
 		s.mu.Unlock()
 
 		// Route output to watcher directory if this job specifies an OutputFile.
-		if finalJobCopy.OutputFile != "" && s.config.GDrive != nil && s.config.GDrive.WatchDir != "" {
-			watchDir := ExpandPath(s.config.GDrive.WatchDir)
+		if driveConfig := s.driveConfig(); finalJobCopy.OutputFile != "" && driveConfig != nil && driveConfig.WatchDir != "" {
+			watchDir := ExpandPath(driveConfig.WatchDir)
 			outPath := filepath.Join(watchDir, finalJobCopy.OutputFile)
+			watcherFileMu.Lock()
 
 			// 1. If output file was generated in local working directory, copy it to watchDir
 			if localBytes, readErr := os.ReadFile(finalJobCopy.OutputFile); readErr == nil && len(localBytes) > 0 {
 				_ = os.MkdirAll(watchDir, 0755)
-				_ = os.WriteFile(outPath, localBytes, 0644)
+				captureErr := error(nil)
+				if _, statErr := os.Stat(outPath); statErr == nil {
+					captureErr = processorCaptureBeforeDelete(outPath)
+				}
+				if captureErr != nil {
+					log.Printf("[processor] Retained existing %s before replacement: %v; new output remains at %s", outPath, captureErr, finalJobCopy.OutputFile)
+				} else {
+					_ = os.WriteFile(outPath, localBytes, 0644)
+				}
 			} else if res.Stdout != "" {
 				// 2. Otherwise write captured stdout
 				_ = os.MkdirAll(watchDir, 0755)
@@ -1092,6 +1225,7 @@ func (s *Server) processServerJob(job *Job) {
 					f.Close()
 				}
 			}
+			watcherFileMu.Unlock()
 		}
 
 		s.broadcast(SSEEvent{Type: SSEEventTask, Payload: finalTaskCopy})
@@ -1103,21 +1237,23 @@ func (s *Server) processServerJob(job *Job) {
 
 // processSpreadJob handles spread mode: split file into N parts, one task per worker.
 func (s *Server) processSpreadJob(job *Job) {
-	// Determine worker count now (before the lock) if not specified.
+	s.mu.Lock()
+	if job.Status == "cancelled" {
+		s.mu.Unlock()
+		return
+	}
+	// Determine worker count under the same lock as the job state.
 	if job.Workers <= 0 {
-		s.mu.RLock()
 		for _, w := range s.workers {
 			if w.Status == WorkerStatusOnline || w.Status == WorkerStatusBusy {
 				job.Workers++
 			}
 		}
-		s.mu.RUnlock()
 		if job.Workers <= 0 {
 			job.Workers = 1
 		}
 	}
 
-	s.mu.Lock()
 	job.Status = "running"
 	now := time.Now()
 	job.StartedAt = &now
@@ -1131,13 +1267,44 @@ func (s *Server) processSpreadJob(job *Job) {
 		home = "."
 	}
 	chunkDir := filepath.Join(home, "split")
+	if job.Enum != nil {
+		chunkDir = filepath.Join(s.config.DataDir, "enum-jobs", job.ID, "chunks")
+	}
 	originalName := filepath.Base(job.InputFile)
+	inputFile := job.InputFile
+	err = nil
+	if isReverseIPTool(strings.TrimPrefix(job.Name, "Tool: ")) {
+		// Resolve and deduplicate once on the controller, before splitting. A
+		// unique chunk basename also prevents simultaneous jobs overwriting one
+		// another in the existing worker download endpoint.
+		originalName = job.ID + "-ips.txt"
+		inputFile, err = s.prepareReverseIPJob(job)
+	}
 
-	splitFiles, err := s.splitInputFileByCount(job.InputFile, job.Workers, chunkDir, originalName)
+	var splitFiles []string
+	if err != nil {
+		// Handled by the same failure path as a split error, with no dispatch.
+	} else if job.Enum != nil && job.Workers > 1 {
+		splitFiles, err = s.splitInputFileByCount(job.InputFile, job.Workers, chunkDir, originalName)
+	} else if job.Enum != nil {
+		splitFiles, err = splitEnumInput(job.InputFile, chunkDir, job.Workers)
+	} else {
+		splitFiles, err = s.splitInputFileByCount(inputFile, job.Workers, chunkDir, originalName)
+	}
 	if err != nil {
 		log.Printf("Job %s split error: %v", job.ID, err)
 		s.mu.Lock()
+		if job.Status == "cancelled" {
+			s.mu.Unlock()
+			return
+		}
 		job.Status = "failed"
+		job.Error = err.Error()
+		completed := time.Now()
+		job.CompletedAt = &completed
+		if job.Enum != nil {
+			s.persistEnumJobLocked(job.ID)
+		}
 		failedCopy := *job
 		s.mu.Unlock()
 		s.broadcast(SSEEvent{Type: SSEEventJob, Payload: failedCopy})
@@ -1148,6 +1315,10 @@ func (s *Server) processSpreadJob(job *Job) {
 
 	// Create all tasks and set TotalTasks under one lock to avoid the total_tasks=0 window.
 	s.mu.Lock()
+	if job.Status == "cancelled" {
+		s.mu.Unlock()
+		return
+	}
 	job.TotalTasks = len(splitFiles)
 	taskIDs := make([]string, 0, len(splitFiles))
 	createdTasks := make([]Task, 0, len(splitFiles))
@@ -1170,11 +1341,32 @@ func (s *Server) processSpreadJob(job *Job) {
 			Status:    TaskStatusPending,
 			CreatedAt: time.Now(),
 		}
+		if job.Name == "Tool: cms-scan" {
+			task.Payload["file_records"] = true
+			task.Payload["cms_scanner"] = true
+		}
+		if job.Enum != nil {
+			task.Type = "enum"
+			task.Payload = map[string]interface{}{"enum_artifact_url": "/api/enum/jobs/" + job.ID + "/artifact", "enum_artifact_sha256": job.Enum.ArtifactSHA256, "enum_token": job.Enum.Token, "enum_input_url": "/api/enum/jobs/" + job.ID + "/chunks/" + taskID, "chunk_path": chunkPath, "auto_concurrency": job.Enum.Automatic, "threads": float64(job.Enum.Threads), "request_timeout_ms": float64(job.Enum.RequestTimeoutMS), "timeout_seconds": float64(job.TimeoutSeconds)}
+			for _, name := range job.Enum.Wordlists {
+				task.Payload["enum_"+strings.TrimSuffix(name, ".txt")+"_url"] = "/api/enum/jobs/" + job.ID + "/" + name
+			}
+		}
 		s.tasks[taskID] = task
 		taskIDs = append(taskIDs, taskID)
 		createdTasks = append(createdTasks, *task)
 	}
 	s.jobTasks[job.ID] = taskIDs
+	if err := s.persistEnumJobLocked(job.ID); err != nil {
+		job.Status = "failed"
+		for _, id := range taskIDs {
+			s.tasks[id].Status = TaskStatusFailed
+			s.tasks[id].Error = "cannot persist enum task"
+		}
+		s.mu.Unlock()
+		log.Printf("Cannot persist enum shards: %v", err)
+		return
+	}
 	jobCopy = *job
 	s.mu.Unlock()
 
@@ -1247,6 +1439,10 @@ func (s *Server) processBroadcastJob(job *Job) {
 			AssignedTo: workerID,
 			CreatedAt:  time.Now(),
 		}
+		if job.Name == "Tool: cms-scan" {
+			task.Payload["file_records"] = true
+			task.Payload["cms_scanner"] = true
+		}
 		s.tasks[taskID] = task
 		taskIDs = append(taskIDs, taskID)
 		createdTasks = append(createdTasks, *task)
@@ -1281,7 +1477,7 @@ func (s *Server) updateJobProgress(jobID string) {
 	}
 	taskIDs := s.jobTasks[jobID]
 
-	completed, failed := 0, 0
+	completed, failed, partial := 0, 0, 0
 	for _, tid := range taskIDs {
 		t, ok := s.tasks[tid]
 		if !ok {
@@ -1290,6 +1486,9 @@ func (s *Server) updateJobProgress(jobID string) {
 		switch t.Status {
 		case TaskStatusCompleted:
 			completed++
+		case TaskStatusCompletedWithErrors:
+			completed++
+			partial++
 		case TaskStatusFailed:
 			failed++
 		}
@@ -1300,6 +1499,8 @@ func (s *Server) updateJobProgress(jobID string) {
 	if completed+failed >= job.TotalTasks && job.TotalTasks > 0 {
 		if failed == job.TotalTasks {
 			job.Status = "failed"
+		} else if failed > 0 || partial > 0 {
+			job.Status = "completed_with_errors"
 		} else {
 			job.Status = "completed"
 		}
@@ -1330,13 +1531,19 @@ func (s *Server) dispatchTask(task *Task) {
 		s.mu.Unlock()
 		return
 	}
+	if reason := s.dorkCapacityReason(task); reason != "" {
+		task.QueueReason = reason
+		s.mu.Unlock()
+		s.retryCapacityTask(task)
+		return
+	}
 
 	var chosen *Worker
 
 	if task.AssignedTo != "" {
 		// Broadcast task: pre-assigned to a specific worker.
 		w, ok := s.workers[task.AssignedTo]
-		if !ok || w.Status == WorkerStatusOffline || w.SendCh == nil {
+		if !ok || w.Status == WorkerStatusOffline || w.SendCh == nil || s.workerLoad(w) >= w.MaxTasks {
 			// Worker unavailable — requeue after a short delay.
 			s.mu.Unlock()
 			go func() {
@@ -1346,14 +1553,24 @@ func (s *Server) dispatchTask(task *Task) {
 			return
 		}
 		chosen = w
+		if _, reason := s.ordinaryResources(w); reason != "" {
+			task.QueueReason = reason
+			s.mu.Unlock()
+			go func() { time.Sleep(200 * time.Millisecond); s.taskQueue <- task }()
+			return
+		}
 	} else {
 		// Spread task: find least-loaded available worker.
 		for _, w := range s.workers {
-			if w.Status != WorkerStatusOnline || w.CurrentLoad >= w.MaxTasks || w.SendCh == nil {
+			if w.Status != WorkerStatusOnline || s.workerLoad(w) >= w.MaxTasks || w.SendCh == nil {
 				continue
 			}
-			if chosen == nil || w.CurrentLoad < chosen.CurrentLoad ||
-				(w.CurrentLoad == chosen.CurrentLoad && w.ID < chosen.ID) {
+			if _, reason := s.ordinaryResources(w); reason != "" {
+				task.QueueReason = reason
+				continue
+			}
+			if chosen == nil || s.workerLoad(w)*chosen.MaxTasks < s.workerLoad(chosen)*w.MaxTasks ||
+				(s.workerLoad(w)*chosen.MaxTasks == s.workerLoad(chosen)*w.MaxTasks && w.ID < chosen.ID) {
 				chosen = w
 			}
 		}
@@ -1368,13 +1585,25 @@ func (s *Server) dispatchTask(task *Task) {
 		}
 	}
 
+	reservedLoad := s.workerLoad(chosen)
+	resources, _ := s.ordinaryResources(chosen)
+	task.ExecutionResources = &resources
+	task.QueueReason = ""
 	task.Status = TaskStatusAssigned
 	task.AssignedTo = chosen.ID
 	now := time.Now()
 	task.StartedAt = &now
-	chosen.CurrentLoad++
+	chosen.CurrentLoad = reservedLoad + 1
 	if chosen.CurrentLoad >= chosen.MaxTasks {
 		chosen.Status = WorkerStatusBusy
+	}
+	if err := s.persistEnumJobLocked(task.JobID); err != nil {
+		task.Status = TaskStatusFailed
+		task.Error = "cannot persist enum dispatch"
+		chosen.CurrentLoad--
+		s.updateJobProgress(task.JobID)
+		s.mu.Unlock()
+		return
 	}
 	taskCopy := *task
 	workerCopy := *chosen
@@ -1386,7 +1615,7 @@ func (s *Server) dispatchTask(task *Task) {
 		taskCopy = *task
 		workerCopy = *chosen
 		s.mu.Unlock()
-		
+
 		s.broadcast(SSEEvent{Type: SSEEventTask, Payload: taskCopy})
 		s.broadcast(SSEEvent{Type: SSEEventWorker, Payload: workerCopy})
 		s.broadcastStats()
@@ -1460,6 +1689,20 @@ func (s *Server) requeueWorkerTasks(workerID string) {
 			continue
 		}
 		if task.Status != TaskStatusAssigned && task.Status != TaskStatusRunning {
+			continue
+		}
+		if task.Type == "processor" || task.Type == "processor_install" {
+			task.Status = TaskStatusFailed
+			task.Error = "worker disconnected; processor lease owns recovery"
+			continue
+		}
+		if task.Type == "enum" {
+			task.Status = TaskStatusFailed
+			task.Error = "worker disconnected; shard interrupted and published output retained"
+			now := time.Now()
+			task.CompletedAt = &now
+			s.updateJobProgress(task.JobID)
+			s.persistEnumJobLocked(task.JobID)
 			continue
 		}
 		task.RetryCount++
@@ -1895,10 +2138,16 @@ cat << EOF > worker_config.json
   "server_addr": "$TARGET_SERVER",
   "worker_id": "%s",
   "max_tasks": 0,
-  "data_dir": "./worker_data"
+  "data_dir": "./worker_data",
+  "processor_workspace_root": "/root/processor"
 }
 EOF
 cp -f worker_config.json server_config.json
+
+./cnc-worker-linux -drain-support >/dev/null
+cp cnc-worker-linux worker-stop-guard.new
+chmod 700 worker-stop-guard.new
+mv worker-stop-guard.new worker-stop-guard
 
 echo "[4/4] Starting systemd service..."
 cat << EOF > /etc/systemd/system/cnc-worker.service
@@ -1911,6 +2160,9 @@ Type=simple
 User=root
 WorkingDirectory=/root/cnc-worker-node
 ExecStart=/root/cnc-worker-node/cnc-worker-linux -config=/root/cnc-worker-node/worker_config.json
+ExecStop=/root/cnc-worker-node/worker-stop-guard -config=/root/cnc-worker-node/worker_config.json -drain-stop \$MAINPID
+TimeoutStopSec=infinity
+KillMode=mixed
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
@@ -2009,11 +2261,11 @@ func (s *Server) handleJobCancelAPI(w http.ResponseWriter, r *http.Request, jobI
 			if task.Status == TaskStatusPending || task.Status == TaskStatusAssigned || task.Status == TaskStatusRunning {
 				task.Status = TaskStatusCancelled
 				task.CompletedAt = &now
-				
+
 				if task.AssignedTo != "" {
 					tasksToCancel = append(tasksToCancel, task)
 					workersToNotify = append(workersToNotify, task.AssignedTo)
-					
+
 					// Free up worker load
 					if worker, ok := s.workers[task.AssignedTo]; ok {
 						worker.CurrentLoad--
@@ -2028,7 +2280,12 @@ func (s *Server) handleJobCancelAPI(w http.ResponseWriter, r *http.Request, jobI
 			}
 		}
 	}
-	
+	if err := s.persistEnumJobLocked(jobID); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "cannot persist cancellation", 500)
+		return
+	}
+
 	jobCopy := *job
 	s.mu.Unlock()
 
@@ -2036,11 +2293,11 @@ func (s *Server) handleJobCancelAPI(w http.ResponseWriter, r *http.Request, jobI
 	for i, task := range tasksToCancel {
 		workerID := workersToNotify[i]
 		msg, _ := NewMessage(MsgTypeCancelTask, CancelTaskPayload{TaskID: task.ID})
-		
+
 		s.mu.RLock()
 		worker, ok := s.workers[workerID]
 		s.mu.RUnlock()
-		
+
 		if ok && worker.SendCh != nil {
 			select {
 			case worker.SendCh <- msg:
@@ -2074,6 +2331,11 @@ func (s *Server) handleJobsAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if job.Enum != nil {
+			http.Error(w, "enum jobs must use the authorized tools launcher", 400)
+			return
+		}
+		job.ID = ""
 		if job.Command == "" {
 			http.Error(w, "command is required", http.StatusBadRequest)
 			return
@@ -2203,11 +2465,17 @@ func (s *Server) handleJobTasksAPI(w http.ResponseWriter, r *http.Request, jobID
 }
 
 func (s *Server) handleTasksAPI(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	tasks := make([]*Task, 0, len(s.tasks))
-	for _, t := range s.tasks {
-		tasks = append(tasks, t)
+	limit := 0 // Preserve the full-list API for existing callers.
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		var err error
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 1000 {
+			http.Error(w, "limit must be between 1 and 1000", http.StatusBadRequest)
+			return
+		}
 	}
+	s.mu.RLock()
+	tasks := s.dashboardTasksLocked(limit)
 	s.mu.RUnlock()
 	writeJSON(w, http.StatusOK, tasks)
 }
@@ -2223,8 +2491,8 @@ func (s *Server) GetFullStats() map[string]interface{} {
 		result[k] = v
 	}
 
-	if s.gdriveUploader != nil {
-		gdriveStats := s.gdriveUploader.GetStats()
+	if uploader := s.driveUploader(); uploader != nil {
+		gdriveStats := uploader.GetStats()
 		result["gdrive_enabled"] = gdriveStats.Enabled
 		result["gdrive_uploaded"] = gdriveStats.Uploaded
 		result["gdrive_pending"] = gdriveStats.Pending
@@ -2311,6 +2579,17 @@ func (s *Server) handleFilesAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(partStr) > 9 {
+		http.Error(w, "invalid part number", http.StatusBadRequest)
+		return
+	}
+	for _, digit := range partStr {
+		if digit < '0' || digit > '9' {
+			http.Error(w, "invalid part number", http.StatusBadRequest)
+			return
+		}
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		http.Error(w, "cannot resolve home dir", http.StatusInternalServerError)
@@ -2321,14 +2600,13 @@ func (s *Server) handleFilesAPI(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, chunkPath)
 }
 
-
 // handleServerConfigAPI handles GET and POST requests for full server configuration.
 // GET /api/config - Returns full configuration
 // POST /api/config - Updates configuration
 func (s *Server) handleServerConfigAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		cfg, err := LoadServerConfig("server_config.json")
+		cfg, err := LoadServerConfig(s.configFile())
 		if err != nil {
 			cfg = s.config
 		}
@@ -2339,7 +2617,7 @@ func (s *Server) handleServerConfigAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("invalid JSON: %v", err), http.StatusBadRequest)
 			return
 		}
-		if err := SaveServerConfig("server_config.json", &input); err != nil {
+		if err := SaveServerConfig(s.configFile(), &input); err != nil {
 			http.Error(w, fmt.Sprintf("failed to save config: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -2367,56 +2645,111 @@ func (s *Server) handleGDriveConfigAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetGDriveConfig(w http.ResponseWriter, _ *http.Request) {
-	// Load current configuration from file
-	cfg, err := LoadServerConfig("server_config.json")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to load config: %v", err), http.StatusInternalServerError)
-		return
+	cfg := s.driveConfig()
+	if cfg == nil {
+		cfg = &GDriveWrapper{WatchDir: "~/merged", UploadInterval: "30s"}
 	}
-
-	// Return the gdrive section
-	response := map[string]interface{}{
-		"gdrive": cfg.GDrive,
-	}
-
-	writeJSON(w, http.StatusOK, response)
+	copy := *cfg
+	copy.ClientSecret = ""
+	writeJSON(w, http.StatusOK, map[string]interface{}{"gdrive": copy, "client_secret_set": cfg.ClientSecret != ""})
 }
 
 func (s *Server) handleUpdateGDriveConfig(w http.ResponseWriter, r *http.Request) {
 	var input GDriveWrapper
-
-	// Parse request body
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		http.Error(w, fmt.Sprintf("invalid JSON: %v", err), http.StatusBadRequest)
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-
-	// Load current full config
-	cfg, err := LoadServerConfig("server_config.json")
+	s.gdriveMu.Lock()
+	defer s.gdriveMu.Unlock()
+	current := s.driveConfig()
+	if input.ClientSecret == "" && current != nil && input.ClientID == current.ClientID {
+		input.ClientSecret = current.ClientSecret
+	}
+	if err := validateDriveConfig(&input); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Keep tokens outside the watched directory, separated by OAuth client.
+	if current != nil && current.ClientID != input.ClientID {
+		input.TokenPath = ""
+	}
+	if input.TokenPath == "" && current != nil && current.ClientID == input.ClientID && s.gdriveUploader != nil {
+		input.TokenPath = s.gdriveUploader.config.TokenPath
+	}
+	if input.TokenPath == "" && (current == nil || current.ClientID != input.ClientID || current.TokenPath == "") {
+		input.TokenPath = filepath.Join(s.config.DataDir, "gdrive", fmt.Sprintf("%x", sha256.Sum256([]byte(input.ClientID)))+".json")
+	} else if input.TokenPath == "" {
+		input.TokenPath = current.TokenPath
+	}
+	if current == nil || current.ParentFolderID != input.ParentFolderID || current.WatchDir != input.WatchDir || current.ClientID != input.ClientID {
+		input.StateFilePath = ""
+	}
+	if input.StateFilePath == "" {
+		input.StateFilePath = filepath.Join(s.config.DataDir, "gdrive", fmt.Sprintf("%x", sha256.Sum256([]byte(input.ClientID+"\x00"+input.ParentFolderID+"\x00"+input.WatchDir)))+"-state.json")
+	}
+	var next *GDriveUploader
+	var err error
+	if input.ClientID != "" && input.ClientSecret != "" {
+		next, err = buildDriveUploader(&input)
+		if err != nil {
+			http.Error(w, "Could not initialize Google Drive: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if input.Enabled {
+			if err = os.MkdirAll(next.config.WatchDir, 0755); err != nil {
+				next.cancelFunc()
+				http.Error(w, "Could not create watch directory", http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	cfg, err := LoadServerConfig(s.configFile())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to load config: %v", err), http.StatusInternalServerError)
+		if next != nil {
+			next.cancelFunc()
+		}
+		http.Error(w, "Could not load server configuration", http.StatusInternalServerError)
 		return
 	}
-
-	// Update gdrive section
 	cfg.GDrive = &input
-
-	// Write back to file
-	if err := SaveServerConfig("server_config.json", cfg); err != nil {
-		http.Error(w, fmt.Sprintf("failed to write config: %v", err), http.StatusInternalServerError)
+	if err = SaveServerConfig(s.configFile(), cfg); err != nil {
+		if next != nil {
+			next.cancelFunc()
+		}
+		http.Error(w, "Could not save configuration", http.StatusInternalServerError)
 		return
 	}
-
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":  "ok",
-		"message": "Configuration updated successfully. Restart the server for changes to take effect.",
-	})
+	if s.gdriveUploader != nil {
+		s.gdriveUploader.Stop()
+	}
+	s.mu.Lock()
+	s.config.GDrive = &input
+	s.mu.Unlock()
+	s.gdriveUploader = next
+	if next != nil {
+		// The old watcher may have finished an upload since the new instance loaded state.
+		if err = next.loadState(); err != nil {
+			log.Printf("[gdrive] Could not reload upload state: %v", err)
+		}
+		if input.Enabled {
+			if err = next.Start(); err != nil {
+				next.cancelFunc()
+				s.gdriveUploader = nil
+				http.Error(w, "Settings saved, but watcher could not start: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "Google Drive settings applied. No restart required."})
 }
 
 // handleTestGDriveAPI tests a Google Drive API key by attempting to create a Drive service.
 // POST /api/config/gdrive/test
 // Now just checks if the uploader is authorized.
 func (s *Server) handleTestGDriveAPI(w http.ResponseWriter, r *http.Request) {
+	s.gdriveMu.RLock()
+	defer s.gdriveMu.RUnlock()
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -2437,6 +2770,8 @@ func (s *Server) handleTestGDriveAPI(w http.ResponseWriter, r *http.Request) {
 // handleGDriveAuthURL returns the OAuth2 URL for the user to authorize.
 // GET /api/config/gdrive/auth-url
 func (s *Server) handleGDriveAuthURL(w http.ResponseWriter, r *http.Request) {
+	s.gdriveMu.RLock()
+	defer s.gdriveMu.RUnlock()
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -2445,14 +2780,25 @@ func (s *Server) handleGDriveAuthURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Google Drive not configured. Save config first.", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"url": s.gdriveUploader.GetAuthURL(),
-	})
+	authURL, state, err := s.gdriveUploader.BeginAuthorization()
+	if err != nil {
+		http.Error(w, "Could not start authorization", http.StatusInternalServerError)
+		return
+	}
+	bridgeURL, err := driveAuthorizationBridgeURL(s.gdriveUploader.oauthCfg.RedirectURL, authURL, state)
+	if err != nil {
+		http.Error(w, "Could not prepare authorization callback", http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "cnc_drive_state", Value: state, Path: "/api/config/gdrive", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: strings.HasPrefix(s.gdriveUploader.oauthCfg.RedirectURL, "https://"), MaxAge: 600})
+	writeJSON(w, http.StatusOK, map[string]string{"url": bridgeURL})
 }
 
 // handleGDriveAuthStatus returns the current auth status.
 // GET /api/config/gdrive/auth-status
 func (s *Server) handleGDriveAuthStatus(w http.ResponseWriter, r *http.Request) {
+	s.gdriveMu.RLock()
+	defer s.gdriveMu.RUnlock()
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -2471,9 +2817,32 @@ func (s *Server) handleGDriveAuthStatus(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleGDriveSync wakes the existing uploader to rescan its watch directory.
+func (s *Server) handleGDriveSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.gdriveMu.RLock()
+	defer s.gdriveMu.RUnlock()
+	uploader := s.gdriveUploader
+	cfg := s.driveConfig()
+	if uploader == nil || cfg == nil || !cfg.Enabled || !uploader.IsAuthorized() {
+		http.Error(w, "Google Drive is not enabled and connected", http.StatusConflict)
+		return
+	}
+	if err := uploader.RequestFullSync(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+}
+
 // handleGDriveDisconnect removes the saved token.
 // POST /api/config/gdrive/auth-disconnect
 func (s *Server) handleGDriveDisconnect(w http.ResponseWriter, r *http.Request) {
+	s.gdriveMu.Lock()
+	defer s.gdriveMu.Unlock()
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -2492,6 +2861,19 @@ func (s *Server) handleGDriveDisconnect(w http.ResponseWriter, r *http.Request) 
 // handleGDriveCallback handles the OAuth2 redirect from Google.
 // GET /api/config/gdrive/callback
 func (s *Server) handleGDriveCallback(w http.ResponseWriter, r *http.Request) {
+	s.gdriveMu.RLock()
+	defer s.gdriveMu.RUnlock()
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	state := r.URL.Query().Get("state")
+	cookie, err := r.Cookie("cnc_drive_state")
+	if err != nil || state == "" || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(state)) != 1 || s.gdriveUploader == nil || !s.gdriveUploader.ConsumeState(state) {
+		http.Error(w, "Authorization expired or invalid. Connect again from the dashboard.", http.StatusBadRequest)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "cnc_drive_state", Value: "", Path: "/api/config/gdrive", HttpOnly: true, MaxAge: -1, SameSite: http.SameSiteLaxMode})
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		errMsg := r.URL.Query().Get("error")
@@ -2513,7 +2895,7 @@ func (s *Server) handleGDriveCallback(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:40px;background:#111;color:#f87171">
 <h2>❌ Authorization Failed</h2><p>%s</p>
 <script>setTimeout(()=>window.close(),3000)</script>
-</body></html>`, err.Error())
+</body></html>`, html.EscapeString(err.Error()))
 		return
 	}
 
@@ -2524,7 +2906,7 @@ func (s *Server) handleGDriveCallback(w http.ResponseWriter, r *http.Request) {
 <p style="color:#9ca3af">Authorized as <strong style="color:#fff">%s</strong></p>
 <p style="color:#6b7280;font-size:14px">You can close this window.</p>
 <script>setTimeout(()=>window.close(),2000)</script>
-</body></html>`, s.gdriveUploader.ConnectedEmail())
+</body></html>`, html.EscapeString(s.gdriveUploader.ConnectedEmail()))
 }
 
 // handleTelegramConfigAPI handles GET and POST requests for Telegram configuration.
@@ -2542,7 +2924,7 @@ func (s *Server) handleTelegramConfigAPI(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleGetTelegramConfig(w http.ResponseWriter, _ *http.Request) {
-	cfg, err := LoadServerConfig("server_config.json")
+	cfg, err := LoadServerConfig(s.configFile())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -2572,7 +2954,7 @@ func (s *Server) handleUpdateTelegramConfig(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	cfg, err := LoadServerConfig("server_config.json")
+	cfg, err := LoadServerConfig(s.configFile())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -2580,7 +2962,7 @@ func (s *Server) handleUpdateTelegramConfig(w http.ResponseWriter, r *http.Reque
 
 	cfg.Telegram = &input
 
-	if err := SaveServerConfig("server_config.json", cfg); err != nil {
+	if err := SaveServerConfig(s.configFile(), cfg); err != nil {
 		http.Error(w, fmt.Sprintf("failed to write config: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -2619,7 +3001,7 @@ func (s *Server) handleTestTelegramAPI(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	if s.telegramBot == nil {
-		cfg, err := LoadServerConfig("server_config.json")
+		cfg, err := LoadServerConfig(s.configFile())
 		if err == nil && cfg.Telegram != nil && cfg.Telegram.BotToken != "" {
 			bot, err := NewTelegramBot(cfg.Telegram, s)
 			if err == nil {
@@ -2709,13 +3091,13 @@ func (s *Server) handleToolsAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	// Convert map to slice for easier JSON consumption
 	toolsList := make([]ToolDefinition, 0, len(ToolsRegistry))
 	for _, t := range ToolsRegistry {
 		toolsList = append(toolsList, t)
 	}
-	
+
 	writeJSON(w, http.StatusOK, toolsList)
 }
 
@@ -2727,21 +3109,28 @@ func (s *Server) handleToolsLaunchAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ToolID     string                 `json:"tool_id"`
-		InputFile  string                 `json:"input_file"`
-		OutputFile string                 `json:"output_file"`
-		Mode       string                 `json:"mode,omitempty"`
-		Options    map[string]interface{} `json:"options"`
+		ToolID         string                 `json:"tool_id"`
+		TimeoutSeconds *int                   `json:"timeout_seconds,omitempty"`
+		InputFile      string                 `json:"input_file"`
+		OutputFile     string                 `json:"output_file"`
+		Mode           string                 `json:"mode,omitempty"`
+		Options        map[string]interface{} `json:"options"`
 		// Optional custom wordlists — plain text, one entry per line.
 		WPPlugins  string `json:"wp_plugins,omitempty"`
 		JoomlaExts string `json:"joomla_exts,omitempty"`
-		// wp-bruter shared files (server-side file paths, one entry per line).
-		PassList string `json:"passlist,omitempty"`
-		UserList string `json:"userlist,omitempty"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, bodyErr := io.ReadAll(http.MaxBytesReader(w, r.Body, 8*1024*1024))
+	if bodyErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "launch payload exceeds size limit"})
+		return
+	}
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
+		return
+	}
+	if req.ToolID == "enum" {
+		s.launchEnum(w, r, body)
 		return
 	}
 
@@ -2759,22 +3148,6 @@ func (s *Server) handleToolsLaunchAPI(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[tools] Failed to save joomla_exts wordlist: %v", err)
 		} else {
 			wlFlags += " -joomla-exts {joomla_exts_path}"
-		}
-	}
-	// wp-bruter passlist/userlist: read the server-side file, then persist it as a
-	// wordlist so every worker can download a copy via /api/files/wordlist/.
-	if req.PassList != "" {
-		if err := s.saveSharedFile("wp_passlist.txt", req.PassList); err != nil {
-			log.Printf("[tools] Failed to save wp passlist: %v", err)
-		} else {
-			wlFlags += " -passlist {passlist_path}"
-		}
-	}
-	if req.UserList != "" {
-		if err := s.saveSharedFile("wp_userlist.txt", req.UserList); err != nil {
-			log.Printf("[tools] Failed to save wp userlist: %v", err)
-		} else {
-			wlFlags += " -userlist {userlist_path}"
 		}
 	}
 
@@ -2797,6 +3170,24 @@ func (s *Server) handleToolsLaunchAPI(w http.ResponseWriter, r *http.Request) {
 	if req.Mode != "" {
 		mode = JobMode(req.Mode)
 	}
+	if isReverseIPTool(req.ToolID) && mode != JobModeSpread {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reverse IP requires spread mode so input is resolved and deduplicated before distribution"})
+		return
+	}
+	if mode == JobModeSpread {
+		req.InputFile = ExpandPath(req.InputFile)
+		f, err := os.Open(req.InputFile)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("cannot read source file %q: %v", req.InputFile, err)})
+			return
+		}
+		info, err := f.Stat()
+		f.Close()
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source must be a non-empty regular file"})
+			return
+		}
+	}
 
 	toolInput := req.InputFile
 	if mode == JobModeSpread {
@@ -2809,11 +3200,8 @@ func (s *Server) handleToolsLaunchAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect stdout to stderr for enum to avoid polluting the GDrive output
-	// with progress bars, since enum writes its actual results to the output file.
-	if req.ToolID == "enum" {
-		cmd += " >&2"
-	}
+	// Enum streams [FILE:...] records on stdout. Do not redirect them away
+	// from the worker's result stream; diagnostics already use stderr.
 
 	// When wordlists are provided, wrap the tool command so the worker:
 	// 1. Downloads each wordlist file from the server using curl
@@ -2830,21 +3218,9 @@ func (s *Server) handleToolsLaunchAPI(w http.ResponseWriter, r *http.Request) {
 				"curl -sfo /tmp/cnc_joomla_exts.txt {http_addr}/api/files/wordlist/joomla_exts.txt",
 			)
 		}
-		if req.PassList != "" {
-			dlCmds = append(dlCmds,
-				"curl -sfo /tmp/cnc_wp_passlist.txt {http_addr}/api/files/wordlist/wp_passlist.txt",
-			)
-		}
-		if req.UserList != "" {
-			dlCmds = append(dlCmds,
-				"curl -sfo /tmp/cnc_wp_userlist.txt {http_addr}/api/files/wordlist/wp_userlist.txt",
-			)
-		}
 		cmd += wlFlags
 		cmd = strings.ReplaceAll(cmd, "{wp_plugins_path}", "/tmp/cnc_wp_plugins.txt")
 		cmd = strings.ReplaceAll(cmd, "{joomla_exts_path}", "/tmp/cnc_joomla_exts.txt")
-		cmd = strings.ReplaceAll(cmd, "{passlist_path}", "/tmp/cnc_wp_passlist.txt")
-		cmd = strings.ReplaceAll(cmd, "{userlist_path}", "/tmp/cnc_wp_userlist.txt")
 		cmd = strings.Join(append(dlCmds, cmd), " && ")
 	}
 
@@ -2854,6 +3230,13 @@ func (s *Server) handleToolsLaunchAPI(w http.ResponseWriter, r *http.Request) {
 		Mode:       mode,
 		InputFile:  req.InputFile,
 		OutputFile: req.OutputFile,
+	}
+	if req.TimeoutSeconds != nil {
+		if *req.TimeoutSeconds != NoTimeout && *req.TimeoutSeconds <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "timeout_seconds must be positive or -1 for no overall timeout"})
+			return
+		}
+		job.TimeoutSeconds = *req.TimeoutSeconds
 	}
 
 	s.submitJob(job)
@@ -2866,19 +3249,6 @@ func (s *Server) handleToolsLaunchAPI(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// saveSharedFile reads a server-side file path and persists its contents as a
-// wordlist under DataDir/wordlists/<name> so workers can download it via
-// /api/files/wordlist/<name>. Used for wp-bruter passlist/userlist inputs.
-func (s *Server) saveSharedFile(name, path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	return s.saveWordlist(name, string(data))
-}
-
-// saveWordlist persists a wordlist string to DataDir/wordlists/<name>.
-// It also mirrors the file to the dedicated WP or Joomla plugins directory if appropriate.
 func (s *Server) saveWordlist(name, content string) error {
 	wlDir := filepath.Join(s.config.DataDir, "wordlists")
 	if err := os.MkdirAll(wlDir, 0755); err != nil {

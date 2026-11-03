@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { Fragment, useState, useRef, useEffect, useCallback, useMemo } from "react";
 
 export interface ToolOption {
   name: string;
@@ -16,6 +16,7 @@ export interface SharedFileSpec {
   flag: string;
   description: string;
   required: boolean;
+  type?: string;
 }
 
 export interface ToolDefinition {
@@ -42,12 +43,17 @@ interface ToolSelectDropdownProps {
 }
 
 export function ToolSelectDropdown({
-  tools,
+  tools: availableTools,
   selectedToolId,
   onSelect,
   loading = false,
   disabled = false,
 }: ToolSelectDropdownProps) {
+  const groupName = (tool: ToolDefinition) => tool.id.startsWith("reverseip-") ? "Reverse IP" : "Other tools";
+  const tools = useMemo(() => [...availableTools].sort((a, b) => {
+    const groupOrder = Number(!a.id.startsWith("reverseip-")) - Number(!b.id.startsWith("reverseip-"));
+    return groupOrder || a.name.localeCompare(b.name);
+  }), [availableTools]);
   const [isOpen, setIsOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -270,8 +276,13 @@ export function ToolSelectDropdown({
               const isHighlighted = index === highlightedIndex;
 
               return (
+                <Fragment key={tool.id}>
+                {(index === 0 || groupName(tools[index - 1]) !== groupName(tool)) && (
+                  <div role="presentation" className="px-3 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                    {groupName(tool)} · {tools.filter((entry) => groupName(entry) === groupName(tool)).length}
+                  </div>
+                )}
                 <button
-                  key={tool.id}
                   type="button"
                   role="option"
                   aria-selected={isSelected}
@@ -378,6 +389,7 @@ export function ToolSelectDropdown({
                     </div>
                   )}
                 </button>
+                </Fragment>
               );
             })
           )}

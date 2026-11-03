@@ -56,10 +56,17 @@ func (s *Server) handleFSListAPI(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue // Skip if we can't read info (e.g., permissions)
 		}
+		// Deployment aliases must remain navigable as directories in File Manager.
+		if entry.Type()&os.ModeSymlink != 0 {
+			info, err = os.Stat(filepath.Join(absPath, entry.Name()))
+			if err != nil {
+				continue
+			}
+		}
 		files = append(files, FileInfo{
 			Name:    entry.Name(),
 			Path:    filepath.Join(absPath, entry.Name()),
-			IsDir:   entry.IsDir(),
+			IsDir:   info.IsDir(),
 			Size:    info.Size(),
 			ModTime: info.ModTime().Format(time.RFC3339),
 		})

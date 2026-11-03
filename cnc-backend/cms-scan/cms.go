@@ -2,443 +2,306 @@ package main
 
 import (
 	"bufio"
+	"cnc-enum/detection"
+	"cnc-enum/version"
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
-// maxBodyBytes caps how much of each HTTP response body is read into memory.
-// 512KB is enough to cover all CMS fingerprint signals while bounding
-// worst-case memory to ~150MB at 300 concurrency.
-const maxBodyBytes = 512 * 1024
+const maxBodyBytes = detection.BodyLimit
 
-// cmsIndicatorRaw holds the raw string definitions for each CMS.
-// These are compiled into cmsIndicatorCompiled once at init time.
-type cmsIndicatorRaw struct {
-	patterns     []string
-	minMatches   int
-	headerChecks map[string]string
-	metaChecks   []string
-	cookieChecks []string
+var cmsSignatures = func() map[string]bool {
+	m := map[string]bool{}
+	for _, n := range detection.Names {
+		m[n] = true
+	}
+	return m
+}()
+
+func detectCMS(body string, headers http.Header, _ *http.Client, _ string) string {
+	cms, _ := detection.Analyze([]byte(body), headers)
+	return cms
 }
-
-// cmsIndicator holds precompiled regex patterns for efficient matching.
-type cmsIndicator struct {
-	compiledPatterns []*regexp.Regexp
-	minMatches       int
-	headerChecks     map[string]string
-	compiledMeta     []*regexp.Regexp
-	cookieChecks     []string
+func resultName(result detection.Result) string {
+	if result.Outcome == "detected" {
+		return result.CMS
+	}
+	return map[string]string{"unknown": "cms-unknown", "blocked": "cms-blocked", "error": "cms-errors"}[result.Outcome]
 }
-
-// cmsSignaturesRaw contains the raw string definitions, compiled once in init().
-var cmsSignaturesRaw = map[string]cmsIndicatorRaw{
-	"wordpress": {
-		patterns:   []string{`wp-content`, `wp-includes`, `wp-json`, `xmlrpc\.php`, `wp-login\.php`, `generator.*wordpress`, `readme\.html.*wordpress`},
-		minMatches: 2,
-		headerChecks: map[string]string{
-			"Link":         `rel="https://api.w.org/"`,
-			"X-Powered-By": `wordpress`,
-		},
-		metaChecks:   []string{`name="generator".*wordpress`, `property="og:site_name".*wordpress`},
-		cookieChecks: []string{`wordpress_`, `wp-settings-`},
-	},
-	"joomla": {
-		patterns:   []string{`joomla`, `com_content`, `com_users`, `com_config`, `powered.*joomla`, `joomla\.css`, `joomla\.js`},
-		minMatches: 2,
-		headerChecks: map[string]string{
-			"X-Powered-By": `joomla`,
-		},
-		metaChecks:   []string{`name="generator".*joomla`, `name="joomla"`},
-		cookieChecks: []string{`joomla_`, `jfcookie`},
-	},
-	"drupal": {
-		patterns:   []string{`drupal`, `sites/default`, `misc/drupal`, `core/modules`, `powered.*drupal`, `drupal\.js`, `drupal\.css`},
-		minMatches: 2,
-		headerChecks: map[string]string{
-			"X-Powered-By":   `drupal`,
-			"X-Drupal-Cache": ``,
-			"X-Generator":    `drupal`,
-		},
-		metaChecks:   []string{`name="generator".*drupal`, `drupal\.settings`},
-		cookieChecks: []string{`sess`, `drupal_`, `has_js`},
-	},
-	"shopify": {
-		patterns:   []string{`checkout\.shopify`, `cdn\.shopify`, `shopify\.theme`, `shopify_checkout`, `myshopify\.com`},
-		minMatches: 1,
-		headerChecks: map[string]string{
-			"X-Shopify-Store": ``,
-			"X-Shopify-Stage": ``,
-			"Server":          `shopify`,
-		},
-		metaChecks:   []string{`shopify`, `content_for_header`},
-		cookieChecks: []string{`_shopify_`, `cart_sig`, `secure_customer_sig`},
-	},
-	"ghost": {
-		patterns:   []string{`ghost\.org`, `ghost\.min\.js`, `ghost\.min\.css`, `/ghost/`, `content/api`},
-		minMatches: 1,
-		headerChecks: map[string]string{
-			"X-Powered-By": `ghost`,
-		},
-		metaChecks:   []string{`name="generator".*ghost`, `ghost-head`},
-		cookieChecks: []string{`ghost`},
-	},
-	"magento": {
-		patterns:   []string{`magento`, `mage/cookies`, `varien`, `magento\.js`, `magento\.css`, `skin/frontend`},
-		minMatches: 2,
-		headerChecks: map[string]string{
-			"X-Magento-Tags":          ``,
-			"X-Magento-Cache-Control": ``,
-		},
-		metaChecks:   []string{`name="generator".*magento`},
-		cookieChecks: []string{`magento`, `frontend`, `adminhtml`},
-	},
-	"wix": {
-		patterns:   []string{`wix\.com`, `wixstatic`, `_wix`, `wixcode`, `wix-site`},
-		minMatches: 1,
-		headerChecks: map[string]string{
-			"X-Wix-Request-Id": ``,
-			"Server":           `wix`,
-		},
-		metaChecks:   []string{`wix`},
-		cookieChecks: []string{`wix`},
-	},
-	"squarespace": {
-		patterns:   []string{`squarespace`, `static1\.squarespace`, `squarespace\.com`, `sqsp`},
-		minMatches: 1,
-		headerChecks: map[string]string{
-			"X-Squarespace-Request-Id": ``,
-		},
-		metaChecks:   []string{`squarespace`},
-		cookieChecks: []string{`squarespace`, `ss_cid`, `ss_cvisit`},
-	},
+func scanURL(inputURL string, files map[string]*os.File, mu *sync.Mutex, processed *int64, client *http.Client) {
+	r := detection.Classify(context.Background(), client, inputURL)
+	name := resultName(r)
+	mu.Lock()
+	defer mu.Unlock()
+	f := files[name]
+	if f == nil {
+		f = files["unknown"]
+	}
+	if f != nil {
+		f.WriteString(r.URL + "\n")
+	}
+	if r.Outcome == "detected" {
+		fmt.Printf("[FILE:%s.txt] %s\n", name, r.URL)
+	}
+	atomic.AddInt64(processed, 1)
 }
-
-// cmsSignatures holds the compiled version of cmsSignaturesRaw, populated by init().
-var cmsSignatures map[string]cmsIndicator
-
-func init() {
-	cmsSignatures = make(map[string]cmsIndicator, len(cmsSignaturesRaw))
-	for name, raw := range cmsSignaturesRaw {
-		compiled := cmsIndicator{
-			minMatches:   raw.minMatches,
-			headerChecks: raw.headerChecks,
-			cookieChecks: raw.cookieChecks,
-		}
-
-		compiled.compiledPatterns = make([]*regexp.Regexp, len(raw.patterns))
-		for i, p := range raw.patterns {
-			compiled.compiledPatterns[i] = regexp.MustCompile(p)
-		}
-
-		compiled.compiledMeta = make([]*regexp.Regexp, len(raw.metaChecks))
-		for i, m := range raw.metaChecks {
-			compiled.compiledMeta[i] = regexp.MustCompile(m)
-		}
-
-		cmsSignatures[name] = compiled
+func worker(jobs <-chan string, files map[string]*os.File, mu *sync.Mutex, wg *sync.WaitGroup, processed *int64) {
+	defer wg.Done()
+	client := newClient(10 * time.Second)
+	for raw := range jobs {
+		scanURL(raw, files, mu, processed, client)
 	}
 }
+func newClient(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return fmt.Errorf("too many redirects")
+		}
+		return nil
+	}}
+}
 
-func detectCMS(body string, headers http.Header, client *http.Client, url string) string {
-	bodyLower := strings.ToLower(body)
+type options struct {
+	Input, Output string
+	Max           int
+	Automatic     bool
+	Timeout       time.Duration
+}
 
-	type cmsScore struct {
-		name  string
-		score int
+func run(ctx context.Context, o options, stdout, stderr io.Writer) int {
+	if o.Max < 1 || o.Max > 256 || o.Timeout < time.Second || o.Timeout > 120*time.Second {
+		fmt.Fprintln(stderr, "[ERROR] threads must be 1–256; timeout must be 1s–120s")
+		return 1
 	}
-
-	var scores []cmsScore
-
-	for cms, indicator := range cmsSignatures {
-		score := 0
-
-		// Check body patterns using precompiled regexes
-		patternMatches := 0
-		for _, re := range indicator.compiledPatterns {
-			if re.MatchString(bodyLower) {
-				patternMatches++
+	input, e := os.Open(o.Input)
+	if e != nil {
+		fmt.Fprintln(stderr, "[ERROR]", e)
+		return 1
+	}
+	defer input.Close()
+	base := newClient(o.Timeout)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 256
+	transport.MaxIdleConnsPerHost = 4
+	transport.MaxConnsPerHost = 4
+	transport.IdleConnTimeout = 30 * time.Second
+	transport.MaxResponseHeaderBytes = 64 * 1024
+	defer transport.CloseIdleConnections()
+	var requestTransport http.RoundTripper = transport
+	if gateway := os.Getenv("ENUM_EVIDENCE_GATEWAY"); gateway != "" {
+		u, e := url.Parse(gateway)
+		valid := e == nil && u.Scheme == "http" && u.Path == "/fetch" && u.User == nil
+		if valid {
+			ip, e := netip.ParseAddr(u.Hostname())
+			valid = e == nil && ip.IsLoopback()
+		}
+		if !valid || os.Getenv("ENUM_EVIDENCE_TOKEN") == "" {
+			fmt.Fprintln(stderr, "[ERROR] invalid worker gateway")
+			return 1
+		}
+		requestTransport = &version.GatewayTransport{URL: gateway, Token: os.Getenv("ENUM_EVIDENCE_TOKEN")}
+	}
+	if ctx.Err() != nil {
+		fmt.Fprintln(stderr, "[ERROR] scan cancelled before starting")
+		return 1
+	}
+	inputInfo, e := input.Stat()
+	if e != nil || !inputInfo.Mode().IsRegular() {
+		fmt.Fprintln(stderr, "[ERROR] input must be a readable regular file")
+		return 1
+	}
+	files, e := openResultFiles(o.Output, inputInfo)
+	if e != nil {
+		fmt.Fprintln(stderr, "[ERROR]", e)
+		return 1
+	}
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+	}()
+	scheduler := detection.NewScheduler(requestTransport, o.Max, o.Automatic)
+	jobs := make(chan string, 256)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failed, success, processed atomic.Int64
+	var outputError atomic.Bool
+	counts := map[string]int{}
+	workers := o.Max
+	if workers > 64 {
+		workers = 64
+	}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for raw := range jobs {
+				// Queued targets have not been scanned; cancellation must not
+				// report them as network errors or issue more HTTP requests.
+				if ctx.Err() != nil {
+					return
+				}
+				client := detection.NewSession(base, scheduler)
+				r := detection.Classify(detection.TargetContext(ctx, raw), client, raw)
+				name := resultName(r)
+				if r.Outcome == "error" || r.Outcome == "blocked" {
+					failed.Add(1)
+				} else {
+					success.Add(1)
+				}
+				processed.Add(1)
+				mu.Lock()
+				counts[name]++
+				if _, e := fmt.Fprintln(files[name], r.URL); e != nil {
+					outputError.Store(true)
+				}
+				if name == "cms-unknown" {
+					if _, e := fmt.Fprintf(stdout, "[FILE:unknown.txt] %s\n", r.URL); e != nil {
+						outputError.Store(true)
+					}
+					if _, e := fmt.Fprintln(files["unknown"], r.URL); e != nil {
+						outputError.Store(true)
+					}
+				}
+				if _, e := fmt.Fprintf(stdout, "[FILE:%s.txt] %s\n", name, r.URL); e != nil {
+					outputError.Store(true)
+				}
+				if r.Err != nil {
+					fmt.Fprintf(stderr, "[WARN] %s: %v\n", r.URL, r.Err)
+				}
+				mu.Unlock()
 			}
-		}
-
-		if patternMatches < indicator.minMatches {
+		}()
+	}
+	start := time.Now()
+	scanner := bufio.NewScanner(input)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	// Bounded recent deduplication; CNC's merge layer remains authoritative.
+	seen := map[string]bool{}
+	for scanner.Scan() {
+		raw := strings.TrimSpace(scanner.Text())
+		if raw == "" || strings.HasPrefix(raw, "#") || seen[raw] {
 			continue
 		}
-		score += patternMatches * 10
-
-		// Check headers
-		for header, expected := range indicator.headerChecks {
-			headerVal := strings.ToLower(headers.Get(header))
-			if headerVal != "" {
-				if expected == "" || strings.Contains(headerVal, strings.ToLower(expected)) {
-					score += 20
-				}
-			}
+		if len(seen) >= 65536 {
+			clear(seen)
 		}
-
-		// Check meta tags using precompiled regexes
-		for _, re := range indicator.compiledMeta {
-			if re.MatchString(bodyLower) {
-				score += 15
-			}
+		seen[raw] = true
+		select {
+		case jobs <- raw:
+		case <-ctx.Done():
+			break
 		}
-
-		// Check cookies
-		cookies := strings.ToLower(headers.Get("Set-Cookie"))
-		for _, cookiePattern := range indicator.cookieChecks {
-			if strings.Contains(cookies, strings.ToLower(cookiePattern)) {
-				score += 10
-			}
-		}
-
-		if score > 0 {
-			scores = append(scores, cmsScore{name: cms, score: score})
+		if ctx.Err() != nil {
+			break
 		}
 	}
-
-	// WordPress-specific: check readme.html
-	if wpScore := checkWordPressReadme(client, url); wpScore > 0 {
-		scores = append(scores, cmsScore{name: "wordpress", score: wpScore})
+	close(jobs)
+	wg.Wait()
+	for _, f := range files {
+		if e := f.Sync(); e != nil {
+			outputError.Store(true)
+		}
 	}
-
-	if len(scores) == 0 {
-		return "unknown"
+	m := scheduler.Snapshot()
+	fmt.Fprintf(stderr, "[*] processed=%d detected=%d unknown=%d blocked=%d errors=%d concurrency=%d requests=%d cache_hits=%d elapsed=%s\n", processed.Load(), success.Load()-int64(counts["cms-unknown"]), counts["cms-unknown"], counts["cms-blocked"], counts["cms-errors"], m.Concurrency, m.Requests, m.CacheHits, time.Since(start).Round(time.Millisecond))
+	if scanner.Err() != nil || outputError.Load() {
+		fmt.Fprintln(stderr, "[ERROR] incomplete input or output")
+		return 1
 	}
-
-	sort.Slice(scores, func(i, j int) bool {
-		return scores[i].score > scores[j].score
-	})
-
-	if scores[0].score < 25 {
-		return "unknown"
-	}
-
-	return scores[0].name
-}
-
-func checkWordPressReadme(client *http.Client, baseURL string) int {
-	readmeURL := strings.TrimSuffix(baseURL, "/") + "/readme.html"
-	req, err := http.NewRequest("GET", readmeURL, nil)
-	if err != nil {
-		return 0
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return 0
-	}
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	bodyLower := strings.ToLower(string(body))
-
-	if strings.Contains(bodyLower, "wordpress") {
-		return 50
+	if failed.Load() > 0 || ctx.Err() != nil {
+		if success.Load() == 0 {
+			return 1
+		}
+		return 2
 	}
 	return 0
 }
-
-func scanURL(inputURL string, files map[string]*os.File, fileMutex *sync.Mutex, processed *int64, client *http.Client) {
-	// Auto-convert domain to URL if needed
-	url := inputURL
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		url = "https://" + url
-	}
-
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	resp, err := client.Do(req)
-
-	var cmsType string
-
-	if err != nil {
-		cmsType = "unknown"
-	} else {
-		defer resp.Body.Close()
-		// Limit body read to maxBodyBytes to prevent unbounded memory use
-		// at high concurrency. Truncation is safe: CMS signals are matched
-		// on whatever bytes are available.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-		cmsType = detectCMS(string(body), resp.Header, client, url)
-	}
-
-	// Write to file and stdout
-	fileMutex.Lock()
-	file := files[cmsType]
-	if file == nil {
-		file = files["unknown"]
-	}
-	file.WriteString(url + "\n")
-	if cmsType != "unknown" {
-		fmt.Printf("[FILE:%s.txt] %s\n", cmsType, url)
-	}
-	fileMutex.Unlock()
-
-	// Update counter
-	count := atomic.AddInt64(processed, 1)
-	if count%100 == 0 {
-		fmt.Fprintf(os.Stderr, "[*] Processed: %d targets\n", count)
-	}
-}
-
-// worker pulls URLs from the jobs channel and scans each one.
-// Using a fixed worker pool means only `concurrency` goroutines ever exist,
-// so memory usage stays flat regardless of how large the input file is.
-// Each worker gets its own HTTP client to enable connection reuse within that worker.
-func worker(jobs <-chan string, files map[string]*os.File, fileMutex *sync.Mutex, wg *sync.WaitGroup, processed *int64) {
-	defer wg.Done()
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
-	}
-
-	for inputURL := range jobs {
-		scanURL(inputURL, files, fileMutex, processed, client)
-	}
-}
-
 func main() {
-	var inputFile string
-	flag.StringVar(&inputFile, "f", "", "Input file with URLs (one per line)")
-	flag.StringVar(&inputFile, "l", "", "Input file with URLs (alias for -f)")
-	outputDir := flag.String("o", "./results", "Output directory")
-	var concurrency int
-	flag.IntVar(&concurrency, "c", 50, "Concurrent requests")
-	flag.IntVar(&concurrency, "t", 50, "Concurrent requests / threads (alias for -c)")
+	var o options
+	flag.StringVar(&o.Input, "l", "", "Input filename")
+	flag.StringVar(&o.Input, "f", "", "Input filename (alias)")
+	flag.StringVar(&o.Output, "o", "./results", "Output directory")
+	flag.IntVar(&o.Max, "t", 256, "Maximum request concurrency")
+	flag.IntVar(&o.Max, "c", 256, "Maximum request concurrency (alias)")
+	flag.BoolVar(&o.Automatic, "auto-concurrency", true, "Automatically tune concurrency")
+	flag.DurationVar(&o.Timeout, "timeout", 10*time.Second, "Request timeout")
 	help := flag.Bool("h", false, "Show help")
 	flag.Parse()
-
-	if *help || inputFile == "" {
-		fmt.Fprintln(os.Stderr, "Usage: cms-scan -l <input_file> -o <output_dir> -t <threads>")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Options:")
-		fmt.Fprintln(os.Stderr, "  -l, -f string   Input file with URLs (required)")
-		fmt.Fprintln(os.Stderr, "  -o string       Output directory (default: ./results)")
-		fmt.Fprintln(os.Stderr, "  -t, -c int      Concurrent requests / threads (default: 50)")
-		fmt.Fprintln(os.Stderr, "  -h              Show this help message")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Example:")
-		fmt.Fprintln(os.Stderr, "  cms-scan -l urls.txt -o ./results -t 50")
-		os.Exit(0)
+	if *help {
+		flag.PrintDefaults()
+		return
 	}
-
-	// Validate input file
-	if _, err := os.Stat(inputFile); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: input file not found: %s\n", inputFile)
+	if o.Input == "" {
+		fmt.Fprintln(os.Stderr, "[ERROR] -l input is required")
 		os.Exit(1)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	os.Exit(run(ctx, o, os.Stdout, os.Stderr))
+}
 
-	// Create output directory
-	os.MkdirAll(*outputDir, 0755)
-
-	// Create output files
-	files := make(map[string]*os.File)
-	for cms := range cmsSignatures {
-		fpath := filepath.Join(*outputDir, cms+".txt")
-		f, err := os.Create(fpath)
+// Open every result before truncating any, so an input/output alias or an
+// unwritable destination cannot destroy existing data during startup.
+func openResultFiles(directory string, input os.FileInfo) (map[string]*os.File, error) {
+	if err := os.MkdirAll(directory, 0755); err != nil {
+		return nil, err
+	}
+	files := map[string]*os.File{}
+	complete := false
+	defer func() {
+		if !complete {
+			for _, f := range files {
+				f.Close()
+			}
+		}
+	}()
+	names := append(append([]string{}, detection.Names...), "cms-unknown", "cms-blocked", "cms-errors", "unknown")
+	var infos []os.FileInfo
+	for _, name := range names {
+		path := filepath.Join(directory, name+".txt")
+		if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("result %s is not a regular file", name)
+		} else if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Cannot create file %s: %v\n", fpath, err)
-			os.Exit(1)
+			return nil, fmt.Errorf("open %s result: %w", name, err)
 		}
-		files[cms] = f
-		defer f.Close()
+		files[name] = file
+		info, err := file.Stat()
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() || os.SameFile(input, info) {
+			return nil, fmt.Errorf("result %s aliases the input or is not a regular file", name)
+		}
+		for _, previous := range infos {
+			if os.SameFile(previous, info) {
+				return nil, fmt.Errorf("result files must not alias each other")
+			}
+		}
+		infos = append(infos, info)
 	}
-
-	unknownPath := filepath.Join(*outputDir, "unknown.txt")
-	unknownFile, err := os.Create(unknownPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Cannot create file %s: %v\n", unknownPath, err)
-		os.Exit(1)
-	}
-	files["unknown"] = unknownFile
-	defer unknownFile.Close()
-
-	// Open input file
-	file, err := os.Open(inputFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: cannot open input file: %v\n", err)
-		os.Exit(1)
-	}
-	defer file.Close()
-
-	fmt.Fprintf(os.Stderr, "[*] Starting CMS detection with %d concurrent threads...\n", concurrency)
-	fmt.Fprintf(os.Stderr, "[*] Input: %s\n", inputFile)
-	fmt.Fprintf(os.Stderr, "[*] Output: %s\n", *outputDir)
-	fmt.Fprintln(os.Stderr, strings.Repeat("=", 60))
-
-	// Worker pool: start exactly `concurrency` goroutines.
-	// URLs are fed through the jobs channel one at a time as workers become free,
-	// so the total number of goroutines (and their memory) stays constant.
-	jobs := make(chan string, concurrency)
-	var wg sync.WaitGroup
-	var fileMutex sync.Mutex
-	var processed int64
-
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go worker(jobs, files, &fileMutex, &wg, &processed)
-	}
-
-	// Feed URLs into the jobs channel; blocks when all workers are busy.
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		url := strings.TrimSpace(scanner.Text())
-		if url != "" && !strings.HasPrefix(url, "#") {
-			jobs <- url
+	for name, file := range files {
+		if err := file.Truncate(0); err != nil {
+			return nil, fmt.Errorf("initialize %s result: %w", name, err)
 		}
 	}
-	close(jobs) // signal workers that no more jobs are coming
-
-	wg.Wait()
-
-	// Print summary
-	fmt.Fprintln(os.Stderr, "\n"+strings.Repeat("=", 60))
-	fmt.Fprintln(os.Stderr, "✅ Scan complete!")
-	fmt.Fprintln(os.Stderr, "")
-
-	// Count results for each CMS
-	for cms := range cmsSignatures {
-		fpath := filepath.Join(*outputDir, cms+".txt")
-		data, _ := os.ReadFile(fpath)
-		trimmed := strings.TrimSpace(string(data))
-		count := 0
-		if trimmed != "" {
-			count = len(strings.Split(trimmed, "\n"))
-		}
-		if count > 0 {
-			fmt.Fprintf(os.Stderr, "📊 %s: %d sites\n", strings.ToUpper(cms), count)
-		}
-	}
-
-	unknownData, _ := os.ReadFile(unknownPath)
-	trimmed := strings.TrimSpace(string(unknownData))
-	unknownCount := 0
-	if trimmed != "" {
-		unknownCount = len(strings.Split(trimmed, "\n"))
-	}
-	if unknownCount > 0 {
-		fmt.Fprintf(os.Stderr, "📊 UNKNOWN: %d sites\n", unknownCount)
-	}
-
-	fmt.Fprintln(os.Stderr, strings.Repeat("=", 60))
-	fmt.Fprintf(os.Stderr, "📁 Results saved to: %s\n", *outputDir)
+	complete = true
+	return files, nil
 }

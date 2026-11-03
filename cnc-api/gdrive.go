@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +29,7 @@ const oauthRedirectURL = "http://localhost:8080/api/config/gdrive/callback"
 
 // GDriveConfig holds configuration for Google Drive integration.
 type GDriveConfig struct {
+	RedirectURL       string `json:"redirect_url"`
 	WatchDir          string `json:"watch_dir"`
 	ClientID          string `json:"client_id"`
 	ClientSecret      string `json:"client_secret"`
@@ -36,19 +40,31 @@ type GDriveConfig struct {
 	DeleteAfterUpload bool   `json:"delete_after_upload"`
 }
 
+// Serializes local stream appends with uploader snapshots and cleanup.
+var watcherFileMu sync.Mutex
+
 // GDriveUploader manages file watching and Google Drive uploads.
 type GDriveUploader struct {
-	config        *GDriveConfig
-	oauthCfg      *oauth2.Config
-	service       *drive.Service
-	uploadedMu    sync.RWMutex
-	uploaded      map[string]bool
-	uploadedCount int64
-	lastUpload    time.Time
+	syncMu         sync.Mutex
+	restoreMu      sync.Mutex
+	restoreStatus  DriveRestoreStatus
+	restoreCancel  context.CancelFunc
+	restored       map[string]string
+	authMu         sync.RWMutex
+	states         map[string]time.Time
+	dirty          chan struct{}
+	config         *GDriveConfig
+	oauthCfg       *oauth2.Config
+	service        *drive.Service
+	uploadedMu     sync.RWMutex
+	uploaded       map[string]bool
+	knownFiles     map[string]bool
+	uploadedCount  int64
+	lastUpload     time.Time
 	connectedEmail string
-	ctx           context.Context
-	cancelFunc    context.CancelFunc
-	wg            sync.WaitGroup
+	ctx            context.Context
+	cancelFunc     context.CancelFunc
+	wg             sync.WaitGroup
 }
 
 // NewGDriveUploader creates a new Google Drive uploader instance.
@@ -74,20 +90,29 @@ func NewGDriveUploader(cfg *GDriveConfig) (*GDriveUploader, error) {
 		cfg.TokenPath = ExpandPath(cfg.TokenPath)
 	}
 
+	interval, err := time.ParseDuration(cfg.UploadInterval)
+	if err != nil || interval < time.Second {
+		return nil, fmt.Errorf("upload_interval must be at least 1s")
+	}
+	if cfg.RedirectURL == "" {
+		cfg.RedirectURL = oauthRedirectURL
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	oauthCfg := &oauth2.Config{
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
-		RedirectURL:  oauthRedirectURL,
+		RedirectURL:  cfg.RedirectURL,
 		Scopes:       []string{drive.DriveScope},
 		Endpoint:     google.Endpoint,
 	}
 
 	u := &GDriveUploader{
 		config:     cfg,
+		dirty:      make(chan struct{}, 1),
 		oauthCfg:   oauthCfg,
 		uploaded:   make(map[string]bool),
+		knownFiles: make(map[string]bool),
 		ctx:        ctx,
 		cancelFunc: cancel,
 	}
@@ -105,9 +130,33 @@ func NewGDriveUploader(cfg *GDriveConfig) (*GDriveUploader, error) {
 	return u, nil
 }
 
-// GetAuthURL returns the OAuth2 authorization URL for the user to visit.
-func (u *GDriveUploader) GetAuthURL() string {
-	return u.oauthCfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+// BeginAuthorization creates a short-lived, single-use OAuth state.
+func (u *GDriveUploader) BeginAuthorization() (string, string, error) {
+	var bytes [32]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", "", err
+	}
+	state := base64.RawURLEncoding.EncodeToString(bytes[:])
+	u.authMu.Lock()
+	defer u.authMu.Unlock()
+	if u.states == nil {
+		u.states = make(map[string]time.Time)
+	}
+	for old, expiry := range u.states {
+		if time.Now().After(expiry) {
+			delete(u.states, old)
+		}
+	}
+	u.states[state] = time.Now().Add(10 * time.Minute)
+	return u.oauthCfg.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce), state, nil
+}
+
+func (u *GDriveUploader) ConsumeState(state string) bool {
+	u.authMu.Lock()
+	defer u.authMu.Unlock()
+	expiry, ok := u.states[state]
+	delete(u.states, state)
+	return ok && time.Now().Before(expiry)
 }
 
 // ExchangeCode exchanges an OAuth2 authorization code for a token and saves it.
@@ -126,29 +175,44 @@ func (u *GDriveUploader) ExchangeCode(code string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create drive service: %w", err)
 	}
+	u.authMu.Lock()
 	u.service = srv
+	u.authMu.Unlock()
 
 	// Fetch and store connected email
 	u.fetchConnectedEmail()
 
+	u.NotifyResults()
 	log.Printf("[gdrive] Successfully authorized!")
 	return nil
 }
 
 // IsAuthorized returns true if we have a valid token.
 func (u *GDriveUploader) IsAuthorized() bool {
+	u.authMu.RLock()
+	defer u.authMu.RUnlock()
 	return u.service != nil
 }
 
 // ConnectedEmail returns the email of the authorized account.
 func (u *GDriveUploader) ConnectedEmail() string {
+	u.authMu.RLock()
+	defer u.authMu.RUnlock()
 	return u.connectedEmail
 }
 
 // Disconnect removes the saved token and clears the service.
 func (u *GDriveUploader) Disconnect() error {
+	u.restoreMu.Lock()
+	if u.restoreCancel != nil {
+		u.restoreCancel()
+	}
+	u.restoreMu.Unlock()
+	u.authMu.Lock()
+	defer u.authMu.Unlock()
 	u.service = nil
 	u.connectedEmail = ""
+	u.states = nil
 	if err := os.Remove(u.config.TokenPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -168,7 +232,9 @@ func (u *GDriveUploader) initFromSavedToken() error {
 	if err != nil {
 		return fmt.Errorf("failed to create drive service: %w", err)
 	}
+	u.authMu.Lock()
 	u.service = srv
+	u.authMu.Unlock()
 
 	// Fetch connected email in background
 	go u.fetchConnectedEmail()
@@ -179,17 +245,24 @@ func (u *GDriveUploader) initFromSavedToken() error {
 
 // fetchConnectedEmail gets the email of the authorized Google account.
 func (u *GDriveUploader) fetchConnectedEmail() {
-	if u.service == nil {
+	u.authMu.RLock()
+	service := u.service
+	u.authMu.RUnlock()
+	if service == nil {
 		return
 	}
-	about, err := u.service.About.Get().Fields("user").Context(u.ctx).Do()
+	about, err := service.About.Get().Fields("user").Context(u.ctx).Do()
 	if err != nil {
 		log.Printf("[gdrive] Could not fetch user info: %v", err)
+		u.markReauthorizationRequired(err)
 		return
 	}
 	if about.User != nil {
-		u.connectedEmail = about.User.EmailAddress
-		log.Printf("[gdrive] Connected as: %s", u.connectedEmail)
+		u.authMu.Lock()
+		if u.service == service {
+			u.connectedEmail = about.User.EmailAddress
+		}
+		u.authMu.Unlock()
 	}
 }
 
@@ -225,8 +298,8 @@ func (u *GDriveUploader) Start() error {
 	}
 
 	interval, err := time.ParseDuration(u.config.UploadInterval)
-	if err != nil {
-		return fmt.Errorf("invalid upload_interval: %w", err)
+	if err != nil || interval < time.Second {
+		return fmt.Errorf("upload_interval must be at least 1s")
 	}
 
 	log.Printf("[gdrive] Started watching %s (scanning every %s)", u.config.WatchDir, interval)
@@ -250,30 +323,79 @@ func (u *GDriveUploader) Stop() {
 	log.Println("[gdrive] Stopped")
 }
 
-// watchLoop periodically scans the watch directory for new files.
+// NotifyResults coalesces stream updates without blocking worker ingestion.
+func (u *GDriveUploader) NotifyResults() {
+	select {
+	case u.dirty <- struct{}{}:
+	default:
+	}
+}
+
+// watchLoop keeps periodic scans as a fallback and batches live updates.
 func (u *GDriveUploader) watchLoop(interval time.Duration) {
 	defer u.wg.Done()
-
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
-	// Initial scan immediately
+	var pending <-chan time.Time
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	u.scanAndUpload()
-
 	for {
 		select {
 		case <-u.ctx.Done():
 			return
 		case <-ticker.C:
 			u.scanAndUpload()
+		case <-u.dirty:
+			if pending == nil {
+				timer = time.NewTimer(2 * time.Second)
+				pending = timer.C
+			}
+		case <-pending:
+			pending = nil
+			u.scanAndUpload()
+		}
+	}
+}
+
+// Delete only an uploaded snapshot. New lines arriving during a network
+// upload must remain available for the next sync.
+func (u *GDriveUploader) removeUploadedSnapshot(path, filename string) {
+	watcherFileMu.Lock()
+	defer watcherFileMu.Unlock()
+	hash, err := u.hashFile(path)
+	if err != nil {
+		return
+	}
+	u.uploadedMu.RLock()
+	uploaded := u.uploaded[filename+":"+hash]
+	u.uploadedMu.RUnlock()
+	if uploaded {
+		if err := processorCaptureBeforeDelete(path); err != nil {
+			log.Printf("[gdrive] Retaining %s: %v", filename, err)
+			return
+		}
+		if err := os.Remove(path); err != nil {
+			log.Printf("[gdrive] Error deleting %s: %v", filename, err)
 		}
 	}
 }
 
 // scanAndUpload scans the watch directory and synchronizes files.
 func (u *GDriveUploader) scanAndUpload() {
+	u.syncMu.Lock()
+	defer u.syncMu.Unlock()
 	if !u.IsAuthorized() {
 		log.Printf("[gdrive] Skipping scan — not authorized yet")
+		return
+	}
+	if err := u.syncDeletions(); err != nil {
+		u.markReauthorizationRequired(err)
+		log.Printf("[gdrive] Could not reconcile deletions: %v", err)
 		return
 	}
 
@@ -284,27 +406,38 @@ func (u *GDriveUploader) scanAndUpload() {
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() || entry.Name()[0] == '.' {
+		if isImmutableEnumResult(entry.Name()) {
+			continue
+		}
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || entry.Name()[0] == '.' {
 			continue
 		}
 
 		fullPath := filepath.Join(u.config.WatchDir, entry.Name())
+		if fullPath == u.config.TokenPath || fullPath == u.config.StateFilePath {
+			continue
+		}
 
 		contentHash, err := u.hashFile(fullPath)
 		if err != nil {
 			log.Printf("[gdrive] Error hashing %s: %v", entry.Name(), err)
 			continue
 		}
-		
+
 		stateKey := entry.Name() + ":" + contentHash
 
 		u.uploadedMu.RLock()
+		restoredHash := u.restored[entry.Name()]
 		alreadyUploaded := u.uploaded[stateKey]
 		u.uploadedMu.RUnlock()
+		// A restore is explicitly intended to keep the historical local copy.
+		if restoredHash == contentHash {
+			continue
+		}
 
 		if alreadyUploaded {
 			if u.config.DeleteAfterUpload {
-				os.Remove(fullPath) //nolint:errcheck
+				u.removeUploadedSnapshot(fullPath, entry.Name())
 			}
 			continue
 		}
@@ -315,12 +448,23 @@ func (u *GDriveUploader) scanAndUpload() {
 			if syncErr == nil {
 				break
 			}
+			u.markReauthorizationRequired(syncErr)
 			log.Printf("[gdrive] Warning: failed to sync %s (attempt %d/3): %v", entry.Name(), attempt, syncErr)
-			time.Sleep(time.Duration(attempt) * time.Second)
+			if !u.IsAuthorized() {
+				break
+			}
+			select {
+			case <-u.ctx.Done():
+				return
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
 		}
 
 		if syncErr != nil {
 			log.Printf("[gdrive] Error syncing %s after 3 attempts: %v", entry.Name(), syncErr)
+			if !u.IsAuthorized() {
+				return
+			}
 			continue
 		}
 
@@ -329,13 +473,154 @@ func (u *GDriveUploader) scanAndUpload() {
 		}
 
 		if u.config.DeleteAfterUpload {
-			if err := os.Remove(fullPath); err != nil {
-				log.Printf("[gdrive] Error deleting %s: %v", entry.Name(), err)
-			} else {
-				log.Printf("[gdrive] Deleted local file: %s", entry.Name())
+			u.removeUploadedSnapshot(fullPath, entry.Name())
+		}
+	}
+}
+
+// syncDeletions mirrors file removals for filenames that have previously been
+// synchronized. It only acts on known pairs, so it never deletes Drive-only
+// files that CNC has never managed. Drive files are moved to Trash, and a local
+// copy deleted from Drive is moved beneath a hidden recovery directory.
+func (u *GDriveUploader) syncDeletions() error {
+	u.authMu.RLock()
+	defer u.authMu.RUnlock()
+	if u.service == nil {
+		return fmt.Errorf("Google Drive is disconnected")
+	}
+
+	u.uploadedMu.RLock()
+	names := make([]string, 0, len(u.knownFiles))
+	for name := range u.knownFiles {
+		names = append(names, name)
+	}
+	u.uploadedMu.RUnlock()
+	sort.Strings(names)
+
+	for _, name := range names {
+		if isImmutableEnumResult(name) {
+			continue
+		}
+		u.uploadedMu.RLock()
+		_, restored := u.restored[name]
+		u.uploadedMu.RUnlock()
+		if restored {
+			continue
+		}
+		if name == "" || name == "." || name == ".." || filepath.Base(name) != name || strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		localPath := filepath.Join(u.config.WatchDir, name)
+		info, statErr := os.Lstat(localPath)
+		localExists := statErr == nil
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return fmt.Errorf("check local file %s: %w", name, statErr)
+		}
+		if localExists && (!info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
+			continue
+		}
+
+		driveFiles, err := u.findDriveFilesByName(name)
+		if err != nil {
+			return fmt.Errorf("check Drive file %s: %w", name, err)
+		}
+
+		switch {
+		case localExists && len(driveFiles) == 0:
+			moved, err := u.moveLocalFileToRecovery(localPath, name)
+			if err != nil {
+				return fmt.Errorf("move locally deleted Drive file %s to recovery: %w", name, err)
+			}
+			if moved {
+				log.Printf("[gdrive] Drive deletion mirrored locally: %s", name)
+			}
+			if err := u.forgetSyncedFile(name); err != nil {
+				return err
+			}
+
+		case !localExists && len(driveFiles) > 0 && !u.config.DeleteAfterUpload:
+			for _, remote := range driveFiles {
+				if _, err := u.service.Files.Update(remote.Id, &drive.File{Trashed: true}).
+					SupportsAllDrives(true).Context(u.ctx).Do(); err != nil {
+					return fmt.Errorf("move deleted local file %s to Drive Trash: %w", name, err)
+				}
+			}
+			log.Printf("[gdrive] Local deletion mirrored to Drive Trash: %s", name)
+			if err := u.forgetSyncedFile(name); err != nil {
+				return err
+			}
+
+		case !localExists && len(driveFiles) == 0:
+			if err := u.forgetSyncedFile(name); err != nil {
+				return err
 			}
 		}
 	}
+	return nil
+}
+
+func (u *GDriveUploader) moveLocalFileToRecovery(path, filename string) (bool, error) {
+	watcherFileMu.Lock()
+	defer watcherFileMu.Unlock()
+
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("refusing to move non-regular file")
+	}
+	recoveryDir := filepath.Join(u.config.WatchDir, ".cnc-deleted", time.Now().UTC().Format("20060102T150405.000000000Z"))
+	if err := os.MkdirAll(recoveryDir, 0700); err != nil {
+		return false, err
+	}
+	if err := os.Rename(path, filepath.Join(recoveryDir, filename)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (u *GDriveUploader) forgetSyncedFile(filename string) error {
+	u.uploadedMu.Lock()
+	delete(u.knownFiles, filename)
+	prefix := filename + ":"
+	for key := range u.uploaded {
+		if strings.HasPrefix(key, prefix) {
+			delete(u.uploaded, key)
+		}
+	}
+	u.uploadedMu.Unlock()
+	return u.saveState()
+}
+
+func (u *GDriveUploader) rememberSyncedFile(filename string) {
+	u.uploadedMu.Lock()
+	if u.knownFiles == nil {
+		u.knownFiles = make(map[string]bool)
+	}
+	u.knownFiles[filename] = true
+	u.uploadedMu.Unlock()
+}
+
+func (u *GDriveUploader) markReauthorizationRequired(err error) {
+	if err == nil {
+		return
+	}
+	message := strings.ToLower(err.Error())
+	if !strings.Contains(message, "invalid_grant") && !strings.Contains(message, "token has been expired or revoked") {
+		return
+	}
+	u.authMu.Lock()
+	if u.service != nil {
+		u.service = nil
+		u.connectedEmail = ""
+		log.Printf("[gdrive] Google authorization expired or revoked; reconnect from Google Drive Settings")
+	}
+	u.authMu.Unlock()
 }
 
 // isTextFile determines whether a file should be treated as line-based text.
@@ -369,7 +654,7 @@ func mergeAndDeduplicateLines(sources ...[]byte) []byte {
 		}
 		scanner := bufio.NewScanner(bytes.NewReader(data))
 		for scanner.Scan() {
-			line := strings.TrimRight(scanner.Text(), "\r")
+			line := cleanEnumTextLine(strings.TrimRight(scanner.Text(), "\r"))
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "" {
 				continue
@@ -403,8 +688,12 @@ func sha256Bytes(b []byte) string {
 func (u *GDriveUploader) findDriveFilesByName(filename string) ([]*drive.File, error) {
 	escapedName := strings.ReplaceAll(filename, "'", "\\'")
 	query := fmt.Sprintf("name = '%s' and trashed = false", escapedName)
-	if u.config.ParentFolderID != "" {
-		escapedParent := strings.ReplaceAll(u.config.ParentFolderID, "'", "\\'")
+	parent := u.config.ParentFolderID
+	if parent == "" {
+		parent = "root"
+	}
+	{
+		escapedParent := strings.ReplaceAll(parent, "'", "\\'")
 		query += fmt.Sprintf(" and '%s' in parents", escapedParent)
 	}
 
@@ -436,13 +725,30 @@ func (u *GDriveUploader) downloadDriveFileContent(fileID string) ([]byte, error)
 	return io.ReadAll(resp.Body)
 }
 
-// syncFile handles two-way synchronous merging, deduplicating lines and updating both local and Drive files.
+// syncFile uploads a stable local snapshot merged with Drive history.
+// Never rewrite the actively appended local file with an older snapshot.
 func (u *GDriveUploader) syncFile(path, filename, initialStateKey string) error {
+	u.authMu.RLock()
+	defer u.authMu.RUnlock()
+	if u.service == nil {
+		return fmt.Errorf("Google Drive is disconnected")
+	}
+	if isImmutableEnumResult(filename) {
+		if err := u.syncImmutableEnumResult(path, filename); err != nil {
+			return err
+		}
+		u.rememberSyncedFile(filename)
+		return nil
+	}
+	watcherFileMu.Lock()
 	localBytes, err := os.ReadFile(path)
+	watcherFileMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("read local file: %w", err)
 	}
 
+	// Record the bytes actually uploaded, not an earlier scan hash.
+	initialStateKey = filename + ":" + sha256Bytes(localBytes)
 	isText := isTextFile(filename, localBytes)
 
 	// Check if this file already exists in Google Drive (may have duplicates from previous runs)
@@ -497,15 +803,6 @@ func (u *GDriveUploader) syncFile(path, filename, initialStateKey string) error 
 		finalHash := sha256Bytes(finalBytes)
 		finalStateKey := filename + ":" + finalHash
 
-		// Synchronize local file if content differs
-		if !bytes.Equal(finalBytes, localBytes) {
-			if err := os.WriteFile(path, finalBytes, 0644); err != nil {
-				log.Printf("[gdrive] Warning: could not update local file %s: %v", filename, err)
-			} else {
-				log.Printf("[gdrive] Updated local file %s with merged & deduplicated lines", filename)
-			}
-		}
-
 		// Update the single primary file in Google Drive in-place
 		fileMeta := &drive.File{
 			Description: fmt.Sprintf("SHA256: %s", finalHash),
@@ -525,6 +822,7 @@ func (u *GDriveUploader) syncFile(path, filename, initialStateKey string) error 
 		u.uploadedCount++
 		u.lastUpload = time.Now()
 		u.uploadedMu.Unlock()
+		u.rememberSyncedFile(filename)
 
 		log.Printf("[gdrive] ✓ Synchronized & updated Drive file: %s (id: %s, hash: %s)", filename, primaryFile.Id, finalHash[:12])
 	} else {
@@ -537,15 +835,6 @@ func (u *GDriveUploader) syncFile(path, filename, initialStateKey string) error 
 
 		finalHash := sha256Bytes(finalBytes)
 		finalStateKey := filename + ":" + finalHash
-
-		// Update local file if deduplication changed content
-		if !bytes.Equal(finalBytes, localBytes) {
-			if err := os.WriteFile(path, finalBytes, 0644); err != nil {
-				log.Printf("[gdrive] Warning: could not update local file %s: %v", filename, err)
-			} else {
-				log.Printf("[gdrive] Deduplicated local file: %s", filename)
-			}
-		}
 
 		fileMeta := &drive.File{
 			Name:        filename,
@@ -570,13 +859,13 @@ func (u *GDriveUploader) syncFile(path, filename, initialStateKey string) error 
 		u.uploadedCount++
 		u.lastUpload = time.Now()
 		u.uploadedMu.Unlock()
+		u.rememberSyncedFile(filename)
 
 		log.Printf("[gdrive] ✓ Created & synchronized Drive file: %s (id: %s, hash: %s)", filename, createdFile.Id, finalHash[:12])
 	}
 
 	return nil
 }
-
 
 // hashFile computes SHA256 hash of a file.
 func (u *GDriveUploader) hashFile(path string) (string, error) {
@@ -594,7 +883,16 @@ func (u *GDriveUploader) hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// loadState loads previously uploaded file hashes from disk.
+type persistedGDriveState struct {
+	Version    int               `json:"version"`
+	Uploaded   []string          `json:"uploaded"`
+	KnownFiles []string          `json:"known_files"`
+	Restored   map[string]string `json:"restored,omitempty"`
+}
+
+// loadState loads uploaded hashes and the filenames that have been paired
+// across Drive and the watch directory. Legacy hash-array state is migrated by
+// extracting each filename prefix from its stored filename:sha256 key.
 func (u *GDriveUploader) loadState() error {
 	data, err := os.ReadFile(u.config.StateFilePath)
 	if err != nil {
@@ -604,36 +902,73 @@ func (u *GDriveUploader) loadState() error {
 		return err
 	}
 
-	var hashes []string
-	if err := json.Unmarshal(data, &hashes); err != nil {
+	var state persistedGDriveState
+	var legacyHashes []string
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		if err := json.Unmarshal(trimmed, &legacyHashes); err != nil {
+			return err
+		}
+		state.Uploaded = legacyHashes
+	} else if err := json.Unmarshal(trimmed, &state); err != nil {
 		return err
 	}
 
 	u.uploadedMu.Lock()
 	defer u.uploadedMu.Unlock()
-	for _, h := range hashes {
+	u.restored = state.Restored
+	for _, h := range state.Uploaded {
 		u.uploaded[h] = true
+		if i := strings.LastIndexByte(h, ':'); i > 0 && len(h)-i-1 == 64 {
+			filename := h[:i]
+			if filename != "" && filepath.Base(filename) == filename && !strings.HasPrefix(filename, ".") {
+				u.knownFiles[filename] = true
+			}
+		}
+	}
+	for _, filename := range state.KnownFiles {
+		if filename != "" && filepath.Base(filename) == filename && !strings.HasPrefix(filename, ".") {
+			u.knownFiles[filename] = true
+		}
 	}
 
-	log.Printf("[gdrive] Loaded %d previously uploaded file hashes", len(hashes))
+	log.Printf("[gdrive] Loaded %d previously uploaded file hashes and %d synchronized filenames", len(state.Uploaded), len(u.knownFiles))
 	return nil
 }
 
 // saveState saves uploaded file hashes to disk.
 func (u *GDriveUploader) saveState() error {
+	if err := os.MkdirAll(filepath.Dir(u.config.StateFilePath), 0700); err != nil {
+		return err
+	}
 	u.uploadedMu.RLock()
-	hashes := make([]string, 0, len(u.uploaded))
+	state := persistedGDriveState{Version: 1, Restored: make(map[string]string)}
+	for name, digest := range u.restored {
+		state.Restored[name] = digest
+	}
 	for h := range u.uploaded {
-		hashes = append(hashes, h)
+		state.Uploaded = append(state.Uploaded, h)
+	}
+	for name := range u.knownFiles {
+		state.KnownFiles = append(state.KnownFiles, name)
 	}
 	u.uploadedMu.RUnlock()
+	sort.Strings(state.Uploaded)
+	sort.Strings(state.KnownFiles)
 
-	data, err := json.MarshalIndent(hashes, "", "  ")
+	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-
-	return os.WriteFile(u.config.StateFilePath, data, 0644)
+	tmp := u.config.StateFilePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, u.config.StateFilePath); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // GDriveStats holds statistics about Google Drive uploads.
@@ -656,7 +991,7 @@ func (u *GDriveUploader) GetStats() GDriveStats {
 	return GDriveStats{
 		Enabled:        true,
 		Authorized:     u.IsAuthorized(),
-		ConnectedEmail: u.connectedEmail,
+		ConnectedEmail: u.ConnectedEmail(),
 		Uploaded:       uploaded,
 		Pending:        u.countPendingFiles(),
 		LastUpload:     lastUpload,
@@ -683,8 +1018,9 @@ func (u *GDriveUploader) countPendingFiles() int {
 		stateKey := entry.Name() + ":" + contentHash
 		u.uploadedMu.RLock()
 		already := u.uploaded[stateKey]
+		restored := u.restored[entry.Name()] == contentHash
 		u.uploadedMu.RUnlock()
-		if !already {
+		if !already && !restored {
 			pending++
 		}
 	}

@@ -96,15 +96,11 @@ export function JobDetail({ jobId }: JobDetailProps) {
   // If the job has 0 total tasks, or is still running/pending, poll every 2.5s
   // so the user never gets stuck if an SSE event was dropped or missed before mounting.
   useEffect(() => {
-    if (job && job.total_tasks > 0 && job.status !== "running" && job.status !== "pending") {
-      return;
-    }
-
     const poll = async () => {
       try {
         const [jobRes, tasksRes] = await Promise.all([
           fetch(`/api/jobs/${jobId}`),
-          fetch("/api/tasks"),
+          fetch(`/api/jobs/${jobId}/tasks`),
         ]);
         if (jobRes.ok) {
           const j = await jobRes.json();
@@ -124,6 +120,9 @@ export function JobDetail({ jobId }: JobDetailProps) {
     };
 
     poll();
+    if (job && job.total_tasks > 0 && job.status !== "running" && job.status !== "pending") {
+      return;
+    }
     const interval = setInterval(poll, 2500);
     return () => clearInterval(interval);
   }, [jobId, job?.total_tasks, job?.status, dispatch]);
@@ -162,7 +161,8 @@ export function JobDetail({ jobId }: JobDetailProps) {
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
   const isSpread = job.mode === "spread";
-  const destFilename = job.input_file ? basename(job.input_file) : null;
+  const destFilename = jobTasks.find((task) => task.payload?.dest_name)?.payload?.dest_name
+    || (job.input_file ? basename(job.input_file) : null);
 
   return (
     <div className="p-6 space-y-6">
@@ -205,11 +205,20 @@ export function JobDetail({ jobId }: JobDetailProps) {
               {job.mode}
             </span>
           </InfoRow>
-          <InfoRow label="Command">{job.command || "—"}</InfoRow>
+          {job.enum ? <><InfoRow label="Scan">Public CMS version evidence</InfoRow><InfoRow label="Authorized by">{job.enum.actor}</InfoRow><InfoRow label="Rules artifact">{job.enum.artifact_sha256}</InfoRow></> : <InfoRow label="Command">{job.command || "—"}</InfoRow>}
           {isSpread && (
             <InfoRow label="Source file">{job.input_file || "—"}</InfoRow>
           )}
-          {isSpread && destFilename && (
+          {job.reverse_ip_input && (
+            <InfoRow label="Prepared IPv4 input">
+              {job.reverse_ip_input.unique_ips.toLocaleString()} unique IPv4 · {job.reverse_ip_input.domains.toLocaleString()} domains · {job.reverse_ip_input.duplicate_inputs + job.reverse_ip_input.duplicate_ips} duplicates removed · {job.reverse_ip_input.dns_failures} DNS failures · {job.reverse_ip_input.invalid_inputs} invalid · {job.reverse_ip_input.skipped_ipv6} IPv6 skipped
+            </InfoRow>
+          )}
+          {job.reverse_ip_input?.warnings?.length ? (
+            <InfoRow label="Input warnings"><ul className="space-y-1">{job.reverse_ip_input.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></InfoRow>
+          ) : null}
+          {job.error && <InfoRow label="Failure reason"><span className="text-red-300">{job.error}</span></InfoRow>}
+          {isSpread && destFilename && !job.enum && (
             <InfoRow label="Workers receive">
               <span className="text-emerald-400">~/{destFilename}</span>
             </InfoRow>
@@ -219,7 +228,7 @@ export function JobDetail({ jobId }: JobDetailProps) {
               <span className="text-purple-300">Server host (local execution)</span>
             </InfoRow>
           ) : isSpread ? (
-            <InfoRow label="Parts">{job.workers > 0 ? String(job.workers) : "auto"}</InfoRow>
+            <InfoRow label="Parts">{job.enum ? String(job.total_tasks) : job.workers > 0 ? String(job.workers) : "auto"}</InfoRow>
           ) : (
             <InfoRow label="Workers">{job.workers > 0 ? String(job.workers) : "—"}</InfoRow>
           )}

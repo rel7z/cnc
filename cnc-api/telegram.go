@@ -364,9 +364,9 @@ func (b *TelegramBot) fetchAndProcessUpdates() {
 		}
 
 		if update.Message != nil {
-			b.handleIncomingMessage(update.Message)
+			go b.handleIncomingMessage(update.Message)
 		} else if update.CallbackQuery != nil {
-			b.handleCallbackQuery(update.CallbackQuery)
+			go b.handleCallbackQuery(update.CallbackQuery)
 		}
 	}
 }
@@ -770,8 +770,18 @@ func (b *TelegramBot) HandleJobEvent(job *Job) {
 		b.NotifyJobStart(job)
 	} else if job.Status == "completed" {
 		b.NotifyJobComplete(job)
+		b.mu.Lock()
+		delete(b.lastJobStatus, job.ID)
+		b.mu.Unlock()
 	} else if job.Status == "failed" {
 		b.NotifyJobFail(job, "Job terminated with failed tasks")
+		b.mu.Lock()
+		delete(b.lastJobStatus, job.ID)
+		b.mu.Unlock()
+	} else if job.Status == "cancelled" {
+		b.mu.Lock()
+		delete(b.lastJobStatus, job.ID)
+		b.mu.Unlock()
 	}
 }
 
@@ -813,7 +823,9 @@ func (b *TelegramBot) NotifyJobStart(job *Job) {
 	)
 
 	go func() {
-		_ = b.SendMessage(chatID, text, nil)
+		if err := b.SendMessage(chatID, text, nil); err != nil {
+			log.Printf("[telegram] Error sending job start alert: %v", err)
+		}
 	}()
 }
 
@@ -839,7 +851,9 @@ func (b *TelegramBot) NotifyJobComplete(job *Job) {
 	)
 
 	go func() {
-		_ = b.SendMessage(chatID, text, nil)
+		if err := b.SendMessage(chatID, text, nil); err != nil {
+			log.Printf("[telegram] Error sending job complete alert: %v", err)
+		}
 	}()
 }
 
@@ -865,7 +879,9 @@ func (b *TelegramBot) NotifyJobFail(job *Job, reason string) {
 	)
 
 	go func() {
-		_ = b.SendMessage(chatID, text, nil)
+		if err := b.SendMessage(chatID, text, nil); err != nil {
+			log.Printf("[telegram] Error sending job fail alert: %v", err)
+		}
 	}()
 }
 
@@ -899,7 +915,9 @@ func (b *TelegramBot) NotifyWorkerStatus(workerID string, status string, address
 	)
 
 	go func() {
-		_ = b.SendMessage(chatID, text, nil)
+		if err := b.SendMessage(chatID, text, nil); err != nil {
+			log.Printf("[telegram] Error sending worker status alert: %v", err)
+		}
 	}()
 }
 

@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { ToolSelectDropdown, type ToolDefinition } from "./ToolSelectDropdown";
+import { VersionTemplateControls } from "./VersionTemplateControls";
+import { VersionRuleEditor } from "./VersionRuleEditor";
+import { normalizeVersionChecks, type RuleDraft } from "@/lib/version-rules";
 
 // ── Helper: derive input label/placeholder from tool definition ───────────────
 function getInputLabel(tool: ToolDefinition, isServerTool: boolean, isSpreadTool: boolean): string {
@@ -30,8 +33,9 @@ export function ToolsLauncher() {
   const [inputFile, setInputFile] = useState<string>("/root/file/x.txt");
   const [outputFile, setOutputFile] = useState<string>("x.txt");
   const [toolOptions, setToolOptions] = useState<Record<string, any>>({});
-  // shared file inputs keyed by SharedFileSpec.name (e.g. "passlist", "userlist")
+  // shared file inputs keyed by SharedFileSpec.name
   const [sharedFiles, setSharedFiles] = useState<Record<string, string>>({});
+  const [versionRules, setVersionRules] = useState<RuleDraft[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -45,6 +49,7 @@ export function ToolsLauncher() {
       const res = await fetch("/api/tools", { cache: "no-store" });
       if (!res.ok) throw new Error("Failed to fetch tools");
       const data: ToolDefinition[] = await res.json();
+      setError(null);
       setTools(data);
       if (data.length > 0) {
         setSelectedToolId((prev) => {
@@ -100,6 +105,8 @@ export function ToolsLauncher() {
 
   const selectedTool = tools.find((t) => t.id === selectedToolId) || tools[0];
   const isServerTool = selectedTool?.scope === "server";
+  const isEnum = selectedTool?.id === "enum";
+  const isCMS = selectedTool?.id === "cms-scan";
   const isSpreadTool = selectedTool?.default_mode === "spread";
   const hasSharedFiles = (selectedTool?.shared_files?.length ?? 0) > 0;
 
@@ -119,7 +126,7 @@ export function ToolsLauncher() {
     const targetInput = isSpreadTool ? "{input}" : inputFile;
     if (targetInput) cmd += ` ${inFlag} ${targetInput}`;
 
-    if (outputFile) {
+    if (outputFile && !isCMS) {
       const outFlag = selectedTool.output_flag || "-o";
       cmd += ` ${outFlag} ${outputFile}`;
     }
@@ -129,7 +136,7 @@ export function ToolsLauncher() {
         const val = toolOptions[opt.name];
         if (val !== undefined && val !== null && val !== "") {
           if (opt.flag) {
-            cmd += ` ${opt.flag} ${val}`;
+            cmd += opt.type === "boolean" ? ` ${opt.flag}=${val}` : ` ${opt.flag} ${val}${isCMS && opt.name === "timeout" ? "s" : ""}`;
           } else {
             cmd += ` ${val}`;
           }
@@ -172,7 +179,12 @@ export function ToolsLauncher() {
         output_file: outputFile,
         options: toolOptions,
       };
-      // Attach each shared file path at the top level (e.g. payload.passlist = "/root/…")
+      if (isCMS) delete payload.output_file;
+      if (isEnum) {
+        payload.version_rules = normalizeVersionChecks(versionRules);
+        delete payload.output_file;
+      }
+      // Attach each shared file path at the top level
       Object.entries(sharedFiles).forEach(([k, v]) => {
         if (v.trim()) payload[k] = v.trim();
       });
@@ -195,7 +207,8 @@ export function ToolsLauncher() {
           : data.mode === "spread"
           ? "Load-Balanced (Spread)"
           : "Worker";
-      setSuccess(`Job launched successfully as ${modeLabel} Job (ID: ${data.job_id})`);
+      const skipped = isEnum && Number(data.skipped_inputs) > 0 ? ` ${data.skipped_inputs} invalid input line${data.skipped_inputs === 1 ? " was" : "s were"} skipped.` : "";
+      setSuccess(`Job launched successfully as ${modeLabel} Job (ID: ${data.job_id}).${skipped}`);
     } catch (err: any) {
       setError(err.message || "An error occurred");
     } finally {
@@ -314,7 +327,7 @@ export function ToolsLauncher() {
               <div>
                 <span className="font-semibold text-emerald-200">Load-Balanced Tool:</span>{" "}
                 {hasSharedFiles
-                  ? "Your target list is split and distributed across all connected workers. Additional shared files (passlist, userlist) are uploaded to the server and automatically downloaded by each worker before execution."
+                  ? "Your target list is split and distributed across all connected workers. Additional shared files are uploaded to the server and automatically downloaded by each worker before execution."
                   : "This tool automatically distributes your target list across all connected worker servers in parallel slices. Results are streamed back, deduplicated, and synced to Google Drive."}
               </div>
             </div>
@@ -341,9 +354,9 @@ export function ToolsLauncher() {
                   <label className="block text-sm font-medium text-gray-300">
                     {selectedTool ? getInputLabel(selectedTool, isServerTool, isSpreadTool) : "Target File"}
                   </label>
-                  <span className="text-[11px] font-mono text-gray-500">
+                  {!isEnum && <span className="text-[11px] font-mono text-gray-500">
                     Flag: {selectedTool?.input_flag || (isServerTool ? "-f" : "-l")}
-                  </span>
+                  </span>}
                 </div>
                 <div className="relative group">
                   <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
@@ -367,11 +380,11 @@ export function ToolsLauncher() {
               </div>
 
               {/* Output File */}
-              <div className="space-y-2">
+              {!isEnum && <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <label className="block text-sm font-medium text-gray-300">Watcher Output Filename</label>
+                  <label className="block text-sm font-medium text-gray-300">{isCMS ? "Result files" : "Watcher Output Filename"}</label>
                   <span className="text-[11px] font-mono text-gray-500">
-                    Flag: {selectedTool?.output_flag || "-o"}
+                    {isCMS ? "Automatic" : `Flag: ${selectedTool?.output_flag || "-o"}`}
                   </span>
                 </div>
                 <div className="relative group">
@@ -381,19 +394,22 @@ export function ToolsLauncher() {
                     </svg>
                   </div>
                   <input
+                    disabled={isCMS}
                     id="tool-output-file"
                     type="text"
-                    value={outputFile}
+                    value={isCMS ? "Automatic per-CMS files" : outputFile}
                     onChange={(e) => setOutputFile(e.target.value)}
                     placeholder="x.txt"
                     className="w-full bg-gray-950/80 border border-gray-800 rounded-xl pl-10 pr-4 py-2.5 text-white font-mono text-sm focus:outline-none focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all placeholder:text-gray-600"
                   />
                 </div>
-                <p className="text-xs text-gray-500">Filename created and merged inside Google Drive sync directory.</p>
-              </div>
+                <p className="text-xs text-gray-500">{isCMS ? "CMS files publish live; blocked, unknown, and errors have separate files." : "Filename created and merged inside Google Drive sync directory."}</p>
+              </div>}
             </div>
+            {isCMS && <div className="rounded-lg border border-gray-700 p-3 text-sm text-gray-300"><p>Need PHP, WordPress core, or plugin version checks?</p><button type="button" onClick={() => handleSelectTool("enum")} className="mt-2 text-blue-300 underline">Scan PHP or CMS versions</button></div>}
+            {isEnum && <VersionRuleEditor templates={<VersionTemplateControls rules={versionRules} onRules={next => { setVersionRules(next); setError(null); }} />} rules={versionRules} onRules={rules => { setVersionRules(rules); setError(null); }} />}
 
-            {/* Shared Files (e.g. passlist / userlist for wp-bruter) — data-driven from SharedFiles registry */}
+            {/* Shared Files — data-driven from SharedFiles registry */}
             {hasSharedFiles && (
               <div className="pt-2">
                 <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2">
@@ -415,29 +431,47 @@ export function ToolsLauncher() {
                             </span>
                           )}
                         </label>
-                        <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700/60">
+                        {!isEnum && <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700/60">
                           {sf.flag}
-                        </span>
+                        </span>}
                       </div>
                       <div className="relative group">
-                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                          <svg className="w-4 h-4 text-gray-500 group-focus-within:text-amber-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                          </svg>
-                        </div>
-                        <input
-                          id={`tool-shared-${sf.name}`}
-                          type="text"
-                          value={sharedFiles[sf.name] ?? ""}
-                          onChange={(e) => handleSharedFileChange(sf.name, e.target.value)}
-                          placeholder={`/root/file/${sf.name}.txt`}
-                          required={sf.required}
-                          className={`w-full bg-gray-950/80 border rounded-xl pl-10 pr-4 py-2.5 text-white font-mono text-sm focus:outline-none focus:ring-2 transition-all placeholder:text-gray-600 ${
-                            sf.required && !sharedFiles[sf.name]?.trim()
-                              ? "border-red-800/50 focus:border-amber-500 focus:ring-amber-500/20"
-                              : "border-gray-800 focus:border-amber-500 focus:ring-amber-500/20"
-                          }`}
-                        />
+                        {sf.type === "textarea" ? (
+                          <textarea
+                            id={`tool-shared-${sf.name}`}
+                            value={sharedFiles[sf.name] ?? ""}
+                            onChange={(e) => handleSharedFileChange(sf.name, e.target.value)}
+                            placeholder="Enter one item per line..."
+                            required={sf.required}
+                            rows={4}
+                            className={`w-full bg-gray-950/80 border rounded-xl px-4 py-3 text-white font-mono text-sm focus:outline-none focus:ring-2 transition-all placeholder:text-gray-600 custom-scrollbar ${
+                              sf.required && !sharedFiles[sf.name]?.trim()
+                                ? "border-red-800/50 focus:border-amber-500 focus:ring-amber-500/20"
+                                : "border-gray-800 focus:border-amber-500 focus:ring-amber-500/20"
+                            }`}
+                          />
+                        ) : (
+                          <>
+                            <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                              <svg className="w-4 h-4 text-gray-500 group-focus-within:text-amber-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                              </svg>
+                            </div>
+                            <input
+                              id={`tool-shared-${sf.name}`}
+                              type="text"
+                              value={sharedFiles[sf.name] ?? ""}
+                              onChange={(e) => handleSharedFileChange(sf.name, e.target.value)}
+                              placeholder={`/root/file/${sf.name}.txt`}
+                              required={sf.required}
+                              className={`w-full bg-gray-950/80 border rounded-xl pl-10 pr-4 py-2.5 text-white font-mono text-sm focus:outline-none focus:ring-2 transition-all placeholder:text-gray-600 ${
+                                sf.required && !sharedFiles[sf.name]?.trim()
+                                  ? "border-red-800/50 focus:border-amber-500 focus:ring-amber-500/20"
+                                  : "border-gray-800 focus:border-amber-500 focus:ring-amber-500/20"
+                              }`}
+                            />
+                          </>
+                        )}
                       </div>
                       {sf.description && (
                         <p className="text-xs text-gray-500">{sf.description}</p>
@@ -466,7 +500,7 @@ export function ToolsLauncher() {
                           <label className="block text-sm font-medium text-gray-300">
                             {formatOptionLabel(opt.name)}
                           </label>
-                          {opt.flag && (
+                          {opt.flag && !isEnum && (
                             <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700/60">
                               {opt.flag}
                             </span>
@@ -522,7 +556,7 @@ export function ToolsLauncher() {
             )}
 
             {/* Extra Arguments (if supported) */}
-            {extraArgsOption && (
+            {extraArgsOption && !isEnum && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="block text-sm font-medium text-gray-300">Extra Arguments</label>
@@ -546,7 +580,7 @@ export function ToolsLauncher() {
             )}
 
             {/* Live Command Preview */}
-            <div className="mt-8 pt-6 border-t border-gray-800">
+            {!isEnum && <div className="mt-8 pt-6 border-t border-gray-800">
               <div className="flex items-center justify-between mb-2">
                 <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider">
                   Live Generated Command
@@ -564,7 +598,7 @@ export function ToolsLauncher() {
                   ↳ Workers will also pre-download shared files via <code className="text-gray-500">curl</code> before running the command.
                 </p>
               )}
-            </div>
+            </div>}
 
             {/* Actions */}
             <div className="pt-2 flex items-center justify-between">

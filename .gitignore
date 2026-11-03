@@ -13,3 +13,25 @@ server_config.json
 cnc_data/
 *.log
 scratch/
+
+.upcloud/
+
+.linode/
+.aws-cnc/
+
+# Generated processor state and local builds
+processor/processor.db*
+processor/cnc-processor-mac
+processor/cnc-processor-linux
+__pycache__/
+*.pyc
+*.tsbuildinfo
+
+.digitalocean/
+
+# Owner-private programs and runtime secrets (source-only GitHub sync)
+processor/tools/
+docs/processor/tools/
+**/.env
+**/.env.local
+**/.env.production

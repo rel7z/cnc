@@ -16,87 +16,26 @@ package main
 
 import (
 	"bufio"
+	"cnc-enum/detection"
+	"context"
 	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CMS Detection Engine (inline from cms-scan)
 // ─────────────────────────────────────────────────────────────────────────────
-
-const maxBodyBytes = 512 * 1024
-
-type cmsIndicatorRaw struct {
-	patterns     []string
-	minMatches   int
-	headerChecks map[string]string
-	metaChecks   []string
-	cookieChecks []string
-}
-
-type cmsIndicator struct {
-	compiledPatterns []*regexp.Regexp
-	minMatches       int
-	headerChecks     map[string]string
-	compiledMeta     []*regexp.Regexp
-	cookieChecks     []string
-}
-
-var cmsSignaturesRaw = map[string]cmsIndicatorRaw{
-	"wordpress": {
-		patterns:     []string{`wp-content`, `wp-includes`, `wp-json`, `xmlrpc\.php`, `wp-login\.php`, `generator.*wordpress`, `readme\.html.*wordpress`},
-		minMatches:   2,
-		headerChecks: map[string]string{"Link": `rel="https://api.w.org/"`, "X-Powered-By": `wordpress`},
-		metaChecks:   []string{`name="generator".*wordpress`, `property="og:site_name".*wordpress`},
-		cookieChecks: []string{`wordpress_`, `wp-settings-`},
-	},
-	"joomla": {
-		patterns:     []string{`joomla`, `com_content`, `com_users`, `com_config`, `powered.*joomla`, `joomla\.css`, `joomla\.js`},
-		minMatches:   2,
-		headerChecks: map[string]string{"X-Powered-By": `joomla`},
-		metaChecks:   []string{`name="generator".*joomla`, `name="joomla"`},
-		cookieChecks: []string{`joomla_`, `jfcookie`},
-	},
-	"drupal": {
-		patterns:     []string{`drupal`, `sites/default`, `misc/drupal`, `core/modules`, `powered.*drupal`, `drupal\.js`, `drupal\.css`},
-		minMatches:   2,
-		headerChecks: map[string]string{"X-Powered-By": `drupal`, "X-Drupal-Cache": ``, "X-Generator": `drupal`},
-		metaChecks:   []string{`name="generator".*drupal`, `drupal\.settings`},
-		cookieChecks: []string{`sess`, `drupal_`, `has_js`},
-	},
-}
-
-var cmsSignatures map[string]cmsIndicator
-
-func init() {
-	cmsSignatures = make(map[string]cmsIndicator, len(cmsSignaturesRaw))
-	for name, raw := range cmsSignaturesRaw {
-		compiled := cmsIndicator{
-			minMatches:   raw.minMatches,
-			headerChecks: raw.headerChecks,
-			cookieChecks: raw.cookieChecks,
-		}
-		compiled.compiledPatterns = make([]*regexp.Regexp, len(raw.patterns))
-		for i, p := range raw.patterns {
-			compiled.compiledPatterns[i] = regexp.MustCompile(p)
-		}
-		compiled.compiledMeta = make([]*regexp.Regexp, len(raw.metaChecks))
-		for i, m := range raw.metaChecks {
-			compiled.compiledMeta[i] = regexp.MustCompile(m)
-		}
-		cmsSignatures[name] = compiled
-	}
-}
 
 func newHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
@@ -110,87 +49,13 @@ func newHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
-func detectCMS(body string, headers http.Header, client *http.Client, rawURL string) string {
-	bodyLower := strings.ToLower(body)
-
-	type cmsScore struct {
-		name  string
-		score int
-	}
-	var scores []cmsScore
-
-	for cms, indicator := range cmsSignatures {
-		score := 0
-		patternMatches := 0
-		for _, re := range indicator.compiledPatterns {
-			if re.MatchString(bodyLower) {
-				patternMatches++
-			}
-		}
-		if patternMatches < indicator.minMatches {
-			continue
-		}
-		score += patternMatches * 10
-
-		for header, expected := range indicator.headerChecks {
-			headerVal := strings.ToLower(headers.Get(header))
-			if headerVal != "" {
-				if expected == "" || strings.Contains(headerVal, strings.ToLower(expected)) {
-					score += 20
-				}
-			}
-		}
-		for _, re := range indicator.compiledMeta {
-			if re.MatchString(bodyLower) {
-				score += 15
-			}
-		}
-		cookies := strings.ToLower(headers.Get("Set-Cookie"))
-		for _, cp := range indicator.cookieChecks {
-			if strings.Contains(cookies, strings.ToLower(cp)) {
-				score += 10
-			}
-		}
-		if score > 0 {
-			scores = append(scores, cmsScore{name: cms, score: score})
-		}
-	}
-
-	// WordPress-specific readme.html check
-	readmeURL := strings.TrimSuffix(rawURL, "/") + "/readme.html"
-	if req, err := http.NewRequest("GET", readmeURL, nil); err == nil {
-		req.Header.Set("User-Agent", "Mozilla/5.0")
-		if resp, err := client.Do(req); err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == 200 {
-				b, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-				if strings.Contains(strings.ToLower(string(b)), "wordpress") {
-					scores = append(scores, cmsScore{name: "wordpress", score: 50})
-				}
-			}
-		}
-	}
-
-	if len(scores) == 0 {
-		return "unknown"
-	}
-	sort.Slice(scores, func(i, j int) bool { return scores[i].score > scores[j].score })
-	if scores[0].score < 25 {
-		return "unknown"
-	}
-	return scores[0].name
+func detectCMS(body string, headers http.Header, _ *http.Client, _ string) string {
+	cms, _ := detection.Analyze([]byte(body), headers)
+	return cms
 }
 
-// classifyTargets reads the input list and returns per-CMS buckets.
-func classifyTargets(domains []string, concurrency int, timeout time.Duration) map[string][]string {
-	results := map[string][]string{
-		"wordpress": {},
-		"joomla":    {},
-		"unknown":   {},
-		"other":     {},
-	}
-	var mu sync.Mutex
-
+// classifyTargets reads the input list and pushes domains to corresponding channels.
+func classifyTargets(domains []string, concurrency int, timeout time.Duration, wpChan, joomlaChan, unknownChan chan<- string) {
 	jobs := make(chan string, concurrency)
 	var wg sync.WaitGroup
 	var processed int64
@@ -201,37 +66,18 @@ func classifyTargets(domains []string, concurrency int, timeout time.Duration) m
 			defer wg.Done()
 			client := newHTTPClient(timeout)
 			for domain := range jobs {
-				url := domain
-				if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-					url = "https://" + url
-				}
-				var cms string
-				req, err := http.NewRequest("GET", url, nil)
-				if err != nil {
-					cms = "unknown"
-				} else {
-					req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-					resp, err := client.Do(req)
-					if err != nil {
-						cms = "unknown"
-					} else {
-						body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-						resp.Body.Close()
-						cms = detectCMS(string(body), resp.Header, client, url)
-					}
-				}
-				mu.Lock()
+				r := detection.Classify(context.Background(), client, domain)
+				cms := r.CMS
 				switch cms {
 				case "wordpress":
-					results["wordpress"] = append(results["wordpress"], domain)
+					fmt.Fprintf(os.Stdout, "[FILE:wordpress.txt] %s\n", domain)
+					wpChan <- domain
 				case "joomla":
-					results["joomla"] = append(results["joomla"], domain)
+					fmt.Fprintf(os.Stdout, "[FILE:joomla.txt] %s\n", domain)
+					joomlaChan <- domain
 				case "unknown":
-					results["unknown"] = append(results["unknown"], domain)
-				default:
-					results["other"] = append(results["other"], domain)
+					unknownChan <- domain
 				}
-				mu.Unlock()
 
 				n := atomic.AddInt64(&processed, 1)
 				fmt.Fprintf(os.Stderr, "\r[*] CMS Scan: %d/%d classified", n, int64(len(domains)))
@@ -245,7 +91,6 @@ func classifyTargets(domains []string, concurrency int, timeout time.Duration) m
 	close(jobs)
 	wg.Wait()
 	fmt.Fprintln(os.Stderr)
-	return results
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -293,24 +138,35 @@ func probeWPPlugin(client *http.Client, domain, slug string) (string, bool) {
 		defer resp.Body.Close()
 		switch resp.StatusCode {
 		case 200:
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
-			version := ""
-			if m := stableTagRe.FindSubmatch(body); len(m) >= 2 {
-				version = strings.TrimSpace(string(m[1]))
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+
+			// Reject soft 404s or block pages
+			bodyStr := string(body)
+			if regexp.MustCompile(`(?i)<title>[^<]*(?:404|not found|page doesn't exist|error|forbidden|blocked|security)[^<]*</title>`).MatchString(bodyStr) {
+				continue
 			}
-			return version, true
-		case 403:
-			return "(blocked)", true
+			if regexp.MustCompile(`(?i)(?:cloudflare|sucuri|wordfence|imperva|incapsula|blocked|forbidden)`).MatchString(bodyStr) && strings.Contains(bodyStr, "<html") {
+				continue
+			}
+
+			if m := stableTagRe.FindSubmatch(body); len(m) >= 2 {
+				version := strings.TrimSpace(string(m[1]))
+				// Check if version is somewhat valid: not too long, no HTML, contains at least one digit
+				if version != "" && len(version) < 20 && !strings.ContainsAny(version, "<>") && regexp.MustCompile(`\d`).MatchString(version) {
+					return version, true
+				}
+			}
 		}
 	}
 	return "", false
 }
 
-func runWPPluginScanner(domains, plugins []string, concurrency int, timeout time.Duration, out *resultWriter, label string) {
+func runWPPluginScanner(domainChan <-chan string, plugins []string, concurrency int, timeout time.Duration, out *resultWriter, label string) {
 	type job struct{ domain, slug string }
 	jobs := make(chan job, concurrency*2)
 	var wg sync.WaitGroup
 	var found int64
+	var totalDomains int64
 
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
@@ -320,7 +176,7 @@ func runWPPluginScanner(domains, plugins []string, concurrency int, timeout time
 			for j := range jobs {
 				ver, detected := probeWPPlugin(client, j.domain, j.slug)
 				if detected {
-					line := fmt.Sprintf("[FILE:enum-wp-plugins.txt] https://%s/wp-content/plugins/%s  version=%s", j.domain, j.slug, ver)
+					line := fmt.Sprintf("[FILE:%s.txt] https://%s/wp-content/plugins/%s  version=%s", j.slug, j.domain, j.slug, ver)
 					out.writeLine(line)
 					atomic.AddInt64(&found, 1)
 				}
@@ -329,7 +185,8 @@ func runWPPluginScanner(domains, plugins []string, concurrency int, timeout time
 	}
 
 	go func() {
-		for _, d := range domains {
+		for d := range domainChan {
+			atomic.AddInt64(&totalDomains, 1)
 			for _, p := range plugins {
 				jobs <- job{d, p}
 			}
@@ -338,7 +195,7 @@ func runWPPluginScanner(domains, plugins []string, concurrency int, timeout time
 	}()
 
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "[WP] Plugin scan done — %d hits across %d domains\n", found, len(domains))
+	fmt.Fprintf(os.Stderr, "[WP] Plugin scan done — %d hits across %d domains\n", found, totalDomains)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -371,8 +228,19 @@ type xmlManifest struct {
 }
 
 func manifestURLs(domain, ext string) []string {
-	// Attempt the most common component manifest path
 	base := "https://" + domain
+	// Distinguish plugin and library entries from components.
+	if strings.HasPrefix(ext, "plugin:") {
+		parts := strings.Split(ext, ":")
+		if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
+			return nil
+		}
+		return []string{base + "/plugins/" + parts[1] + "/" + parts[2] + "/" + parts[2] + ".xml"}
+	}
+	if strings.HasPrefix(ext, "lib_") {
+		slug := strings.TrimPrefix(ext, "lib_")
+		return []string{base + "/libraries/" + slug + "/" + slug + ".xml"}
+	}
 	slug := strings.TrimPrefix(ext, "com_")
 	return []string{
 		base + "/administrator/components/" + ext + "/" + slug + ".xml",
@@ -404,25 +272,31 @@ func probeJoomlaExt(client *http.Client, domain, ext string) (string, bool) {
 
 		switch resp.StatusCode {
 		case 200:
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
-			var manifest xmlManifest
-			version := ""
-			if xmlErr := xml.Unmarshal(body, &manifest); xmlErr == nil {
-				version = manifest.Version
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+
+			// Quick soft 404 block check (since valid Joomla manifests are pure XML, not HTML)
+			if strings.Contains(strings.ToLower(string(body)), "<html") {
+				continue
 			}
-			return version, true
-		case 403:
-			return "(blocked)", true
+
+			var manifest xmlManifest
+			if xmlErr := xml.Unmarshal(body, &manifest); xmlErr == nil {
+				version := strings.TrimSpace(manifest.Version)
+				if version != "" && len(version) < 20 && !strings.ContainsAny(version, "<>") && regexp.MustCompile(`\d`).MatchString(version) {
+					return version, true
+				}
+			}
 		}
 	}
 	return "", false
 }
 
-func runJoomlaScanner(domains, extensions []string, concurrency int, timeout time.Duration, out *resultWriter) {
+func runJoomlaScanner(domainChan <-chan string, extensions []string, concurrency int, timeout time.Duration, out *resultWriter) {
 	type job struct{ domain, ext string }
 	jobs := make(chan job, concurrency*2)
 	var wg sync.WaitGroup
 	var found int64
+	var totalDomains int64
 
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
@@ -432,7 +306,7 @@ func runJoomlaScanner(domains, extensions []string, concurrency int, timeout tim
 			for j := range jobs {
 				ver, detected := probeJoomlaExt(client, j.domain, j.ext)
 				if detected {
-					line := fmt.Sprintf("[FILE:enum-joomla-exts.txt] https://%s  ext=%s  version=%s", j.domain, j.ext, ver)
+					line := fmt.Sprintf("[FILE:%s.txt] https://%s  ext=%s  version=%s", j.ext, j.domain, j.ext, ver)
 					out.writeLine(line)
 					atomic.AddInt64(&found, 1)
 				}
@@ -441,7 +315,8 @@ func runJoomlaScanner(domains, extensions []string, concurrency int, timeout tim
 	}
 
 	go func() {
-		for _, d := range domains {
+		for d := range domainChan {
+			atomic.AddInt64(&totalDomains, 1)
 			for _, e := range extensions {
 				jobs <- job{d, e}
 			}
@@ -450,7 +325,7 @@ func runJoomlaScanner(domains, extensions []string, concurrency int, timeout tim
 	}()
 
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "[JOOMLA] Extension scan done — %d hits across %d domains\n", found, len(domains))
+	fmt.Fprintf(os.Stderr, "[JOOMLA] Extension scan done — %d hits across %d domains\n", found, totalDomains)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -513,94 +388,68 @@ var adminLoginSignals = []*regexp.Regexp{
 // isThirdPartyAdmin returns true if the response looks like a genuine
 // 3rd-party admin login panel (not WordPress, not Joomla).
 func isThirdPartyAdmin(body []byte) bool {
-	bodyStr := string(body)
-	// Reject if any WP fingerprint present
-	for _, re := range wpFingerprints {
-		if re.MatchString(bodyStr) {
-			return false
-		}
-	}
-	// Reject if any Joomla fingerprint present
-	for _, re := range joomlaFingerprints {
-		if re.MatchString(bodyStr) {
-			return false
-		}
-	}
-	// Require at least 2 admin login signals
-	matched := 0
-	for _, re := range adminLoginSignals {
-		if re.MatchString(bodyStr) {
-			matched++
-			if matched >= 2 {
-				return true
-			}
-		}
-	}
-	return false
+	return loginFormKind(body) != ""
 }
 
-func probeAdminPath(client *http.Client, domain, path string) (string, bool) {
-	for _, scheme := range []string{"https", "http"} {
-		fullURL := scheme + "://" + domain + path
-		req, err := http.NewRequest("GET", fullURL, nil)
-		if err != nil {
-			continue
-		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; admin-enum/1.0)")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
-
-		switch resp.StatusCode {
-		case 200:
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
-			if isThirdPartyAdmin(body) {
-				return fullURL, true
-			}
-		case 403:
-			// Possible admin panel but access is blocked — note it
-			return fullURL + "  [403-PROTECTED]", true
-		}
+// Admin enumeration compares candidate pages with a missing-page baseline on
+// the same origin. A login form alone does not prove that a path exists.
+func probeAdminPath(client *http.Client, origin, path string, baseline adminResponse) (string, bool) {
+	// If even a nonexistent path looks like a login, path existence is not
+	// established. Reject this catch-all despite dynamic tokens in its body.
+	if isThirdPartyAdmin(baseline.body) {
+		return "", false
 	}
-	return "", false
+	response, err := fetchAdminResponse(client, origin+path)
+	if err != nil || response.status != http.StatusOK || !isThirdPartyAdmin(response.body) {
+		return "", false
+	}
+	if response.finalURL == baseline.finalURL || response.signature == baseline.signature {
+		return "", false
+	}
+	return response.finalURL, true
 }
 
-func runAdminEnum(domains []string, concurrency int, timeout time.Duration, out *resultWriter) {
-	type job struct{ domain, path string }
-	jobs := make(chan job, concurrency*2)
+func runAdminEnum(domainChan <-chan string, concurrency int, timeout time.Duration, out *resultWriter) {
 	var wg sync.WaitGroup
-	var found int64
-
+	var found, totalDomains int64
+	var seen sync.Map
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			client := newHTTPClient(timeout)
-			for j := range jobs {
-				url, detected := probeAdminPath(client, j.domain, j.path)
-				if detected {
-					line := fmt.Sprintf("[FILE:enum-admin.txt] %s", url)
-					out.writeLine(line)
-					atomic.AddInt64(&found, 1)
+			for domain := range domainChan {
+				domain = strings.ToLower(strings.TrimRight(strings.TrimSpace(domain), "/"))
+				if _, loaded := seen.LoadOrStore(domain, true); loaded {
+					continue
+				}
+				atomic.AddInt64(&totalDomains, 1)
+				// Keep one deterministic, validated result per domain. Each origin needs
+				// its own baseline; HTTP and HTTPS can serve different applications.
+				detected := false
+				for _, scheme := range []string{"https", "http"} {
+					origin := scheme + "://" + domain
+					baseline, err := fetchAdminResponse(client, origin+missingAdminPath())
+					if err != nil {
+						continue
+					}
+					for _, path := range hardcodedAdminPaths {
+						if url, ok := probeAdminPath(client, origin, path, baseline); ok {
+							out.writeLine(fmt.Sprintf("[FILE:enum-admin.txt] %s", url))
+							atomic.AddInt64(&found, 1)
+							detected = true
+							break
+						}
+					}
+					if detected {
+						break
+					}
 				}
 			}
 		}()
 	}
-
-	go func() {
-		for _, d := range domains {
-			for _, p := range hardcodedAdminPaths {
-				jobs <- job{d, p}
-			}
-		}
-		close(jobs)
-	}()
-
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "[ADMIN] Admin enum done — %d hits across %d domains\n", found, len(domains))
+	fmt.Fprintf(os.Stderr, "[ADMIN] Admin enum done — %d hits across %d domains\n", found, totalDomains)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -648,6 +497,13 @@ func loadLines(path string) ([]string, error) {
 		// Strip scheme so bare domains and full URLs both work
 		l = strings.TrimPrefix(l, "https://")
 		l = strings.TrimPrefix(l, "http://")
+		if idx := strings.Index(l, "|"); idx != -1 {
+			l = l[:idx]
+		}
+		if idx := strings.Index(l, ","); idx != -1 {
+			l = l[:idx]
+		}
+		l = strings.TrimSpace(l)
 		if strings.Contains(l, "://") {
 			continue // malformed
 		}
@@ -661,13 +517,19 @@ func loadLines(path string) ([]string, error) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func main() {
-	inputFile  := flag.String("l", "", "Input file with target domains/URLs (one per line). Required.")
-	outputFile := flag.String("o", "results.txt", "Output file path (appended to — place in watcher dir for auto Google Drive sync).")
-	threads    := flag.Int("t", 50, "Number of concurrent threads per scanning phase.")
-	wpPlugins  := flag.String("wp-plugins", "", "Custom WP plugin wordlist file (default: built-in list).")
+	inputFile := flag.String("l", "", "Input file with target domains/URLs (one per line). Required.")
+	flag.String("o", "results.txt", "Legacy output name; structured output is job and shard scoped.")
+	threads := flag.Int("t", 256, "Maximum concurrent requests (1–256).")
+	automatic := flag.Bool("auto-concurrency", true, "Adapt request concurrency automatically")
+	wpPlugins := flag.String("wp-plugins", "", "Custom WP plugin wordlist file (default: built-in list).")
 	joomlaExts := flag.String("joomla-exts", "", "Custom Joomla extension wordlist file (default: built-in list).")
-	timeout    := flag.Duration("timeout", 10*time.Second, "HTTP timeout per request (e.g. 10s, 15s).")
-	help       := flag.Bool("h", false, "Show help.")
+	timeout := flag.Duration("timeout", 10*time.Second, "HTTP timeout per request (e.g. 10s, 15s).")
+	help := flag.Bool("h", false, "Show help.")
+	artifactFile := flag.String("version-rules-file", "", "Internal immutable rule artifact")
+	artifactDigest := flag.String("version-rules-sha256", "", "Internal artifact SHA256")
+	enumJob := flag.String("enum-job-id", "", "Internal job binding")
+	enumShard := flag.String("enum-shard-id", "", "Internal shard binding")
+	outputDir := flag.String("enum-output-dir", ".", "Internal isolated result directory")
 	flag.Parse()
 
 	if *help || *inputFile == "" {
@@ -687,78 +549,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Load targets
-	domains, err := loadLines(*inputFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] Cannot read input file %q: %v\n", *inputFile, err)
-		os.Exit(1)
-	}
-	if len(domains) == 0 {
-		fmt.Fprintln(os.Stderr, "[ERROR] Input file is empty.")
-		os.Exit(1)
-	}
-
-	// Load optional custom wordlists
-	wpPluginList := defaultWPPlugins
-	if *wpPlugins != "" {
-		lines, err := loadLines(*wpPlugins)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[WARN] Could not read wp-plugins file: %v — using defaults\n", err)
-		} else if len(lines) > 0 {
-			wpPluginList = lines
-		}
-	}
-
-	joomlaExtList := defaultJoomlaExtensions
-	if *joomlaExts != "" {
-		lines, err := loadLines(*joomlaExts)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[WARN] Could not read joomla-exts file: %v — using defaults\n", err)
-		} else if len(lines) > 0 {
-			joomlaExtList = lines
-		}
-	}
-
-	// Open result writer (appends to watcher output file)
-	out, err := newResultWriter(*outputFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] Cannot open output file %q: %v\n", *outputFile, err)
-		os.Exit(1)
-	}
-	defer out.close()
-
-	fmt.Printf("[*] cnc-enum starting — %d targets | threads=%d | timeout=%s\n", len(domains), *threads, *timeout)
-	fmt.Printf("[*] Output: %s\n\n", *outputFile)
-
-	// ── Phase 1: CMS Classification ──────────────────────────────────────────
-	fmt.Fprintln(os.Stderr, "[*] Phase 1: CMS Classification...")
-	buckets := classifyTargets(domains, *threads, *timeout)
-
-	fmt.Printf("[+] WordPress  : %d targets\n", len(buckets["wordpress"]))
-	fmt.Printf("[+] Joomla     : %d targets\n", len(buckets["joomla"]))
-	fmt.Printf("[+] Unknown    : %d targets\n", len(buckets["unknown"]))
-	fmt.Printf("[+] Other CMS  : %d targets (skipped)\n\n", len(buckets["other"]))
-
-	// ── Phase 2a: WordPress Plugin Scan ─────────────────────────────────────
-	if len(buckets["wordpress"]) > 0 {
-		fmt.Fprintf(os.Stderr, "[*] Phase 2a: WordPress plugin scan (%d targets, %d plugins)...\n",
-			len(buckets["wordpress"]), len(wpPluginList))
-		runWPPluginScanner(buckets["wordpress"], wpPluginList, *threads, *timeout, out, "wp")
-	}
-
-	// ── Phase 2b: Joomla Extension Scan ─────────────────────────────────────
-	if len(buckets["joomla"]) > 0 {
-		fmt.Fprintf(os.Stderr, "[*] Phase 2b: Joomla extension scan (%d targets, %d extensions)...\n",
-			len(buckets["joomla"]), len(joomlaExtList))
-		runJoomlaScanner(buckets["joomla"], joomlaExtList, *threads, *timeout, out)
-	}
-
-	// ── Phase 2c: Unknown — Admin Panel Enum ────────────────────────────────
-	if len(buckets["unknown"]) > 0 {
-		fmt.Fprintf(os.Stderr, "[*] Phase 2c: Admin panel enum (%d targets, %d paths)...\n",
-			len(buckets["unknown"]), len(hardcodedAdminPaths))
-		runAdminEnum(buckets["unknown"], *threads, *timeout, out)
-	}
-
-	fmt.Printf("\n[*] Done. All results written to: %s\n", *outputFile)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	code := runVersionPipeline(ctx, pipelineOptions{Input: *inputFile, Artifact: *artifactFile, Digest: *artifactDigest, JobID: *enumJob, ShardID: *enumShard, OutputDir: *outputDir, WPPlugins: *wpPlugins, JoomlaExts: *joomlaExts, Threads: *threads, Timeout: *timeout, Automatic: *automatic}, os.Stdout, os.Stderr)
+	os.Exit(code)
 }
