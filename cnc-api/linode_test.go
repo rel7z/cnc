@@ -255,7 +255,7 @@ func TestLinodeBatchCreation(t *testing.T) {
 					t.Errorf("label %s, want %s", body.Label, want)
 				}
 				script, err := base64.StdEncoding.DecodeString(body.Metadata.Data)
-				if test.name == "two workers" && (body.RootPass != "fixture-policy-root-123!" || !strings.Contains(string(script), "PermitRootLogin yes") || strings.Contains(string(script), body.RootPass)) {
+				if test.name == "two workers" && (body.RootPass != "fixture-policy-root-123!" || !strings.Contains(string(script), "PermitRootLogin prohibit-password") || strings.Contains(string(script), body.RootPass)) {
 					t.Error("default password policy was not applied privately")
 				}
 				if err != nil || !strings.Contains(string(script), `"worker_id":"`+want+`"`) {

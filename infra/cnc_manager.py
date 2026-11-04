@@ -914,9 +914,13 @@ def worker_ssh_command(cfg, worker, folder='/root/processor'):
     if not re.fullmatch(r'[A-Za-z0-9_-]+', user) or not 1 <= port <= 65535:
         raise ManagerError('Invalid worker SSH settings.')
     command = [executable('ssh'), '-o', 'StrictHostKeyChecking=yes', '-t', '-p', str(port)]
-    key = root / state_folder / 'id_ed25519'
-    if key.is_file():
-        command += ['-i', str(key), '-o', 'IdentitiesOnly=yes']
+    from ssh_identity import identity_directory
+    keys = [identity_directory() / 'id_ed25519', root / state_folder / 'id_ed25519']
+    for key in keys:
+        if key.is_file():
+            command += ['-i', str(key)]
+    if any(key.is_file() for key in keys):
+        command += ['-o', 'IdentitiesOnly=yes']
     known = root / state_folder / ('known_hosts' if state_folder == '.digitalocean' else 'cross-cloud-known_hosts')
     if known.is_file():
         command += ['-o', 'UserKnownHostsFile=' + str(known)]

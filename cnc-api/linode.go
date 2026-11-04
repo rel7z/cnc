@@ -316,13 +316,13 @@ func (l *linodeIntegration) handle(w http.ResponseWriter, r *http.Request) {
 				}
 				if policyPassword != "" {
 					rootPassword = policyPassword
-					setup, setupErr := workerPasswordSetup(rootPassword)
-					if setupErr != nil {
-						fail(503, setupErr)
-						return
-					}
-					script += setup
 				}
+				setup, setupErr := workerPasswordSetup(rootPassword)
+				if setupErr != nil {
+					fail(503, setupErr)
+					return
+				}
+				script += setup
 				// Persist before provisioning so even a lost provider response keeps login access.
 				if saveErr := saveWorkerPassword(filepath.Dir(l.dir), label, rootPassword); saveErr != nil {
 					linodeJSON(w, 503, map[string]any{"requested": count, "created": created, "error": "Cannot save worker password; this worker was not created.", "not_attempted": labels[index:]})

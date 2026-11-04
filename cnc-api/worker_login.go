@@ -136,5 +136,5 @@ func workerPasswordSetup(password string) (string, error) {
 	if err != nil || !strings.HasPrefix(hash, "$6$") || strings.ContainsAny(hash, "'\r\n") {
 		return "", fmt.Errorf("cannot prepare worker password policy")
 	}
-	return "\nprintf '%s\\n' 'root:" + hash + "' | chpasswd -e\ninstall -d -m 755 /etc/ssh/sshd_config.d\nprintf '%s\\n' 'PermitRootLogin yes' 'PasswordAuthentication yes' > /etc/ssh/sshd_config.d/00-cnc-worker-login.conf\n/usr/sbin/sshd -t\nsystemctl reload ssh\n", nil
+	return "\nprintf '%s\\n' 'root:" + hash + "' | chpasswd -e\ninstall -d -m 755 /etc/ssh/sshd_config.d\nprintf '%s\\n' 'PermitRootLogin prohibit-password' 'PubkeyAuthentication yes' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' 'AuthenticationMethods publickey' > /etc/ssh/sshd_config.d/00-cnc-worker-login.conf\n/usr/sbin/sshd -t\nsystemctl reload ssh\n", nil
 }

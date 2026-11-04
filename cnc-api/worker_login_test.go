@@ -84,7 +84,7 @@ func TestWorkerDefaultPasswordPolicy(t *testing.T) {
 		t.Fatal("policy not loaded")
 	}
 	setup, err := workerPasswordSetup(got)
-	if err != nil || strings.Contains(setup, fixture) || !strings.Contains(setup, "chpasswd -e") || !strings.Contains(setup, "PermitRootLogin yes") || !strings.Contains(setup, "PasswordAuthentication yes") {
+	if err != nil || strings.Contains(setup, fixture) || !strings.Contains(setup, "chpasswd -e") || !strings.Contains(setup, "PermitRootLogin prohibit-password") || !strings.Contains(setup, "PasswordAuthentication no") || strings.Contains(setup, "PasswordAuthentication yes") {
 		t.Fatal("invalid password bootstrap")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "worker-default-password"), []byte("bad\npolicy"), 0600); err != nil {
