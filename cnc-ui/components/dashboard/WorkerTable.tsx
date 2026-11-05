@@ -3,6 +3,7 @@
 import { useDashboard } from "@/components/providers/EventProvider";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { useTick } from "@/lib/utils";
+import { WorkerNetwork } from "./WorkerNetwork";
 import { WorkerSSH } from "./WorkerSSH";
 
 function relativeTime(isoString: string): string {
@@ -79,6 +80,7 @@ export function WorkerTable() {
                 </td>
                 <td className="py-3 px-4 text-xs text-gray-400">
                   {worker.resources && <div>{worker.resources.cpu_percent.toFixed(0)}% CPU · {worker.resources.available_memory_mb} MiB free</div>}
+                  <WorkerNetwork network={worker.resources?.network} />
                   {worker.enum_requests && <div>{Object.values(worker.enum_requests).reduce((n,m)=>n+m.active,0)} active · {Object.values(worker.enum_requests).reduce((n,m)=>n+m.queued,0)} queued requests</div>}
                 </td>
                 <td className="py-3 px-4 text-xs text-gray-400 whitespace-nowrap">

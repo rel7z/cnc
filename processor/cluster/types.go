@@ -212,6 +212,7 @@ func (p Program) Resources() Resources {
 }
 
 type ResourceSnapshot struct {
+	Network           *NetworkSnapshot     `json:"network,omitempty"`
 	JobMemoryMB       int                  `json:"job_memory_mb"`
 	Capabilities      *RuntimeCapabilities `json:"capabilities,omitempty"`
 	SampledAt         int64                `json:"sampled_at"`

@@ -17,7 +17,7 @@ var previousTotal, previousIdle uint64
 func SampleResources() ResourceSnapshot {
 	sampleMu.Lock()
 	defer sampleMu.Unlock()
-	r := ResourceSnapshot{Capabilities: DetectRuntimeCapabilities(), CPUCores: runtime.NumCPU(), SampledAt: time.Now().UnixMilli(), Cgroups: CgroupAvailable()}
+	r := ResourceSnapshot{Network: sampleHostNetwork(), Capabilities: DetectRuntimeCapabilities(), CPUCores: runtime.NumCPU(), SampledAt: time.Now().UnixMilli(), Cgroups: CgroupAvailable()}
 	data, err := os.ReadFile("/proc/stat")
 	if err != nil {
 		r.SampledAt = 0

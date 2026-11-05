@@ -1,3 +1,4 @@
+import type { NetworkSnapshot } from "@/components/dashboard/WorkerNetwork";
 export interface Stats {
   workers_total: number;
   workers_online: number;
@@ -33,7 +34,7 @@ export type JobStatus =
   | "failed";
 
 export interface Worker {
-  resources?: { cpu_percent: number; cpu_cores: number; available_memory_mb: number; total_memory_mb: number };
+  resources?: { network?: NetworkSnapshot; cpu_percent: number; cpu_cores: number; available_memory_mb: number; total_memory_mb: number };
   enum_requests?: Record<string, { active: number; queued: number; cancelled: number }>;
   id: string;
   address: string;
