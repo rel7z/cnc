@@ -20,11 +20,11 @@ build:
 	(cd ../cnc-backend/cms-scan && $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/cms-scan .)
 	(cd ../cnc-backend/reverseip/src1 && $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/reverseip-domain .)
 	(cd ../cnc-backend/reverseip/src2 && $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/reverseip-thc .)
-	(cd ../cnc-backend/wp-bruter && $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/wp-bruter .)
+	(cd ../cnc-backend/reverseip/src3 && $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/reverseip-dnsrift .)
 	(cd ../cnc-backend/enum && $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/cnc-enum .)
 	(cd ../cnc-backend/subnet-finder && $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/subnet-finder .)
 	@chmod +x $(CURDIR)/tools/dork2 2>/dev/null || true
-	@echo "Built: cnc-server  cnc-worker  cnc  tools/cms-scan  tools/reverseip-domain  tools/reverseip-thc  tools/wp-bruter  tools/cnc-enum  tools/subnet-finder  tools/dork2"
+	@echo "Built: cnc-server  cnc-worker  cnc  tools/cms-scan  tools/reverseip-domain  tools/reverseip-thc  tools/reverseip-dnsrift  tools/cnc-enum  tools/subnet-finder  tools/dork2"
 
 # ── Linux cross-compile ──────────────────────────────────────────────────────
 build-linux:
@@ -38,11 +38,11 @@ build-linux:
 	(cd ../cnc-backend/cms-scan && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(CURDIR)/tools/cms-scan-linux .)
 	(cd ../cnc-backend/reverseip/src1 && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(CURDIR)/tools/reverseip-domain-linux .)
 	(cd ../cnc-backend/reverseip/src2 && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/reverseip-thc-linux .)
-	(cd ../cnc-backend/wp-bruter && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/wp-bruter-linux .)
+	(cd ../cnc-backend/reverseip/src3 && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/reverseip-dnsrift-linux .)
 	(cd ../cnc-backend/enum && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/cnc-enum-linux .)
 	(cd ../cnc-backend/subnet-finder && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(if $(LDFLAGS),-ldflags "$(LDFLAGS)") -o $(CURDIR)/tools/subnet-finder-linux .)
 	@chmod +x $(CURDIR)/tools/dork2 2>/dev/null || true
-	@echo "Built: cnc-server-linux  cnc-worker-linux  cnc-linux  tools/cms-scan-linux  tools/reverseip-domain-linux  tools/reverseip-thc-linux  tools/wp-bruter-linux  tools/cnc-enum-linux  tools/subnet-finder-linux  tools/dork2"
+	@echo "Built: cnc-server-linux  cnc-worker-linux  cnc-linux  tools/cms-scan-linux  tools/reverseip-domain-linux  tools/reverseip-thc-linux  tools/reverseip-dnsrift-linux  tools/cnc-enum-linux  tools/subnet-finder-linux  tools/dork2"
 
 # ── Run with auto-restart ────────────────────────────────────────────────────
 run: build
@@ -51,6 +51,6 @@ run: build
 
 # ── Clean ────────────────────────────────────────────────────────────────────
 clean:
-	rm -f cnc-server cnc-worker cnc tools/cms-scan tools/reverseip-domain tools/reverseip-thc tools/wp-bruter tools/cnc-enum tools/subnet-finder
-	rm -f cnc-server-linux cnc-worker-linux cnc-linux tools/cms-scan-linux tools/reverseip-domain-linux tools/reverseip-thc-linux tools/wp-bruter-linux tools/cnc-enum-linux tools/subnet-finder-linux
+	rm -f cnc-server cnc-worker cnc tools/cms-scan tools/reverseip-domain tools/reverseip-thc tools/reverseip-dnsrift tools/cnc-enum tools/subnet-finder
+	rm -f cnc-server-linux cnc-worker-linux cnc-linux tools/cms-scan-linux tools/reverseip-domain-linux tools/reverseip-thc-linux tools/reverseip-dnsrift-linux tools/cnc-enum-linux tools/subnet-finder-linux
 	@echo "Cleaned"

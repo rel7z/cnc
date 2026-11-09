@@ -1,0 +1,68 @@
+{
+  "command_id": "c235fb83-0704-41be-9ee4-81180fd17890",
+  "nodes": {
+    "cnc-aws-server": {
+      "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818",
+      "fixture": {
+        "text_files_clean": true,
+        "plugin_url_files": 2,
+        "plugin_path_urls": 2,
+        "structured_evidence_preserved": true,
+        "jsonl_not_exported": true,
+        "ordinary_login_verified": true,
+        "cpanel_separated": true,
+        "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818"
+      },
+      "server_sha256": "75edb3193e0f6589af3a9e8b2582f6a15053dec5782cec1ca22d2ea3a9e28273",
+      "services": {
+        "cnc-server": "active",
+        "cnc-ui": "active",
+        "cnc-processor": "active"
+      },
+      "workers_online": 3,
+      "active_jobs": 0,
+      "drive_authorized": true,
+      "jsonl_in_exports": 0,
+      "distribution_hash_matches": true
+    },
+    "cnc-aws-worker-1": {
+      "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818",
+      "fixture": {
+        "text_files_clean": true,
+        "plugin_url_files": 2,
+        "plugin_path_urls": 2,
+        "structured_evidence_preserved": true,
+        "jsonl_not_exported": true,
+        "ordinary_login_verified": true,
+        "cpanel_separated": true,
+        "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818"
+      }
+    },
+    "cnc-aws-worker-2": {
+      "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818",
+      "fixture": {
+        "text_files_clean": true,
+        "plugin_url_files": 2,
+        "plugin_path_urls": 2,
+        "structured_evidence_preserved": true,
+        "jsonl_not_exported": true,
+        "ordinary_login_verified": true,
+        "cpanel_separated": true,
+        "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818"
+      }
+    },
+    "cnc-aws-worker-3": {
+      "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818",
+      "fixture": {
+        "text_files_clean": true,
+        "plugin_url_files": 2,
+        "plugin_path_urls": 2,
+        "structured_evidence_preserved": true,
+        "jsonl_not_exported": true,
+        "ordinary_login_verified": true,
+        "cpanel_separated": true,
+        "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818"
+      }
+    }
+  }
+}

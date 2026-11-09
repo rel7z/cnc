@@ -49,7 +49,8 @@ function reducer(state: DashboardState, action: Action): DashboardState {
       for (const w of action.payload.workers) workers[w.id] = w;
       const jobs: Record<string, Job> = {};
       for (const j of action.payload.jobs) jobs[j.id] = j;
-      const tasks: Record<string, Task> = {};
+      // Keep details loaded for a selected historical job across reconnects.
+      const tasks: Record<string, Task> = { ...state.tasks };
       for (const t of (action.payload.tasks ?? [])) tasks[t.id] = t;
       return {
         ...state,

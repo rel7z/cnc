@@ -1,0 +1,93 @@
+{
+  "provider": {
+    "provider": "digitalocean",
+    "region": "sgp1",
+    "server_count": 3,
+    "memory_mb_per_server": 8192,
+    "vcpus_per_server": 4,
+    "monthly_total_usd": 144,
+    "old_test_server_deleted": true,
+    "firewall_applied": true,
+    "nodes": {
+      "controller": {
+        "id": 614783470,
+        "name": "cnc-do-controller",
+        "status": "active",
+        "public_ip": "143.198.214.173",
+        "private_ip": "10.104.0.3",
+        "memory_mb": 8192,
+        "vcpus": 4
+      },
+      "worker-1": {
+        "id": 614783474,
+        "name": "cnc-do-worker-1",
+        "status": "active",
+        "public_ip": "165.232.162.99",
+        "private_ip": "10.104.0.4",
+        "memory_mb": 8192,
+        "vcpus": 4
+      },
+      "worker-2": {
+        "id": 614783478,
+        "name": "cnc-do-worker-2",
+        "status": "active",
+        "public_ip": "167.71.202.121",
+        "private_ip": "10.104.0.5",
+        "memory_mb": 8192,
+        "vcpus": 4
+      }
+    }
+  },
+  "controller": {
+    "controller": "cnc-do-controller",
+    "services": "active",
+    "workers_online": 2,
+    "worker_ids": [
+      "cnc-do-worker-1",
+      "cnc-do-worker-2"
+    ],
+    "harmless_job_id": "job_1793540189_1",
+    "harmless_job_status": "completed",
+    "successful_worker_tasks": 2,
+    "worker_output_verified": true,
+    "dashboard_authenticated": 200,
+    "dashboard_unauthenticated_api": 401,
+    "processor_paused": true,
+    "private_programs_configured": 0,
+    "default_version_checks": 7,
+    "private_tools_accessed": false,
+    "server_sha256": "6713a1acca963a5bb16be6ddb53df6b767ad0eecc29490d78e33af72a0c0e6d5"
+  },
+  "nodes": [
+    {
+      "role": "controller",
+      "hostname": "cnc-do-controller",
+      "cpus": 4,
+      "memory_mib": 7941,
+      "service": "active",
+      "running_sha256": "6713a1acca963a5bb16be6ddb53df6b767ad0eecc29490d78e33af72a0c0e6d5"
+    },
+    {
+      "role": "worker-1",
+      "hostname": "cnc-do-worker-1",
+      "cpus": 4,
+      "memory_mib": 7941,
+      "service": "active",
+      "running_sha256": "a876c9aaedfa0a7c20f3a948664071a5a7f220b9965e68e9b4516c46dbc39c80",
+      "scanner_sha256": "325732f1f201434851a0ff43d778b1029d1a696b6f458d2264247945232871d0",
+      "login_folder_exists": true
+    },
+    {
+      "role": "worker-2",
+      "hostname": "cnc-do-worker-2",
+      "cpus": 4,
+      "memory_mib": 7941,
+      "service": "active",
+      "running_sha256": "a876c9aaedfa0a7c20f3a948664071a5a7f220b9965e68e9b4516c46dbc39c80",
+      "scanner_sha256": "325732f1f201434851a0ff43d778b1029d1a696b6f458d2264247945232871d0",
+      "login_folder_exists": true
+    }
+  ],
+  "dashboard": "http://localhost:8113/dashboard",
+  "macos_auto_reconnect_installed": false
+}

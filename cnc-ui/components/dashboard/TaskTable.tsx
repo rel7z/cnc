@@ -62,6 +62,7 @@ export function TaskTable({ jobId }: TaskTableProps) {
                 </td>
                 <td className="py-3 px-4">
                   <StatusBadge status={task.status} />
+                  {task.enum_publication && <div className="mt-1 text-xs text-gray-400">Publication: {task.enum_publication}</div>}
                 </td>
                 <td className="py-3 px-4 text-xs text-gray-400 tabular-nums whitespace-nowrap">
                   {duration(task.started_at, task.completed_at)}

@@ -1,3 +1,4 @@
+import { TelegramWebAppInit } from "@/components/providers/TelegramWebAppInit";
 import { fetchJobs, fetchStats, fetchWorkers, fetchTasks, toRecord } from "@/lib/api";
 import { EventProvider } from "@/components/providers/EventProvider";
 import { Sidebar } from "@/components/dashboard/Sidebar";
@@ -31,10 +32,11 @@ export default async function DashboardLayout({
 
   return (
     <EventProvider initialData={initialData}>
+      <TelegramWebAppInit />
       <ConnectionBanner />
-      <div className="flex h-screen overflow-hidden bg-gray-950">
+      <div className="flex flex-col-reverse md:flex-row h-[100dvh] overflow-hidden bg-[#0a0a0f]">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto min-w-0">
+        <main className="flex-1 overflow-y-auto min-w-0 bg-[#0a0a0f] pb-[env(safe-area-inset-bottom)]">
           {children}
         </main>
       </div>

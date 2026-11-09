@@ -1,0 +1,11 @@
+{
+  "artifacts": {
+    "worker": "41c4268602518af4c8cb779ae42d99402cdbee0791718ed2b7d695fdf4a188df",
+    "server": "8c9f5f28f55a5216552e3873ec04c485b7e19ea8b08d0944bf727a11031ce5f9",
+    "processor": "86d621cdafa263661186b28057e054367210a2dbb4f1267f55d6bd9a45b62299",
+    "cluster.test": "7117f699ce83e9e332af265517c1d5d042ffdc67061bba620a45e8f914aed890",
+    "ui.tar.gz": "03d46a6bc3c6216ac8f175df50710e09f19735ea3377b1cc0fac9ccd927ef3f4"
+  },
+  "workspace_root": "/root/processor",
+  "programs_executed_for_verification": "unrestricted dummy fixtures only"
+}

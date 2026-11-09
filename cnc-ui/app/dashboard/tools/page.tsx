@@ -1,4 +1,5 @@
 import { ToolsLauncher } from "@/components/dashboard/ToolsLauncher";
+import { WordPressFinder } from "@/components/dashboard/WordPressFinder";
 
 export const metadata = {
   title: "Tools | CNC Dashboard",
@@ -11,6 +12,7 @@ export default function ToolsPage() {
         <h1 className="text-2xl font-semibold tracking-tight text-white">Tools</h1>
       </div>
 
+      <WordPressFinder />
       <ToolsLauncher />
     </div>
   );

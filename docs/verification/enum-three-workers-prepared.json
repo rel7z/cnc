@@ -1,0 +1,25 @@
+{
+  "revision": "6576b44df5d6ce98cd49d236ce23bc02ef862ab7",
+  "branch": "codex/enum-three-workers-prepared",
+  "local_tests_passed": true,
+  "production_activated": false,
+  "production_rejected_before_execution": true,
+  "explicit_restart_approval_pending_for": "enum_d17b70696b1d829c284ac092",
+  "parts_for_three_workers": 3,
+  "files": {
+    "cnc-api/server.go": "495c55ceba1b0ea6124e69e39982b762c1cecb2910eb24ff0ba2208b32f85787",
+    "cnc-api/gdrive.go": "d3d6d53523b7c209b740477873835ba82b8aa46a13b75d9821b93614ab54e3ef",
+    "cnc-api/enum_state.go": "408b5dcddb8eff0a16ad4bd58e4d0afd78073771015949bb2ba3e1b470896db4",
+    "cnc-api/enum_split_test.go": "16f3dea8b5219816c9ce360ccbde0e60cfda13ce0fa009950b86dacb121eedce",
+    "cnc-api/enum_integration_test.go": "4a47ddacafcdf5389f431ba89cefa261f47c01e95f13f6f944521b97ced2834f",
+    "cnc-api/enum_text.go": "30b3cde05aecd9f6f23cf3f0455d76330e0abebfd242fe27b68c4178d14e10c0",
+    "cnc-api/enum_text_test.go": "0d8056227d2cfe9201a42cfde53642ebd4d147e07f2d51da3d768c1f96340bb2",
+    "cnc-backend/enum/pipeline.go": "e1e8894e025df5794a6527b07d3b9ecb09dc788423a5f7c92a9a3d0853162474",
+    "cnc-backend/enum/pipeline_test.go": "212a38dc553aa26d4490425c386984d98b2040282e5e51a54e63506cb68e1b4d",
+    "cnc-backend/enum/OPTIMIZATION.md": "5dfe0d423b892392a227b0ae76778d83620b24a6650e7956f0fe296ef58a123c",
+    "infra/aws/deploy-enum-three-workers.py": "bdc3964cb5a9c26d62cd135b2c04445614590d964701bd2bef0738a49ae28bc0",
+    "infra/aws/verify-enum-url-output.py": "d97c9fc4e83c4a321f67618929d6d2856c5391c9e6a92d5b8047fe12a38a6ef0",
+    "docs/verification/enum-clean-output.md": "0c3c7a115317589f98c6101a28428adc4945d7cae9cdd148fd3b16d480210505"
+  },
+  "candidate_server_sha256": "e5ce3118d475307c22cfea92bb09a9bfe309f817594d668725091224866089ae"
+}

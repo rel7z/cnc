@@ -537,12 +537,12 @@ func (c *CLI) cmdServerTool() *cobra.Command {
 		Long: `Execute specialized tools directly on the server host or distributed across workers.
 
 Available tools:
-  reverseip-thc     THC.org Reverse IP lookup (server-side, rate-limit paced)
-  reverseip-domain  ReverseIPDomain.com lookup (server-side)
+  reverseip-thc     THC.org Reverse IP lookup (load balanced, rate-limit paced)
+  reverseip-domain  ReverseIPDomain.com lookup (load balanced)
+  reverseip-dnsrift DNSRift reverse IP lookup (load balanced)
   dork2             Google Search parser (distributed spread mode, auto-synced to Drive)
   cms-scan          CMS technology detector (worker cluster)
   enum              Smart CMS and admin enumerator (worker cluster)
-  wp-bruter         WordPress brute forcer (distributed spread mode, shared passlist/userlist)
 
 Examples:
   cnc tool list
@@ -551,7 +551,6 @@ Examples:
   cnc tool run reverseip-thc -f targets.txt -w 3 --delay 300ms
   cnc tool run reverseip-domain -f targets.txt -o domains.txt --api-key "xyz"
   cnc tool run dork2 -f queries.txt --direct
-  cnc tool run wp-bruter -f sites.txt -o cracked.txt --passlist /root/pass.txt --userlist /root/users.txt
 `,
 	}
 
@@ -618,15 +617,6 @@ func (c *CLI) cmdServerToolRun() *cobra.Command {
 		extraArgs  string
 		direct     bool
 		watch      bool
-
-		passList         string
-		userList         string
-		concurrency      int
-		batch            int
-		reqTimeout       int
-		reqDelay         int
-		loginConcurrency int
-		enumUsers        bool
 	)
 
 	cmd := &cobra.Command{
@@ -681,24 +671,6 @@ func (c *CLI) cmdServerToolRun() *cobra.Command {
 			if token != "" {
 				options["token"] = token
 			}
-			if concurrency > 0 {
-				options["concurrency"] = concurrency
-			}
-			if batch > 0 {
-				options["batch"] = batch
-			}
-			if reqTimeout > 0 {
-				options["req_timeout"] = reqTimeout
-			}
-			if reqDelay > 0 {
-				options["req_delay"] = reqDelay
-			}
-			if loginConcurrency > 0 {
-				options["login_concurrency"] = loginConcurrency
-			}
-			if !enumUsers {
-				options["enum"] = false
-			}
 			if extraArgs != "" {
 				options["extra_args"] = extraArgs
 			}
@@ -721,12 +693,6 @@ func (c *CLI) cmdServerToolRun() *cobra.Command {
 				"input_file":  inputFile,
 				"output_file": outputFile,
 				"options":     options,
-			}
-			if passList != "" {
-				reqPayload["passlist"] = passList
-			}
-			if userList != "" {
-				reqPayload["userlist"] = userList
 			}
 			body, err := json.Marshal(reqPayload)
 			if err != nil {
@@ -785,14 +751,6 @@ func (c *CLI) cmdServerToolRun() *cobra.Command {
 	cmd.Flags().StringVarP(&lang, "lang", "l", "", "Language code (e.g. en, fr, for dork2)")
 	cmd.Flags().StringVarP(&site, "site", "s", "", "Limit search to specific site (for dork2)")
 	cmd.Flags().StringVar(&token, "token", "", "Apify API token (for dork2)")
-	cmd.Flags().StringVar(&passList, "passlist", "", "Path to password list file (for wp-bruter, server-side)")
-	cmd.Flags().StringVar(&userList, "userlist", "", "Path to username list file (for wp-bruter, server-side)")
-	cmd.Flags().IntVar(&concurrency, "concurrency", 0, "Concurrent workers (for wp-bruter)")
-	cmd.Flags().IntVar(&batch, "batch", 0, "Login attempts per multicall batch (for wp-bruter)")
-	cmd.Flags().IntVar(&reqTimeout, "req-timeout", 0, "Request timeout in seconds (for wp-bruter)")
-	cmd.Flags().IntVar(&reqDelay, "req-delay", 0, "Delay between batch requests in ms (for wp-bruter)")
-	cmd.Flags().IntVar(&loginConcurrency, "login-concurrency", 0, "Concurrent password attempts per site (for wp-bruter)")
-	cmd.Flags().BoolVar(&enumUsers, "enum", true, "Enumerate usernames via ?author=N and REST API (for wp-bruter)")
 	cmd.Flags().StringVar(&extraArgs, "extra", "", "Extra arguments to pass directly to tool")
 	cmd.Flags().BoolVar(&direct, "direct", false, "Execute directly as local process on server host, bypassing server daemon")
 	cmd.Flags().BoolVar(&watch, "watch", true, "Watch progress until completed")

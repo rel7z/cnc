@@ -32,8 +32,8 @@ func TestToolsRegistryServerTools(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected reverseip-domain to be registered")
 	}
-	if domain.Scope != "server" {
-		t.Errorf("expected reverseip-domain scope to be 'server', got '%s'", domain.Scope)
+	if domain.Scope != "worker" || domain.DefaultMode != JobModeSpread {
+		t.Errorf("expected reverseip-domain to use worker spread mode")
 	}
 	if domain.InputFlag != "-l" {
 		t.Errorf("expected reverseip-domain input flag to be '-l', got '%s'", domain.InputFlag)

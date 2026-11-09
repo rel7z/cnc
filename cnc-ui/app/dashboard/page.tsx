@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { ProcessorSettings } from "@/components/dashboard/ProcessorSettings";
 import { Header } from "@/components/dashboard/Header";
 import { WorkerTable } from "@/components/dashboard/WorkerTable";
 import { SubmitJobForm } from "@/components/dashboard/SubmitJobForm";
@@ -24,6 +25,7 @@ export default function DashboardPage() {
         <div className="space-y-4">
           <GDriveSettings />
           <TelegramSettings />
+          <ProcessorSettings compact />
         </div>
         
         <div className="bg-gray-900 border border-gray-800 rounded-xl">

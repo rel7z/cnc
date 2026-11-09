@@ -1,0 +1,54 @@
+# template: All TXT template formats
+# UTF-8 .txt, up to 4 MiB, any number of checks that fits, one per line.
+# Blank lines and lines starting with # are ignored.
+# Optional # template: NAME header; otherwise the filename supplies the name.
+# Use installed folder names in lowercase, not plugin display titles.
+
+# WordPress plugins: folder-name OPERATOR version
+# = exactly; < older than; <= at most; > newer than; >= at least.
+elementor = 3.25.0
+elementor < 3.25.0
+elementor <= 3.25.0
+elementor > 3.25.0
+elementor >= 3.25.0
+
+# Between, including BOTH boundaries:
+elementor >= 3.24.0 & <= 3.25.0
+
+# Advanced AND conditions; every condition on this line must match:
+elementor >= 3.24.0 & < 3.26.0
+
+# Optional custom check name after |. Without | the name is automatic.
+woocommerce < 9.0.0 | Older WooCommerce
+# Names containing newlines or starting with a quote use quoted escapes.
+# For example: plugin < 1.0.0 | "First line\nSecond line"
+
+# Explicit WordPress plugin identifier (equivalent to a bare folder name):
+wordpress:plugin:contact-form-7 < 6.0.0
+
+# WordPress core (no folder name):
+wordpress:core >= 6.4.0
+
+# Joomla core:
+joomla:core = 5.1.0
+
+# All supported Joomla extension identifiers:
+# Omit type prefixes: use example, not com_example, mod_example, etc.
+joomla:component:example < 2.0.0
+joomla:module:example <= 2.0.0
+joomla:plugin:system:example >= 1.0.0 & < 2.0.0
+joomla:library:example > 1.0.0
+joomla:template:example = 1.0.0
+joomla:package:example >= 1.0.0
+
+# Joomla plugins REQUIRE their group: joomla:plugin:GROUP:FOLDER.
+# Supported version forms: 3, 3.25, 3.25.0, 3.25.0.1, 2.6.8c, v3.25.0, 3.25.0-beta.1.
+# A letter suffix sorts after its base release: 2.6.8 < 2.6.8a < 2.6.8c < 2.6.9.
+# No wildcards (*), build metadata (+build), ==, !=, or impossible ranges.
+# Each line is a separate check; & combines conditions for that one component.
+# Exact duplicate checks are rejected. Check names must be unique.
+# Upload loads checks into the form; it never saves or launches a scan.
+# Use Save as new for database storage, or select a template and Update it.
+
+# Runtime version reported by the HTTP server
+php:php-src >= 8.5.0 & < 8.5.12

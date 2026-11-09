@@ -1,0 +1,13 @@
+{
+  "release": "1a892f7eaa058199aaa71fd77987be61ea594897",
+  "status": "completed",
+  "restored": 4,
+  "skipped": 0,
+  "failed": 0,
+  "bytes": 66934963,
+  "verified_drive_copies": 4,
+  "missing": 0,
+  "mismatched": 0,
+  "keep_local_records": 4,
+  "workers_online": 3
+}

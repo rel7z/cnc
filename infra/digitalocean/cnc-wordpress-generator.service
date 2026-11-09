@@ -1,0 +1,26 @@
+[Unit]
+Description=CNC WordPress Generator
+Wants=network-online.target
+After=network-online.target cnc-server.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cnc/wordpress-generator
+EnvironmentFile=/opt/cnc/dashboard-audit.env
+EnvironmentFile=/opt/cnc/wordpress-generator/generator.env
+ExecStart=/usr/bin/python3 /opt/cnc/wordpress-generator/wordpress_generator.py --threads 96
+Restart=always
+RestartSec=5s
+OOMPolicy=stop
+OOMScoreAdjust=-250
+MemoryLow=256M
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/cnc/wordpress-generator /opt/cnc/merged
+
+[Install]
+WantedBy=multi-user.target

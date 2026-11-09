@@ -1,0 +1,11 @@
+{
+  "release": "704df87e00d72e2572c5fd2ba9012d5f4afc4aaa",
+  "audit_keys_match": true,
+  "authenticated_launcher_probe_http": 400,
+  "unsigned_launcher_probe_http": 401,
+  "registry_tools": 7,
+  "workers_online": 3,
+  "drive_authorized": true,
+  "browser_sync_verified": true,
+  "tools_executed": false
+}

@@ -33,7 +33,7 @@ export function fetchJob(id: string): Promise<Job> {
 }
 
 export function fetchTasks(): Promise<Task[]> {
-  return apiFetch<Task[]>("/api/tasks");
+  return apiFetch<Task[]>("/api/tasks?limit=100");
 }
 
 export function fetchJobTasks(id: string): Promise<Task[]> {

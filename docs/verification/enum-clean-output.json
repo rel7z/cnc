@@ -1,0 +1,22 @@
+{
+  "revision": "9bf294ad2b9d3d1c1ecf6b6cbd983649ac2e5822",
+  "branch": "codex/enum-clean-output",
+  "local_tests_passed": true,
+  "production_activated": false,
+  "workers_restarted": false,
+  "running_job_cancelled": false,
+  "files": {
+    "cnc-backend/enum/pipeline.go": "e1e8894e025df5794a6527b07d3b9ecb09dc788423a5f7c92a9a3d0853162474",
+    "cnc-backend/enum/pipeline_test.go": "212a38dc553aa26d4490425c386984d98b2040282e5e51a54e63506cb68e1b4d",
+    "cnc-backend/enum/OPTIMIZATION.md": "dd2eef258f3e1793890979d94a6941071496e6e7aa322ebe179a5e6804e06316",
+    "cnc-api/server.go": "495c55ceba1b0ea6124e69e39982b762c1cecb2910eb24ff0ba2208b32f85787",
+    "cnc-api/enum_state.go": "f861728fd58698fdeb699ea423f79f3a98ce1168797e9a006bfe70e6704c09b2",
+    "cnc-api/enum_split_test.go": "bcfab20bca47db57f902b75512b908790fe0bbe4cf7abef94930447f2b2ac920",
+    "infra/aws/verify-enum-url-output.py": "d97c9fc4e83c4a321f67618929d6d2856c5391c9e6a92d5b8047fe12a38a6ef0",
+    "docs/verification/enum-clean-output.md": "030237ac538c9343c0a3de4ccc1007fab1aed154ae17e391c95b8fe9b43c8bf3"
+  },
+  "candidate_binaries": {
+    "/private/tmp/cnc-enum-clean-urls-linux": "e700cdbe40258dbc33ab633cc9a88f6a99f9c4b21e6ab94799b590551e62fb86",
+    "/private/tmp/cnc-server-balanced-linux": "9764526540dd72f65808a32d007612fb0c3cf1cde69cd1f6da9e655290570ed7"
+  }
+}

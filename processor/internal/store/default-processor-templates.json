@@ -1,0 +1,67 @@
+[
+  {
+    "id": "builtin-processor-bf-20261021",
+    "name": "BF Linux binary",
+    "definition": {
+      "tool_id": "bf",
+      "incoming": "wordpress.txt",
+      "folder": "tools/bf",
+      "manifest": {
+        "input": "wordpress.txt",
+        "scripts": {
+          "scanner": {
+            "path": "rr",
+            "runtime": "binary",
+            "outputs": [
+              {
+                "path": "results.txt",
+                "drive": true
+              }
+            ]
+          }
+        },
+        "files": [
+          "config.json",
+          "pass.txt"
+        ]
+      }
+    }
+  },
+  {
+    "id": "builtin-processor-divi-20261021",
+    "name": "Divi scanner and checker",
+    "definition": {
+      "tool_id": "divi",
+      "incoming": "divi.txt",
+      "folder": "tools/divi",
+      "manifest": {
+        "input": "divi.txt",
+        "scripts": {
+          "scanner": {
+            "path": "scanner.py",
+            "outputs": [
+              {
+                "path": "vulnerable_targets.txt",
+                "send_to": "checker",
+                "drive": false
+              }
+            ]
+          },
+          "checker": {
+            "path": "2026-5118.py",
+            "input": "results.txt",
+            "outputs": [
+              {
+                "path": "success.txt",
+                "drive": true
+              }
+            ]
+          }
+        },
+        "files": [
+          "config.json"
+        ]
+      }
+    }
+  }
+]

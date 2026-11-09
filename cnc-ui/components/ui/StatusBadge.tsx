@@ -6,6 +6,7 @@ const colorMap: Record<string, string> = {
   // green
   online: "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30",
   completed: "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30",
+  completed_with_errors: "bg-amber-500/15 text-amber-400 ring-amber-500/30",
   // blue
   running: "bg-blue-500/15 text-blue-400 ring-blue-500/30",
   busy: "bg-blue-500/15 text-blue-400 ring-blue-500/30",
@@ -31,7 +32,7 @@ export function StatusBadge({ status, className = "" }: StatusBadgeProps) {
     <span
       className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ${colors} ${className}`}
     >
-      {status}
+      {status.replaceAll("_", " ")}
     </span>
   );
 }

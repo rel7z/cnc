@@ -1,0 +1,116 @@
+{
+  "old_job": "enum_5b19379584b7897ee19599a9",
+  "workers": {
+    "cnc-aws-worker-1": {
+      "hashes": {
+        "cnc-enum": "9c8074e41c74b8865384c9ae5c54d442f685091d31eb210be9665b0361277b29",
+        "cms-scan": "bb15fb99930de5499e55e8931d5fbc37437908ce8b7aa919eda1d4a6074b5704",
+        "cnc-worker-linux": "72891d3c12e0b2a10cef23536f976aa64f584831a0d858efb4ce4e663049ad87"
+      },
+      "staged": true,
+      "restarted": false,
+      "rollback": "/opt/cnc/enum-performance-releases/add378e42ed6740f315349a8afcf016e671eea6b/rollback",
+      "command_id": "6fbd7d10-deca-43bb-ac8c-ce250a0ffe3b",
+      "activation": {
+        "service_active": true,
+        "shared_request_budget": 64,
+        "command_id": "6f2540e0-63dd-42e8-9172-dbece42f23b9"
+      }
+    },
+    "cnc-aws-worker-2": {
+      "hashes": {
+        "cnc-enum": "9c8074e41c74b8865384c9ae5c54d442f685091d31eb210be9665b0361277b29",
+        "cms-scan": "bb15fb99930de5499e55e8931d5fbc37437908ce8b7aa919eda1d4a6074b5704",
+        "cnc-worker-linux": "72891d3c12e0b2a10cef23536f976aa64f584831a0d858efb4ce4e663049ad87"
+      },
+      "staged": true,
+      "restarted": false,
+      "rollback": "/opt/cnc/enum-performance-releases/add378e42ed6740f315349a8afcf016e671eea6b/rollback",
+      "command_id": "82a7a18c-56eb-497d-ae49-0445f657d67a",
+      "activation": {
+        "service_active": true,
+        "shared_request_budget": 64,
+        "command_id": "fbe49fec-df0c-4d27-8cd9-68a16f3f7fa9"
+      }
+    },
+    "cnc-aws-worker-3": {
+      "hashes": {
+        "cnc-enum": "9c8074e41c74b8865384c9ae5c54d442f685091d31eb210be9665b0361277b29",
+        "cms-scan": "bb15fb99930de5499e55e8931d5fbc37437908ce8b7aa919eda1d4a6074b5704",
+        "cnc-worker-linux": "72891d3c12e0b2a10cef23536f976aa64f584831a0d858efb4ce4e663049ad87"
+      },
+      "staged": true,
+      "restarted": false,
+      "rollback": "/opt/cnc/enum-performance-releases/add378e42ed6740f315349a8afcf016e671eea6b/rollback",
+      "command_id": "d16d7bba-96a2-471c-abfa-e5cb97b7272c",
+      "activation": {
+        "service_active": true,
+        "shared_request_budget": 64,
+        "command_id": "bf1c55c6-62a5-4bc9-b531-4348ba18781c"
+      }
+    }
+  },
+  "revision": "add378e42ed6740f315349a8afcf016e671eea6b",
+  "controller": {
+    "revision": "add378e42ed6740f315349a8afcf016e671eea6b",
+    "hashes": {
+      "cnc-enum": "9c8074e41c74b8865384c9ae5c54d442f685091d31eb210be9665b0361277b29",
+      "cms-scan": "bb15fb99930de5499e55e8931d5fbc37437908ce8b7aa919eda1d4a6074b5704",
+      "cnc-worker-linux": "72891d3c12e0b2a10cef23536f976aa64f584831a0d858efb4ce4e663049ad87"
+    },
+    "benchmark": {
+      "cms": {
+        "before": {
+          "seconds": 5.238,
+          "requests": 512,
+          "peak_active": 8,
+          "targets": 512,
+          "exit_code": 0
+        },
+        "after": {
+          "seconds": 0.779,
+          "requests": 512,
+          "peak_active": 64,
+          "targets": 512,
+          "exit_code": 0
+        },
+        "speedup": 6.72,
+        "same_output_records": true
+      },
+      "deep": {
+        "before": {
+          "seconds": 5.255,
+          "requests": 512,
+          "peak_active": 9,
+          "targets": 64,
+          "exit_code": 0
+        },
+        "after": {
+          "seconds": 0.729,
+          "requests": 512,
+          "peak_active": 65,
+          "targets": 64,
+          "exit_code": 0
+        },
+        "speedup": 7.21,
+        "same_output_records": true
+      }
+    },
+    "source_tests_passed": true,
+    "services_restarted": false,
+    "rollback": "/opt/cnc/enum-performance-releases/add378e42ed6740f315349a8afcf016e671eea6b/rollback",
+    "command_id": "1841e190-0de4-4a0b-a332-47d61e214e0e"
+  },
+  "cancellation": {
+    "old_job": "enum_5b19379584b7897ee19599a9",
+    "cancelled_for_approved_restart": true,
+    "command_id": "3b0ae64d-84e9-4274-9ffb-07f0de1f01c0"
+  },
+  "replacement": {
+    "old_job": "enum_5b19379584b7897ee19599a9",
+    "new_job": "enum_86440dd1850221643e1c80a8",
+    "same_input_and_settings": true,
+    "existing_results_retained": true,
+    "command_id": "0a53b96f-ee50-4d41-8c67-c5d3f7d12b2b"
+  }
+}

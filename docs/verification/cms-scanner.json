@@ -1,0 +1,102 @@
+{
+  "revision": "1b528384ecf13694327c6a8fa5c495401e402844",
+  "sha256": "46949d28439c0fe711896f40549b29e9edffca654aae47d3d766632ef5573056",
+  "nodes": {
+    "cnc-aws-worker-1": {
+      "fixtures_passed": true,
+      "counts": {
+        "wordpress": 1,
+        "joomla": 1,
+        "drupal": 1,
+        "shopify": 1,
+        "ghost": 1,
+        "magento": 1,
+        "wix": 1,
+        "squarespace": 1,
+        "cms-unknown": 1,
+        "cms-blocked": 1,
+        "cms-errors": 2
+      },
+      "partial_exit": 2,
+      "input_collision_preserved": true,
+      "sha256": "46949d28439c0fe711896f40549b29e9edffca654aae47d3d766632ef5573056",
+      "revision": "1b528384ecf13694327c6a8fa5c495401e402844",
+      "rollback": "/opt/cnc/cms-releases/1b528384ecf13694327c6a8fa5c495401e402844/rollback",
+      "services_restarted": false,
+      "command_id": "e47f81ac-53f4-410c-b509-61740b2b7070"
+    },
+    "cnc-aws-worker-2": {
+      "fixtures_passed": true,
+      "counts": {
+        "wordpress": 1,
+        "joomla": 1,
+        "drupal": 1,
+        "shopify": 1,
+        "ghost": 1,
+        "magento": 1,
+        "wix": 1,
+        "squarespace": 1,
+        "cms-unknown": 1,
+        "cms-blocked": 1,
+        "cms-errors": 2
+      },
+      "partial_exit": 2,
+      "input_collision_preserved": true,
+      "sha256": "46949d28439c0fe711896f40549b29e9edffca654aae47d3d766632ef5573056",
+      "revision": "1b528384ecf13694327c6a8fa5c495401e402844",
+      "rollback": "/opt/cnc/cms-releases/1b528384ecf13694327c6a8fa5c495401e402844/rollback",
+      "services_restarted": false,
+      "command_id": "6fb7f47a-0d19-4b70-971f-b098c3ce3105"
+    },
+    "cnc-aws-worker-3": {
+      "fixtures_passed": true,
+      "counts": {
+        "wordpress": 1,
+        "joomla": 1,
+        "drupal": 1,
+        "shopify": 1,
+        "ghost": 1,
+        "magento": 1,
+        "wix": 1,
+        "squarespace": 1,
+        "cms-unknown": 1,
+        "cms-blocked": 1,
+        "cms-errors": 2
+      },
+      "partial_exit": 2,
+      "input_collision_preserved": true,
+      "sha256": "46949d28439c0fe711896f40549b29e9edffca654aae47d3d766632ef5573056",
+      "revision": "1b528384ecf13694327c6a8fa5c495401e402844",
+      "rollback": "/opt/cnc/cms-releases/1b528384ecf13694327c6a8fa5c495401e402844/rollback",
+      "services_restarted": false,
+      "command_id": "e5787030-bac8-462c-b9e5-4bc683fbf732"
+    },
+    "cnc-aws-server": {
+      "fixtures_passed": true,
+      "counts": {
+        "wordpress": 1,
+        "joomla": 1,
+        "drupal": 1,
+        "shopify": 1,
+        "ghost": 1,
+        "magento": 1,
+        "wix": 1,
+        "squarespace": 1,
+        "cms-unknown": 1,
+        "cms-blocked": 1,
+        "cms-errors": 2
+      },
+      "partial_exit": 2,
+      "input_collision_preserved": true,
+      "sha256": "46949d28439c0fe711896f40549b29e9edffca654aae47d3d766632ef5573056",
+      "workers_online": 3,
+      "drive_authorized": true,
+      "worker_archive_updated": true,
+      "active_jobs_preserved": 1,
+      "revision": "1b528384ecf13694327c6a8fa5c495401e402844",
+      "rollback": "/opt/cnc/cms-releases/1b528384ecf13694327c6a8fa5c495401e402844/rollback",
+      "services_restarted": false,
+      "command_id": "dd4a9fd0-9f3f-4ad9-a811-bdf2e9b2229f"
+    }
+  }
+}

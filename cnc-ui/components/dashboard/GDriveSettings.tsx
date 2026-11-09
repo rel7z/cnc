@@ -1,8 +1,10 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { DEFAULT_DRIVE_CALLBACK, driveConnectionURL } from "@/lib/drive-oauth";
 
 interface GDriveConfig {
+  redirect_url: string;
   enabled: boolean;
   watch_dir: string;
   client_id: string;
@@ -19,6 +21,20 @@ interface AuthStatus {
   connected_email?: string;
 }
 
+interface DriveRestoreStatus {
+  status: string;
+  scope: string;
+  restored: number;
+  skipped: number;
+  failed: number;
+  bytes: number;
+  error?: string;
+}
+
+interface CallbackGuidance {
+  savedOrigin: string;
+}
+
 const inputClass =
   "w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 " +
   "placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 " +
@@ -26,7 +42,10 @@ const inputClass =
 
 export function GDriveSettings() {
   const [isOpen, setIsOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [callbackGuidance, setCallbackGuidance] = useState<CallbackGuidance | null>(null);
   const [config, setConfig] = useState<GDriveConfig>({
+    redirect_url: "",
     enabled: false,
     watch_dir: "~/merged",
     client_id: "",
@@ -40,8 +59,12 @@ export function GDriveSettings() {
   const [authStatus, setAuthStatus] = useState<AuthStatus>({ authorized: false, configured: false });
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [restarting, setRestarting] = useState(false);
+  const [secretSaved, setSecretSaved] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [restore, setRestore] = useState<DriveRestoreStatus | null>(null);
+  const [startingRestore, setStartingRestore] = useState(false);
+  const restoring = startingRestore || restore?.status === "running";
   const [message, setMessage] = useState<{ type: "success" | "error" | "warning"; text: string } | null>(null);
 
   const fetchAuthStatus = useCallback(async () => {
@@ -56,19 +79,58 @@ export function GDriveSettings() {
     }
   }, []);
 
-  // Poll auth status every 3s when connecting (waiting for OAuth callback)
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const response = await fetch("/api/config/gdrive/restore", { cache: "no-store", signal: AbortSignal.timeout(10000) });
+        if (response.ok && !cancelled) setRestore(await response.json());
+      } catch { /* the next poll can recover after a network interruption */ }
+    };
+    void check();
+    const timer = setInterval(check, 2500);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [isOpen]);
+
   useEffect(() => {
     if (!connecting) return;
+    let cancelled = false;
     const interval = setInterval(async () => {
-      await fetchAuthStatus();
-      // Stop polling once authorized
-      setAuthStatus((prev) => {
-        if (prev.authorized) setConnecting(false);
-        return prev;
-      });
+      try {
+        const res = await fetch("/api/config/gdrive/auth-status");
+        if (res.ok && !cancelled) {
+          const status: AuthStatus = await res.json();
+          setAuthStatus(status);
+          if (status.authorized) setConnecting(false);
+        }
+      } catch { /* retry while the authorization window is open */ }
     }, 2000);
-    return () => clearInterval(interval);
-  }, [connecting, fetchAuthStatus]);
+    const timeout = setTimeout(() => {
+      setConnecting(false);
+      setMessage({ type: "warning", text: "Authorization timed out. Connect again to retry." });
+    }, 10 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(interval); clearTimeout(timeout); };
+  }, [connecting]);
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("connectDrive") === "1") setIsOpen(true);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const callback = new URL(config.redirect_url);
+      if (callback.origin === window.location.origin) {
+        setCallbackGuidance(null);
+        return;
+      }
+      setCallbackGuidance({
+        savedOrigin: callback.origin,
+      });
+    } catch {
+      setCallbackGuidance(null);
+    }
+  }, [config.redirect_url]);
 
   useEffect(() => {
     if (isOpen) {
@@ -83,7 +145,12 @@ export function GDriveSettings() {
       const res = await fetch("/api/config/gdrive");
       if (!res.ok) throw new Error("Failed to load config");
       const data = await res.json();
-      if (data.gdrive) setConfig(data.gdrive);
+      if (data.gdrive) {
+        const callback = data.gdrive.redirect_url || DEFAULT_DRIVE_CALLBACK;
+        setConfig({ ...data.gdrive, upload_interval: data.gdrive.upload_interval || "30s", client_secret: "", redirect_url: callback });
+      }
+      setSecretSaved(Boolean(data.client_secret_set));
+      setAdvancedOpen(!data.client_secret_set);
     } catch (err) {
       setMessage({ type: "error", text: err instanceof Error ? err.message : "Failed to load config" });
     } finally {
@@ -91,35 +158,50 @@ export function GDriveSettings() {
     }
   }
 
-  async function handleSave() {
+  async function handleSave(nextConfig: GDriveConfig = config): Promise<boolean> {
     setSaving(true);
     setMessage(null);
     try {
       const res = await fetch("/api/config/gdrive", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
+        body: JSON.stringify(nextConfig),
       });
       if (!res.ok) throw new Error(await res.text() || `Server returned ${res.status}`);
-      setMessage({ type: "success", text: "Saved! Restart server to apply." });
+      setSecretSaved(Boolean(nextConfig.client_secret) || secretSaved);
+      await fetchAuthStatus();
+      setMessage({ type: "success", text: "Saved and applied. No restart required." });
+      return true;
     } catch (err) {
       setMessage({ type: "error", text: err instanceof Error ? err.message : "Failed to save" });
+      return false;
     } finally {
       setSaving(false);
     }
   }
 
   async function handleConnect() {
+    const host = window.location.hostname;
+    const loopback = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+    if (window.location.protocol !== "https:" && !loopback) {
+      setMessage({ type: "error", text: "Open this dashboard through the localhost tunnel or an HTTPS domain to connect Drive." });
+      return;
+    }
+    const callback = config.redirect_url || DEFAULT_DRIVE_CALLBACK;
+    const nextConfig = { ...config, redirect_url: callback };
+    // Open before awaiting requests so browsers allow the authorization window.
+    const popup = window.open("about:blank", "cnc-google-drive", "width=500,height=650");
+    if (!popup) { setMessage({ type: "error", text: "Allow popups for this dashboard, then connect again." }); return; }
+    popup.opener = null;
+    setConnecting(true);
     try {
-      const res = await fetch("/api/config/gdrive/auth-url");
-      if (!res.ok) throw new Error(await res.text());
-      const { url } = await res.json();
-      // Open Google auth in a new window
-      window.open(url, "_blank", "width=500,height=600,noopener");
-      setConnecting(true);
-      setMessage({ type: "warning", text: "Waiting for Google authorization..." });
+      if (!await handleSave(nextConfig)) { popup.close(); setConnecting(false); return; }
+      setConfig(nextConfig);
+      popup.location.href = await driveConnectionURL(callback);
+      setMessage({ type: "warning", text: "Finish authorization in Google. CNC Manager keeps the saved callback unchanged across servers." });
     } catch (err) {
-      setMessage({ type: "error", text: err instanceof Error ? err.message : "Failed to get auth URL" });
+      popup.close(); setConnecting(false);
+      setMessage({ type: "error", text: err instanceof Error ? err.message : "Failed to connect" });
     }
   }
 
@@ -135,32 +217,31 @@ export function GDriveSettings() {
     }
   }
 
-  async function handleRestart() {
-    setRestarting(true);
-    setMessage({ type: "warning", text: "Restarting server..." });
+  async function handleSync() {
+    setSyncing(true);
+    setMessage(null);
     try {
-      await fetch("/api/server/restart", { method: "POST" });
-      // Wait for server to come back
-      await new Promise((r) => setTimeout(r, 3000));
-      // Poll until it's back
-      for (let i = 0; i < 10; i++) {
-        try {
-          const check = await fetch("/api/stats");
-          if (check.ok) {
-            setMessage({ type: "success", text: "Server restarted!" });
-            setTimeout(() => setMessage(null), 3000);
-            await fetchAuthStatus();
-            return;
-          }
-        } catch { /* still restarting */ }
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-      setMessage({ type: "warning", text: "Server restarting... Refresh the page." });
-    } catch {
-      setMessage({ type: "warning", text: "Server restarting... Refresh the page." });
+      const res = await fetch("/api/config/gdrive/sync", { method: "POST" });
+      if (!res.ok) throw new Error(await res.text() || `Server returned ${res.status}`);
+      setMessage({ type: "success", text: "Drive sync queued. Files in the watch directory will be checked shortly." });
+    } catch (err) {
+      setMessage({ type: "error", text: err instanceof Error ? err.message : "Could not start Drive sync." });
     } finally {
-      setRestarting(false);
+      setSyncing(false);
     }
+  }
+
+  async function handleRestore() {
+    setStartingRestore(true);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/config/gdrive/restore", { method: "POST", signal: AbortSignal.timeout(15000) });
+      if (!response.ok) throw new Error((await response.text()) || "Could not start Drive restore.");
+      setRestore(await response.json());
+      setMessage({ type: "success", text: "Restoring missing files from Drive in the background. Existing local files are kept." });
+    } catch (error) {
+      setMessage({ type: "error", text: error instanceof Error ? error.message : "Could not start Drive restore." });
+    } finally { setStartingRestore(false); }
   }
 
   // When connecting becomes false and authorized, show success
@@ -233,6 +314,7 @@ export function GDriveSettings() {
                 </div>
                 <button
                   type="button"
+                  role="switch" aria-label="Enable Google Drive" aria-checked={config.enabled}
                   onClick={() => updateField("enabled", !config.enabled)}
                   className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${config.enabled ? "bg-blue-600" : "bg-gray-700"}`}
                 >
@@ -256,6 +338,15 @@ export function GDriveSettings() {
                         <div className="text-xs text-emerald-400">Connected</div>
                       </div>
                     </div>
+                    <div className="flex items-center gap-2">
+                    <button type="button" onClick={handleSync} disabled={syncing || !config.enabled}
+                      className="text-xs text-blue-300 hover:text-blue-200 disabled:opacity-50 px-3 py-1.5 rounded-lg border border-blue-800">
+                      {syncing ? "Queuing..." : "Sync now"}
+                    </button>
+                    <button type="button" onClick={handleRestore} disabled={restoring}
+                      className="text-xs text-blue-300 hover:text-blue-200 disabled:opacity-50 px-3 py-1.5 rounded-lg border border-blue-800">
+                      {restoring ? "Restoring…" : "Restore from Drive"}
+                    </button>
                     <button
                       type="button"
                       onClick={handleDisconnect}
@@ -263,6 +354,7 @@ export function GDriveSettings() {
                     >
                       Disconnect
                     </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="flex items-center justify-between">
@@ -275,14 +367,14 @@ export function GDriveSettings() {
                       <div>
                         <div className="text-sm text-gray-300">No account connected</div>
                         <div className="text-xs text-gray-500">
-                          {connecting ? "Waiting for authorization..." : "Click to authorize with Google"}
+                          {connecting ? "Waiting for authorization..." : "Choose your Google account to connect"}
                         </div>
                       </div>
                     </div>
                     <button
                       type="button"
                       onClick={handleConnect}
-                      disabled={connecting || !authStatus.configured}
+                      disabled={connecting || saving || !config.client_id.trim() || (!config.client_secret.trim() && !secretSaved)}
                       className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
                     >
                       {connecting ? (
@@ -307,35 +399,64 @@ export function GDriveSettings() {
                     </button>
                   </div>
                 )}
-                {!authStatus.configured && (
-                  <p className="text-xs text-amber-400">Save config first to enable Connect button.</p>
+                {!authStatus.authorized && <div className="text-xs text-gray-400 space-y-2">
+                  <button type="button" disabled className="rounded-lg border border-gray-700 px-3 py-1.5 opacity-50">Restore from Drive</button>
+                  <p>Connect Google Drive to restore missing files from your old server.</p>
+                </div>}
+                {authStatus.authorized && <p className="text-xs text-gray-400">Restore downloads missing files into the watch folder. Existing local files are kept. {config.parent_folder_id ? "Uses your saved Drive folder." : "Uses CNC uploads in Drive root (files marked SHA256)."} Restored copies stay local even with Delete After Upload enabled.</p>}
+                {restore && restore.status !== "idle" && <div role="status" aria-live="polite" className="text-xs text-gray-300">
+                  <p>Restore: {restore.status.replaceAll("_", " ")} · {restore.restored} restored · {restore.skipped} skipped · {restore.failed} failed</p>
+                  {restore.error && <p className="text-amber-300">{restore.error}</p>}
+                </div>}
+                {callbackGuidance && !authStatus.authorized && (
+                  <div role="status" className="rounded-lg border border-blue-800/70 bg-blue-950/30 p-3 text-xs text-blue-200 space-y-1">
+                    <p>Google returns through the fixed address <code className="text-blue-100">{callbackGuidance.savedOrigin}</code>.</p>
+                    <p>Keep CNC Manager open. This address stays the same when the dashboard port or server changes.</p>
+                  </div>
+                )}
+                {secretSaved && !callbackGuidance && <p className="text-xs text-gray-400">Your saved Google connection settings are ready. Click Connect and approve in Google.</p>}
+                {(!config.client_id.trim() || (!config.client_secret.trim() && !secretSaved)) && (
+                  <p className="text-xs text-amber-400">Enter your OAuth Client ID and Secret below. Connect saves and applies the settings automatically.</p>
                 )}
               </div>
 
+              {connecting && <button type="button" onClick={() => { setConnecting(false); setMessage(null); }} className="text-xs text-gray-400">Cancel waiting</button>}
+
+              <details open={advancedOpen} onToggle={event => setAdvancedOpen(event.currentTarget.open)} className="rounded-lg border border-gray-700 p-3">
+                <summary className="cursor-pointer text-sm text-gray-300">Advanced settings</summary>
+                <div className="space-y-4 pt-4">
               {/* Config fields */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-gray-300 mb-1.5">Watch Directory</label>
-                  <input type="text" className={inputClass} value={config.watch_dir}
+                  <label htmlFor="drive-watch_dir" className="block text-xs font-medium text-gray-300 mb-1.5">Watch Directory</label>
+                  <input type="text" className={inputClass} id="drive-watch_dir" value={config.watch_dir}
                     onChange={(e) => updateField("watch_dir", e.target.value)} placeholder="~/merged" />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-gray-300 mb-1.5">Upload Interval</label>
-                  <input type="text" className={inputClass} value={config.upload_interval}
+                  <label htmlFor="drive-upload_interval" className="block text-xs font-medium text-gray-300 mb-1.5">Upload Interval</label>
+                  <input type="text" className={inputClass} id="drive-upload_interval" value={config.upload_interval}
                     onChange={(e) => updateField("upload_interval", e.target.value)} placeholder="30s" />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-gray-300 mb-1.5">OAuth Client ID</label>
-                  <input type="text" className={`${inputClass} font-mono text-xs`} value={config.client_id}
-                    onChange={(e) => updateField("client_id", e.target.value)} placeholder="xxxxx.apps.googleusercontent.com" />
+                  <label htmlFor="drive-client_id" className="block text-xs font-medium text-gray-300 mb-1.5">OAuth Client ID</label>
+                  <input type="text" className={`${inputClass} font-mono text-xs`} id="drive-client_id" value={config.client_id}
+                    onChange={(e) => { updateField("client_id", e.target.value); setSecretSaved(false); }} placeholder="xxxxx.apps.googleusercontent.com" />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-gray-300 mb-1.5">OAuth Client Secret</label>
-                  <input type="password" className={`${inputClass} font-mono text-xs`} value={config.client_secret}
-                    onChange={(e) => updateField("client_secret", e.target.value)} placeholder="GOCSPX-..." />
+                  <label htmlFor="drive-client_secret" className="block text-xs font-medium text-gray-300 mb-1.5">OAuth Client Secret</label>
+                  <input type="password" className={`${inputClass} font-mono text-xs`} id="drive-client_secret" value={config.client_secret}
+                    onChange={(e) => updateField("client_secret", e.target.value)} placeholder={secretSaved ? "Saved secret — leave blank to keep" : "GOCSPX-..."} />
+                </div>
+
+                <div className="md:col-span-2">
+                  <label htmlFor="drive-redirect" className="block text-xs font-medium text-gray-300 mb-1.5">OAuth Redirect URL</label>
+                  <input id="drive-redirect" type="url" className={inputClass} value={config.redirect_url}
+                    onChange={(e) => updateField("redirect_url", e.target.value)} />
+                  <p className="text-xs text-gray-400 mt-1">Add this exact URL to your OAuth client’s Authorized redirect URIs in Google Cloud. Enable the Google Drive API and add your Google account as a test user if the app is in Testing.</p>
+                  <p className="text-xs text-gray-400 mt-1">For HTTP, open the dashboard through your localhost SSH tunnel before connecting. Public callbacks require an HTTPS domain.</p>
                 </div>
 
                 <div className="md:col-span-2">
@@ -354,12 +475,17 @@ export function GDriveSettings() {
                 </div>
                 <button
                   type="button"
+                  role="switch" aria-label="Delete After Upload" aria-checked={config.delete_after_upload}
                   onClick={() => updateField("delete_after_upload", !config.delete_after_upload)}
                   className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${config.delete_after_upload ? "bg-blue-600" : "bg-gray-700"}`}
                 >
                   <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${config.delete_after_upload ? "translate-x-6" : "translate-x-1"}`} />
                 </button>
               </div>
+
+                <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400">Manage Google credentials →</a>
+                </div>
+              </details>
 
               {/* Message */}
               {message && (
@@ -374,12 +500,8 @@ export function GDriveSettings() {
 
               {/* Actions */}
               <div className="flex items-center justify-between pt-1">
-                <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer"
-                  className="text-xs text-blue-400 hover:text-blue-300 transition-colors">
-                  Manage credentials →
-                </a>
-                <div className="flex items-center gap-2">
-                  <button type="button" onClick={handleSave} disabled={saving}
+                    <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => void handleSave()} disabled={saving || connecting}
                     className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors">
                     {saving ? (
                       <><svg className="animate-spin h-3.5 w-3.5" fill="none" viewBox="0 0 24 24">
@@ -389,19 +511,7 @@ export function GDriveSettings() {
                     ) : "Save"}
                   </button>
 
-                  <button type="button" onClick={handleRestart} disabled={restarting}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors">
-                    {restarting ? (
-                      <><svg className="animate-spin h-3.5 w-3.5" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-                      </svg>Restarting...</>
-                    ) : (
-                      <><svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>Restart Server</>
-                    )}
-                  </button>
+
                 </div>
               </div>
 

@@ -1,0 +1,176 @@
+{
+  "release": "cms-runtime-1792918948",
+  "production": {
+    "release": "cms-runtime-1792918948",
+    "default_checks": 7,
+    "previous_templates_preserved": true,
+    "processor_paused": true,
+    "processor_counts": {
+      "completed": 0,
+      "failed": 0,
+      "interrupted": 7,
+      "queued": 0,
+      "running": 0
+    },
+    "program_versions_preserved": true,
+    "workers_online": 7,
+    "ui_default_and_download": "matched",
+    "authenticated_api": 200,
+    "unauthenticated_api": 401,
+    "rollback": "/opt/cnc-controller/releases/cms-runtime-1792918948/rollback",
+    "private_tools_accessed": false,
+    "sha256": {
+      "cnc-server": "33e478514c0bcccd8176c0c2632ff6673478c55bff2ee3a44184a8aa907c1e73",
+      "cnc-worker": "c95318ab13395bc909b640841f0c30851cac383314fb01732717ea2c75978113",
+      "cnc-processor": "46121e7401228df336790316d4b184809f0b5c643f2e0e1bf312dd0d5934796b",
+      "cnc-enum": "8d31860754acd5c0711b6428c7feeda41cd16d8568cb441ddb6dd26ac8c19ee2"
+    },
+    "services": "active",
+    "running_controller_hashes": "matched",
+    "worker_download_hash": "matched",
+    "workers_idle": true,
+    "browser_default_verified": true,
+    "templates_persisted": true
+  },
+  "worker_verification": [
+    {
+      "worker": "cnc-linode-worker-2",
+      "worker_sha256": "c95318ab13395bc909b640841f0c30851cac383314fb01732717ea2c75978113",
+      "scanner_sha256": "8d31860754acd5c0711b6428c7feeda41cd16d8568cb441ddb6dd26ac8c19ee2",
+      "rollback": "/opt/cnc/rollouts/cms-runtime-1792918948",
+      "drain_preserved": true,
+      "private_tools_accessed": false
+    },
+    {
+      "worker": "cnc-linode-worker-3",
+      "worker_sha256": "c95318ab13395bc909b640841f0c30851cac383314fb01732717ea2c75978113",
+      "scanner_sha256": "8d31860754acd5c0711b6428c7feeda41cd16d8568cb441ddb6dd26ac8c19ee2",
+      "rollback": "/opt/cnc/rollouts/cms-runtime-1792918948",
+      "drain_preserved": true,
+      "private_tools_accessed": false
+    },
+    {
+      "worker": "cnc-linode-worker-4",
+      "worker_sha256": "c95318ab13395bc909b640841f0c30851cac383314fb01732717ea2c75978113",
+      "scanner_sha256": "8d31860754acd5c0711b6428c7feeda41cd16d8568cb441ddb6dd26ac8c19ee2",
+      "rollback": "/opt/cnc/rollouts/cms-runtime-1792918948",
+      "drain_preserved": true,
+      "private_tools_accessed": false
+    },
+    {
+      "worker": "cnc-linode-worker-5",
+      "worker_sha256": "c95318ab13395bc909b640841f0c30851cac383314fb01732717ea2c75978113",
+      "scanner_sha256": "8d31860754acd5c0711b6428c7feeda41cd16d8568cb441ddb6dd26ac8c19ee2",
+      "rollback": "/opt/cnc/rollouts/cms-runtime-1792918948",
+      "drain_preserved": true,
+      "private_tools_accessed": false
+    },
+    {
+      "worker": "cnc-linode-worker-6",
+      "worker_sha256": "c95318ab13395bc909b640841f0c30851cac383314fb01732717ea2c75978113",
+      "scanner_sha256": "8d31860754acd5c0711b6428c7feeda41cd16d8568cb441ddb6dd26ac8c19ee2",
+      "rollback": "/opt/cnc/rollouts/cms-runtime-1792918948",
+      "drain_preserved": true,
+      "private_tools_accessed": false
+    },
+    {
+      "worker": "cnc-linode-worker-7",
+      "worker_sha256": "c95318ab13395bc909b640841f0c30851cac383314fb01732717ea2c75978113",
+      "scanner_sha256": "8d31860754acd5c0711b6428c7feeda41cd16d8568cb441ddb6dd26ac8c19ee2",
+      "rollback": "/opt/cnc/rollouts/cms-runtime-1792918948",
+      "drain_preserved": true,
+      "private_tools_accessed": false
+    },
+    {
+      "worker": "cnc-linode-worker-8",
+      "worker_sha256": "c95318ab13395bc909b640841f0c30851cac383314fb01732717ea2c75978113",
+      "scanner_sha256": "8d31860754acd5c0711b6428c7feeda41cd16d8568cb441ddb6dd26ac8c19ee2",
+      "rollback": "/opt/cnc/rollouts/cms-runtime-1792918948",
+      "drain_preserved": true,
+      "private_tools_accessed": false
+    }
+  ],
+  "dummy_reports": {
+    "dummy-local-final.json": {
+      "scanner_sha256": "c9b1a4ade6bd35fd97ec10c2106e8fde14ecbcbe469e28833590da3913b0e463",
+      "default_checks": 7,
+      "loopback_only": true,
+      "runs": [
+        {
+          "pass_number": 1,
+          "fixture_sites": 29,
+          "input_lines": 58,
+          "matched_records": 17,
+          "php_version_rows": 9,
+          "negative_controls": "passed",
+          "exact_exports": true
+        },
+        {
+          "pass_number": 2,
+          "fixture_sites": 29,
+          "input_lines": 58,
+          "matched_records": 17,
+          "php_version_rows": 9,
+          "negative_controls": "passed",
+          "exact_exports": true
+        }
+      ],
+      "passed": true
+    },
+    "dummy-linux.json": {
+      "scanner_sha256": "8d31860754acd5c0711b6428c7feeda41cd16d8568cb441ddb6dd26ac8c19ee2",
+      "default_checks": 7,
+      "loopback_only": true,
+      "runs": [
+        {
+          "pass_number": 1,
+          "fixture_sites": 29,
+          "input_lines": 58,
+          "matched_records": 17,
+          "php_version_rows": 9,
+          "negative_controls": "passed",
+          "exact_exports": true
+        },
+        {
+          "pass_number": 2,
+          "fixture_sites": 29,
+          "input_lines": 58,
+          "matched_records": 17,
+          "php_version_rows": 9,
+          "negative_controls": "passed",
+          "exact_exports": true
+        }
+      ],
+      "passed": true
+    },
+    "dummy-installed-worker.json": {
+      "scanner_sha256": "8d31860754acd5c0711b6428c7feeda41cd16d8568cb441ddb6dd26ac8c19ee2",
+      "default_checks": 7,
+      "loopback_only": true,
+      "runs": [
+        {
+          "pass_number": 1,
+          "fixture_sites": 29,
+          "input_lines": 58,
+          "matched_records": 17,
+          "php_version_rows": 9,
+          "negative_controls": "passed",
+          "exact_exports": true
+        },
+        {
+          "pass_number": 2,
+          "fixture_sites": 29,
+          "input_lines": 58,
+          "matched_records": 17,
+          "php_version_rows": 9,
+          "negative_controls": "passed",
+          "exact_exports": true
+        }
+      ],
+      "passed": true
+    }
+  },
+  "browser_default_verified": true,
+  "screenshot": "cms-runtime-production.png",
+  "private_tools_accessed": false
+}

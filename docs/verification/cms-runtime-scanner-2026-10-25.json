@@ -1,0 +1,26 @@
+{
+  "scanner_sha256": "c9b1a4ade6bd35fd97ec10c2106e8fde14ecbcbe469e28833590da3913b0e463",
+  "default_checks": 7,
+  "loopback_only": true,
+  "runs": [
+    {
+      "pass_number": 1,
+      "fixture_sites": 29,
+      "input_lines": 58,
+      "matched_records": 17,
+      "php_version_rows": 9,
+      "negative_controls": "passed",
+      "exact_exports": true
+    },
+    {
+      "pass_number": 2,
+      "fixture_sites": 29,
+      "input_lines": 58,
+      "matched_records": 17,
+      "php_version_rows": 9,
+      "negative_controls": "passed",
+      "exact_exports": true
+    }
+  ],
+  "passed": true
+}

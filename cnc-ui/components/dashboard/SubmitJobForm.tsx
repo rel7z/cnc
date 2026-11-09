@@ -183,7 +183,7 @@ const spreadDefaults: SpreadFields = {
   input_file: "",
   workers: "",
   timeout_seconds: "300",
-  no_timeout: false,
+  no_timeout: true,
   output_file: "",
 };
 
@@ -309,7 +309,7 @@ const broadcastDefaults: BroadcastFields = {
   name: "",
   command: "",
   timeout_seconds: "300",
-  no_timeout: false,
+  no_timeout: true,
   output_file: "",
 };
 
@@ -401,6 +401,8 @@ function BroadcastForm({
 // ── Tools form ────────────────────────────────────────────────────────────────
 
 interface ToolFields {
+  auto_concurrency: boolean;
+  timeout: string;
   tool_id: string;
   input_file: string;
   output_file: string;
@@ -423,9 +425,11 @@ function ToolForm({
   const [loadingTools, setLoadingTools] = useState(true);
   const [form, setForm] = useState<ToolFields>({
     tool_id: "cms-scan",
+    auto_concurrency: true,
+    timeout: "10",
     input_file: "/root/file/x.txt",
     output_file: "x.txt",
-    threads: "50",
+    threads: "256",
     extra_args: "",
     wp_plugins: "",
     joomla_exts: "",
@@ -457,12 +461,14 @@ function ToolForm({
 
   const selectedTool = tools.find((t) => t.id === form.tool_id);
   const isEnumTool = form.tool_id === "enum";
+  const isScanner = isEnumTool || form.tool_id === "cms-scan";
 
   const getCommandPreview = () => {
     const exec = selectedTool?.executable || form.tool_id || "tool";
     let cmd = exec;
     if (form.input_file) cmd += ` -l ${form.input_file}`;
     if (form.threads) cmd += ` -t ${form.threads}`;
+    if (isScanner) cmd += ` -auto-concurrency=${form.auto_concurrency} -timeout ${form.timeout}s`;
     if (isEnumTool && form.wp_plugins) cmd += ` -wp-plugins /tmp/cnc_wp_plugins.txt`;
     if (isEnumTool && form.joomla_exts) cmd += ` -joomla-exts /tmp/cnc_joomla_exts.txt`;
     if (form.extra_args) cmd += ` ${form.extra_args}`;
@@ -500,7 +506,7 @@ function ToolForm({
       </Field>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Field
+        {isScanner ? <p className="self-center text-xs text-gray-400">Results publish live to automatic CMS/component files. Unknown, blocked, and errors are reported separately.</p> : <Field
           label="Watcher Output Filename"
           hint="Destination in Google Drive watcher folder (auto-synced & deduplicated)."
         >
@@ -513,9 +519,10 @@ function ToolForm({
           />
         </Field>
 
+        }
         <Field
-          label="Threads (Concurrency)"
-          hint="Number of concurrent threads (-t flag)."
+          label={isScanner ? "Maximum concurrent requests" : "Threads (Concurrency)"}
+          hint={isScanner ? "Automatic tuning stays within this limit and the worker budget." : "Number of concurrent threads (-t flag)."}
         >
           <input
             type="number"
@@ -528,7 +535,8 @@ function ToolForm({
         </Field>
       </div>
 
-      <Field
+      {isScanner && <div className="grid gap-3 md:grid-cols-2"><label className="text-sm text-gray-300"><input type="checkbox" checked={form.auto_concurrency} onChange={e=>set("auto_concurrency",e.target.checked)}/> Automatic concurrency</label><Field label="Request timeout (seconds)" hint="1–120 seconds; default 10"><input aria-label="CMS request timeout" type="number" min={1} max={120} className={inputClass} value={form.timeout} onChange={e=>set("timeout",e.target.value)}/></Field></div>}
+      {!isEnumTool && <Field
         label="Extra Arguments"
         hint="Optional additional arguments to pass to the tool."
       >
@@ -541,6 +549,7 @@ function ToolForm({
         />
       </Field>
 
+      }
       {/* ── Enum-specific wordlist inputs ─────────────────────────────── */}
       {isEnumTool && (
         <div className="space-y-4 rounded-xl border border-violet-800/40 bg-violet-950/20 p-4">
@@ -688,15 +697,17 @@ export function SubmitJobForm() {
     setSubmitting(true);
     setError(null);
 
-    const threadsNum = parseInt(fields.threads, 10) || 50;
+    const isScanner=fields.tool_id==="cms-scan"||fields.tool_id==="enum";
+    const threadsNum = parseInt(fields.threads, 10) || (isScanner?256:50);
 
     const body: Record<string, unknown> = {
       tool_id: fields.tool_id || "cms-scan",
       input_file: fields.input_file,
-      output_file: fields.output_file,
+      output_file: isScanner ? "" : fields.output_file,
       options: {
         threads: threadsNum,
-        extra_args: fields.extra_args,
+        ...(fields.tool_id === "enum" ? {} : {extra_args: fields.extra_args}),
+        ...(isScanner ? {auto_concurrency:fields.auto_concurrency,timeout:Number(fields.timeout)} : {}),
       },
     };
 

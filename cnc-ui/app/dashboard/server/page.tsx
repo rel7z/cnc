@@ -1,5 +1,7 @@
 "use client";
 
+import { LinodeIntegration } from "@/components/dashboard/LinodeIntegration";
+import { AWSIntegration } from "@/components/dashboard/AWSIntegration";
 import { useState } from "react";
 import { Header } from "@/components/dashboard/Header";
 import { ServerTerminal } from "@/components/dashboard/ServerTerminal";
@@ -8,7 +10,7 @@ import { Terminal, Folder, RefreshCw } from "lucide-react";
 import { UpdateServerModal } from "@/components/dashboard/UpdateServerModal";
 
 export default function ServerPage() {
-  const [activeTab, setActiveTab] = useState<"terminal" | "files">("terminal");
+  const [activeTab, setActiveTab] = useState<"terminal" | "files" | "linode" | "aws">("terminal");
   const [showUpdateModal, setShowUpdateModal] = useState(false);
 
   return (
@@ -41,6 +43,8 @@ export default function ServerPage() {
               <Folder className="w-4 h-4" />
               File Manager
             </button>
+            <button onClick={() => setActiveTab("linode")} className="px-4 py-2 rounded-md text-sm text-gray-300 hover:bg-gray-800">Linode</button>
+            <button onClick={() => setActiveTab("aws")} className="px-4 py-2 rounded-md text-sm text-gray-300 hover:bg-gray-800">AWS</button>
           </div>
 
           <button
@@ -60,7 +64,7 @@ export default function ServerPage() {
 
         {/* Content Area */}
         <div className="flex-1 overflow-hidden flex flex-col border border-gray-800 rounded-xl bg-gray-900 shadow-xl">
-          {activeTab === "terminal" ? <ServerTerminal /> : <FileManager />}
+          {activeTab === "terminal" ? <ServerTerminal /> : activeTab === "files" ? <FileManager /> : activeTab === "linode" ? <LinodeIntegration /> : <AWSIntegration />}
         </div>
       </div>
     </div>

@@ -1,3 +1,4 @@
+import type { NetworkSnapshot } from "@/components/dashboard/WorkerNetwork";
 export interface Stats {
   workers_total: number;
   workers_online: number;
@@ -20,16 +21,21 @@ export type TaskStatus =
   | "assigned"
   | "running"
   | "completed"
+  | "completed_with_errors"
+  | "cancelled"
   | "failed";
 export type JobMode = "spread" | "broadcast" | "server";
 export type JobStatus =
   | "pending"
   | "running"
   | "completed"
+  | "completed_with_errors"
   | "cancelled"
   | "failed";
 
 export interface Worker {
+  resources?: { network?: NetworkSnapshot; cpu_percent: number; cpu_cores: number; available_memory_mb: number; total_memory_mb: number };
+  enum_requests?: Record<string, { active: number; queued: number; cancelled: number }>;
   id: string;
   address: string;
   status: WorkerStatus;
@@ -41,6 +47,9 @@ export interface Worker {
 }
 
 export interface Job {
+  error?: string;
+  reverse_ip_input?: { input_lines: number; domains: number; duplicate_inputs: number; invalid_inputs: number; dns_failures: number; duplicate_ips: number; skipped_ipv6: number; unique_ips: number; warnings?: string[] };
+  enum?: { actor: string; artifact_sha256: string; acknowledged_at: string };
   id: string;
   name: string;
   command: string;
@@ -73,6 +82,7 @@ export interface TaskPayload {
 }
 
 export interface Task {
+  enum_publication?: string;
   id: string;
   job_id: string;
   type: string;

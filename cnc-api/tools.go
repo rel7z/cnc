@@ -2,6 +2,7 @@ package cnc
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -10,7 +11,7 @@ var ToolsRegistry = map[string]ToolDefinition{
 	"cms-scan": {
 		ID:               "cms-scan",
 		Name:             "CMS Scanner",
-		Description:      "Detects CMS platform (WordPress, Joomla, Drupal…) for each target. Results per-CMS to watcher folder.",
+		Description:      "Detects CMS platform (WordPress, Joomla, Drupal…) for each target. Results per-CMS to watcher folder. Choose CMS & PHP Version Scanner for version checks.",
 		Executable:       "cms-scan",
 		Scope:            "worker",
 		DefaultMode:      "spread",
@@ -18,12 +19,16 @@ var ToolsRegistry = map[string]ToolDefinition{
 		InputLabel:       "Target Domains File (Worker Path)",
 		InputPlaceholder: "/root/file/domains.txt",
 		Options: []ToolOption{
+			{Name: "auto_concurrency", Flag: "-auto-concurrency", Description: "Automatically tune concurrency", Type: "boolean", Default: true},
 			{
 				Name:        "threads",
 				Flag:        "-t",
-				Description: "Number of concurrent threads",
+				Description: "Maximum concurrent requests (1–256)",
 				Type:        "number",
-				Default:     50,
+				Default:     256,
+			},
+			{
+				Name: "timeout", Flag: "-timeout", Description: "HTTP timeout in seconds (1–120)", Type: "number", Default: 10,
 			},
 			{
 				Name:        "extra_args",
@@ -36,8 +41,8 @@ var ToolsRegistry = map[string]ToolDefinition{
 	},
 	"enum": {
 		ID:               "enum",
-		Name:             "Smart CMS & Deep Enumerator",
-		Description:      "Auto-cascading pipeline: detects WordPress → plugin scan, Joomla → extension scan, Unknown → 3rd-party admin panel enum. Results piped to watcher folder.",
+		Name:             "CMS & PHP Version Scanner",
+		Description:      "Scan CMS, plugins and disclosed PHP runtime versions using saved version checks. PHP works independently of CMS classification.",
 		Executable:       "cnc-enum",
 		Scope:            "worker",
 		DefaultMode:      "spread",
@@ -63,38 +68,33 @@ var ToolsRegistry = map[string]ToolDefinition{
 			},
 		},
 		Options: []ToolOption{
+			{Name: "auto_concurrency", Flag: "-auto-concurrency", Description: "Automatically tune concurrency", Type: "boolean", Default: true},
 			{
 				Name:        "threads",
 				Flag:        "-t",
-				Description: "Number of concurrent threads per scanning phase",
+				Description: "Maximum concurrent requests (1–256)",
 				Type:        "number",
-				Default:     50,
+				Default:     256,
 			},
 			{
 				Name:        "timeout",
 				Flag:        "-timeout",
-				Description: "HTTP request timeout per probe (e.g. 10s, 15s)",
-				Type:        "string",
-				Default:     "10s",
-			},
-			{
-				Name:        "extra_args",
-				Flag:        "",
-				Description: "Additional arguments to pass to the tool",
-				Type:        "string",
-				Default:     "",
+				Description: "HTTP request timeout in seconds (1–120)",
+				Type:        "number",
+				Default:     10,
 			},
 		},
 	},
 	"reverseip-domain": {
 		ID:               "reverseip-domain",
 		Name:             "Reverse IP (ReverseIPDomain)",
-		Description:      "Fast Reverse IP lookup using reverseipdomain.com API. Server-side execution.",
+		Description:      "Reverse IP lookup using reverseipdomain.com. Load balances input across worker servers.",
 		Executable:       "reverseip-domain",
-		Scope:            "server",
+		Scope:            "worker",
+		DefaultMode:      JobModeSpread,
 		InputFlag:        "-l",
 		OutputFlag:       "-out",
-		InputLabel:       "IP Address List (Server Path)",
+		InputLabel:       "Domain / IPv4 List (auto-resolve & dedup, server path)",
 		InputPlaceholder: "/root/file/ips.txt",
 		Options: []ToolOption{
 			{
@@ -169,6 +169,25 @@ var ToolsRegistry = map[string]ToolDefinition{
 			},
 		},
 	},
+	"reverseip-dnsrift": {
+		ID:               "reverseip-dnsrift",
+		Name:             "Reverse IP (DNSRift)",
+		Description:      "DNSRift reverse IP lookup. Load balances across workers and streams unique domains to Drive.",
+		Executable:       "reverseip-dnsrift",
+		Scope:            "worker",
+		DefaultMode:      JobModeSpread,
+		InputFlag:        "-f",
+		OutputFlag:       "-o",
+		InputLabel:       "Domain / IPv4 List (auto-resolve & dedup, server path)",
+		InputPlaceholder: "/root/file/ips.txt",
+		Options: []ToolOption{
+			{Name: "limit", Flag: "-limit", Description: "Maximum domains per IP (0 uses the provider default)", Type: "number", Default: 0},
+			{Name: "threads", Flag: "-w", Description: "Concurrent requests per worker (1-32)", Type: "number", Default: 2},
+			{Name: "delay", Flag: "-delay", Description: "Minimum interval between requests per worker", Type: "string", Default: "500ms"},
+			{Name: "timeout", Flag: "-timeout", Description: "HTTP request timeout", Type: "string", Default: "20s"},
+			{Name: "retries", Flag: "-retries", Description: "Bounded retries for rate limits and transient errors", Type: "number", Default: 2},
+		},
+	},
 	"reverseip-thc": {
 		ID:               "reverseip-thc",
 		Name:             "Reverse IP (THC.org)",
@@ -178,7 +197,7 @@ var ToolsRegistry = map[string]ToolDefinition{
 		DefaultMode:      JobModeSpread,
 		InputFlag:        "-f",
 		OutputFlag:       "-o",
-		InputLabel:       "IP Address List (Server Path)",
+		InputLabel:       "Domain / IPv4 List (auto-resolve & dedup, server path)",
 		InputPlaceholder: "/root/file/ips.txt",
 		Options: []ToolOption{
 			{
@@ -315,6 +334,69 @@ var ToolsRegistry = map[string]ToolDefinition{
 			},
 		},
 	},
+	"wp-discovery": {
+		ID:               "wp-discovery",
+		Name:             "WordPress Discovery (Aggressive)",
+		Description:      "Aggressively discover WordPress sites worldwide using multiple methods: direct scanning, reverse DNS, CIDR ranges, CT logs. Max resources, high concurrency (2000+ threads).",
+		Executable:       "wp-discovery",
+		Scope:            "server",
+		DefaultMode:      "broadcast",
+		InputFlag:        "-input",
+		OutputFlag:       "-out",
+		InputLabel:       "Targets (Domains/IPs/CIDRs, server path)",
+		InputPlaceholder: "/root/file/targets.txt",
+		Options: []ToolOption{
+			{
+				Name:        "threads",
+				Flag:        "-t",
+				Description: "Concurrent threads (aggressive: 1000-5000, default: 2000)",
+				Type:        "number",
+				Default:     2000,
+			},
+			{
+				Name:        "timeout",
+				Flag:        "-timeout",
+				Description: "HTTP timeout in seconds (1–30)",
+				Type:        "number",
+				Default:     5,
+			},
+			{
+				Name:        "ports",
+				Flag:        "-ports",
+				Description: "Ports to scan (comma-separated)",
+				Type:        "string",
+				Default:     "80,443,8080,8888,8081",
+			},
+			{
+				Name:        "ct_logs",
+				Flag:        "-ct",
+				Description: "Enable Certificate Transparency log scanning",
+				Type:        "boolean",
+				Default:     true,
+			},
+			{
+				Name:        "cidr_scan",
+				Flag:        "-cidr",
+				Description: "Enable aggressive CIDR/IP range scanning",
+				Type:        "boolean",
+				Default:     false,
+			},
+			{
+				Name:        "dns_reverse",
+				Flag:        "-dns-rev",
+				Description: "Enable aggressive reverse DNS lookup",
+				Type:        "boolean",
+				Default:     true,
+			},
+			{
+				Name:        "level",
+				Flag:        "-level",
+				Description: "Aggressiveness level: low/medium/high/max",
+				Type:        "string",
+				Default:     "max",
+			},
+		},
+	},
 }
 
 // GenerateToolCommand constructs the command string for a tool based on the provided inputs.
@@ -347,6 +429,19 @@ func GenerateToolCommand(toolID string, inputFile string, options map[string]int
 		}
 	}
 
+	if toolID == "cms-scan" {
+		if value, ok := options["threads"]; ok {
+			n, e := strconv.Atoi(fmt.Sprint(value))
+			if e != nil || n < 1 || n > 256 {
+				return "", fmt.Errorf("threads must be 1–256")
+			}
+		}
+		if value, ok := options["auto_concurrency"]; ok {
+			if _, valid := optionBool(value); !valid {
+				return "", fmt.Errorf("auto_concurrency must be boolean")
+			}
+		}
+	}
 	// Apply options
 	for _, optDef := range tool.Options {
 		val, ok := options[optDef.Name]
@@ -369,8 +464,25 @@ func GenerateToolCommand(toolID string, inputFile string, options map[string]int
 			continue
 		}
 
+		if toolID == "reverseip-dnsrift" && optDef.Name == "limit" {
+			limit, err := strconv.Atoi(fmt.Sprint(val))
+			if err != nil || limit < 0 || limit > 100000 {
+				return "", fmt.Errorf("DNSRift limit must be between 0 and 100000")
+			}
+			if limit == 0 {
+				continue
+			}
+		}
 		if optDef.Flag != "" {
-			cmdParts = append(cmdParts, optDef.Flag, fmt.Sprintf("%v", val))
+			if toolID == "cms-scan" && optDef.Name == "timeout" {
+				n, err := strconv.Atoi(fmt.Sprint(val))
+				if err != nil || n < 1 || n > 120 {
+					return "", fmt.Errorf("timeout must be 1–120 seconds")
+				}
+				cmdParts = append(cmdParts, optDef.Flag, strconv.Itoa(n)+"s")
+			} else {
+				cmdParts = append(cmdParts, optDef.Flag, fmt.Sprintf("%v", val))
+			}
 		} else {
 			// No flag (e.g. extra_args), just append the value
 			valStr := fmt.Sprintf("%v", val)

@@ -1,0 +1,29 @@
+{
+  "release": "5de8855b6abe5a10",
+  "payload_sha256": "5de8855b6abe5a1071259caaefc651c03dca16c9acc5425eb776422cdc104dd3",
+  "worker_agent_sha256": "f9407fba684a566494581d8f97e48fb8837f65c09d1879e12fd08a7717bcc617",
+  "source_hashes": {
+    "cnc-api/linode.go": "1dcd84dcea65fb6924ad9c1b7984f62da4f6ba5082ed3a37b7beb1800ea791f3",
+    "cnc-api/dork_capacity.go": "d99b4acdcfdf6992d0d054d4a24cacc6112e68831219327610c4edda525a79fa",
+    "cnc-api/dork_capacity_test.go": "be1a7b221ae8953084439591475e0306088f7e7c7e4cab68314d23dfe69f6dca",
+    "cnc-api/gdrive_force_sync.go": "0834d18a0d4089de1a775388083289bc6ce6743124b633d193a76d2af086a5ac",
+    "cnc-api/gdrive_force_sync_test.go": "c5c3a442383e97f71c774ac1e8a932b32a74028f206d595a29ac5172f53d2584",
+    "cnc-api/aws.go": "eb14f13539074db5eeaccb27c21c18396b7789ff3a28e805a236fade6cb87788",
+    "cnc-api/worker_tools_package.go": "e94df5f9eaf30d79c9ae5a7318f23ddcfddff8b6a3d3af9da7c77753a2a28f47",
+    "cnc-api/worker_tools_package.py": "06a8194b245238b8eea042bd78609259e9c70dbb798903a4366c821cbfb6143b",
+    "cnc-api/worker_tools_manifest.py": "9151ac9e74e35fbee3be3a193a8dbbba688a681754a8e46f8670c5213bc74d58",
+    "cnc-api/linode_connection.go": "8dad4a3cfd3dbc5a9fcbe92098745b1f190d9b52805f9fbd6bb2d7151f5927e8",
+    "cnc-api/linode_connection_test.go": "f25e572912bd071b75747eb6460b082a00905fa27b22e08bc4eb87858fc2d29d",
+    "cnc-api/linode_network.go": "c309610908381d4401d71355be0fc62fa61bd06edf046ea49c3e0ed66d4fd66b",
+    "cnc-api/linode_network_test.go": "d700c81d237c55d35bf89ab0a565e087a25e9f5e8cfa79cc00aba81399d661db",
+    "cnc-api/linode_test.go": "7f4a7313ebebc3df7b4ae2b293d7a112933e4a90d1f69b1f4e603ab538d63af0",
+    "cnc-ui/components/dashboard/LinodeIntegration.tsx": "dfc02f6ce8eabffa5e27f1738a1316b5b517cbcac11da599808644ead3aa5793",
+    "cnc-ui/components/dashboard/LogViewerModal.tsx": "9103a62fea93b86768e914664072ec1ca74916f20a948d132bd988ad7c581582",
+    "cnc-api/task_failure.go": "334e5bbe99071afec6d4b143234eed2c8e0e7fdbd8035b0a82095b4d296de3df",
+    "cnc-api/task_failure_test.go": "a6da7d11c22ea0a7e00659014a275cf286b45a98fe5bc0d9c29c55918bb84770",
+    "cnc-api/worker_tool_test.go": "16c245435f9fff5ebbf68bb23b828cfd320161266930677468813786d345dc06",
+    "_worker_diagnostic_tail": "374b882cf9fdb36dfac130c5c6242ba1491c00f83ce6d25acde58491c63ff804"
+  },
+  "case_filter_is_per_job": true,
+  "filtered_job_id": "job_1792308432_3"
+}

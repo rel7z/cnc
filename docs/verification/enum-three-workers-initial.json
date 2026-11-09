@@ -1,0 +1,144 @@
+{
+  "workers": {
+    "cnc-aws-worker-1": {
+      "sha256": "00983150b97b68af6e092cc40dca42a9e292471cb45d645d6ae5d5ca2a1867bc",
+      "fixture": {
+        "text_files_clean": true,
+        "plugin_url_files": 2,
+        "plugin_path_urls": 2,
+        "structured_evidence_preserved": true,
+        "jsonl_not_exported": true,
+        "ordinary_login_verified": true,
+        "cpanel_separated": true,
+        "sha256": "00983150b97b68af6e092cc40dca42a9e292471cb45d645d6ae5d5ca2a1867bc"
+      },
+      "agent_restarted": false,
+      "rollback": "/opt/cnc/enum-clean-releases/7f1dd7d9b08654d7c16abedeefc75bc4caf71354/rollback",
+      "command_id": "42401d61-8f7b-453e-b9d0-17b4a1994d09"
+    },
+    "cnc-aws-worker-2": {
+      "sha256": "00983150b97b68af6e092cc40dca42a9e292471cb45d645d6ae5d5ca2a1867bc",
+      "fixture": {
+        "text_files_clean": true,
+        "plugin_url_files": 2,
+        "plugin_path_urls": 2,
+        "structured_evidence_preserved": true,
+        "jsonl_not_exported": true,
+        "ordinary_login_verified": true,
+        "cpanel_separated": true,
+        "sha256": "00983150b97b68af6e092cc40dca42a9e292471cb45d645d6ae5d5ca2a1867bc"
+      },
+      "agent_restarted": false,
+      "rollback": "/opt/cnc/enum-clean-releases/7f1dd7d9b08654d7c16abedeefc75bc4caf71354/rollback",
+      "command_id": "21e7d7ee-3903-496d-8ade-d2c63e02f1b1"
+    },
+    "cnc-aws-worker-3": {
+      "sha256": "00983150b97b68af6e092cc40dca42a9e292471cb45d645d6ae5d5ca2a1867bc",
+      "fixture": {
+        "text_files_clean": true,
+        "plugin_url_files": 2,
+        "plugin_path_urls": 2,
+        "structured_evidence_preserved": true,
+        "jsonl_not_exported": true,
+        "ordinary_login_verified": true,
+        "cpanel_separated": true,
+        "sha256": "00983150b97b68af6e092cc40dca42a9e292471cb45d645d6ae5d5ca2a1867bc"
+      },
+      "agent_restarted": false,
+      "rollback": "/opt/cnc/enum-clean-releases/7f1dd7d9b08654d7c16abedeefc75bc4caf71354/rollback",
+      "command_id": "6d90d733-2fe7-423b-8d74-f2d4d8172cdc"
+    }
+  },
+  "revision": "7f1dd7d9b08654d7c16abedeefc75bc4caf71354",
+  "build": {
+    "revision": "7f1dd7d9b08654d7c16abedeefc75bc4caf71354",
+    "old_job": "enum_d17b70696b1d829c284ac092",
+    "hashes": {
+      "cnc-enum": "00983150b97b68af6e092cc40dca42a9e292471cb45d645d6ae5d5ca2a1867bc",
+      "cnc-server": "75edb3193e0f6589af3a9e8b2582f6a15053dec5782cec1ca22d2ea3a9e28273"
+    },
+    "fixture": {
+      "text_files_clean": true,
+      "plugin_url_files": 2,
+      "plugin_path_urls": 2,
+      "structured_evidence_preserved": true,
+      "jsonl_not_exported": true,
+      "ordinary_login_verified": true,
+      "cpanel_separated": true,
+      "sha256": "00983150b97b68af6e092cc40dca42a9e292471cb45d645d6ae5d5ca2a1867bc"
+    },
+    "benchmark": {
+      "cms": {
+        "before": {
+          "seconds": 0.717,
+          "requests": 512,
+          "peak_active": 64,
+          "targets": 512,
+          "exit_code": 0
+        },
+        "after": {
+          "seconds": 0.718,
+          "requests": 512,
+          "peak_active": 64,
+          "targets": 512,
+          "exit_code": 0
+        },
+        "speedup": 1.0,
+        "same_clean_url_records": true
+      },
+      "deep": {
+        "before": {
+          "seconds": 0.705,
+          "requests": 512,
+          "peak_active": 65,
+          "targets": 64,
+          "exit_code": 0
+        },
+        "after": {
+          "seconds": 0.701,
+          "requests": 512,
+          "peak_active": 65,
+          "targets": 64,
+          "exit_code": 0
+        },
+        "speedup": 1.01,
+        "same_clean_url_records": true
+      }
+    },
+    "real_input_split": {
+      "bytes": [
+        20624081,
+        22772459,
+        22259706
+      ],
+      "input_preserved": true,
+      "lines": [
+        1101285,
+        1101285,
+        1101284
+      ],
+      "parts": 3,
+      "total_lines": 3303854
+    },
+    "tests_passed": true,
+    "rollback": "/opt/cnc/enum-clean-releases/7f1dd7d9b08654d7c16abedeefc75bc4caf71354/rollback",
+    "command_id": "c4fdf028-bf97-46a4-b7f3-59dcc44f13b9"
+  },
+  "production": {
+    "idle_only": true,
+    "jobs_cancelled": false,
+    "jobs_restarted": false,
+    "jobs_launched": false,
+    "reference_job": "enum_d17b70696b1d829c284ac092",
+    "reference_job_status": "cancelled",
+    "future_parts_for_three_workers": 3,
+    "normalized_files": [],
+    "workers_online": 3,
+    "drive_authorized": true,
+    "legacy_jsonl_archived_internally": 9,
+    "jsonl_export_disabled": true,
+    "controller_restarted": true,
+    "worker_agents_restarted": false,
+    "command_id": "6424f56a-4596-429c-bf0f-554a01cf467e"
+  }
+}

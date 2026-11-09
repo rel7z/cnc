@@ -1,0 +1,7 @@
+# template: Default CMS version checks
+#wordpress-core 1
+wordpress:core >= 6.9.0 & < 6.9.5
+wordpress:core >= 7.0.0 & < 7.0.2
+
+#translate-press
+translatepress-multilingual <= 3.3.1

@@ -1,0 +1,133 @@
+{
+  "workers": {
+    "cnc-aws-worker-1": {
+      "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818",
+      "fixture": {
+        "text_files_clean": true,
+        "plugin_url_files": 2,
+        "plugin_path_urls": 2,
+        "structured_evidence_preserved": true,
+        "jsonl_not_exported": true,
+        "ordinary_login_verified": true,
+        "cpanel_separated": true,
+        "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818"
+      },
+      "agent_restarted": false,
+      "rollback": "/opt/cnc/enum-clean-releases/c9b3270fac9002ac7b7e49d993a6f50d0bae16d7/rollback",
+      "command_id": "415a9bd1-e669-4b8a-a467-348e4c7514f4"
+    },
+    "cnc-aws-worker-2": {
+      "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818",
+      "fixture": {
+        "text_files_clean": true,
+        "plugin_url_files": 2,
+        "plugin_path_urls": 2,
+        "structured_evidence_preserved": true,
+        "jsonl_not_exported": true,
+        "ordinary_login_verified": true,
+        "cpanel_separated": true,
+        "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818"
+      },
+      "agent_restarted": false,
+      "rollback": "/opt/cnc/enum-clean-releases/c9b3270fac9002ac7b7e49d993a6f50d0bae16d7/rollback",
+      "command_id": "3e8f6619-f26b-49cb-ab59-1aa47c1f134a"
+    },
+    "cnc-aws-worker-3": {
+      "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818",
+      "fixture": {
+        "text_files_clean": true,
+        "plugin_url_files": 2,
+        "plugin_path_urls": 2,
+        "structured_evidence_preserved": true,
+        "jsonl_not_exported": true,
+        "ordinary_login_verified": true,
+        "cpanel_separated": true,
+        "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818"
+      },
+      "agent_restarted": false,
+      "rollback": "/opt/cnc/enum-clean-releases/c9b3270fac9002ac7b7e49d993a6f50d0bae16d7/rollback",
+      "command_id": "e4494d73-90d9-41ab-a1a6-2a551a989ba4"
+    }
+  },
+  "revision": "c9b3270fac9002ac7b7e49d993a6f50d0bae16d7",
+  "build": {
+    "revision": "c9b3270fac9002ac7b7e49d993a6f50d0bae16d7",
+    "old_job": "enum_d17b70696b1d829c284ac092",
+    "hashes": {
+      "cnc-enum": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818",
+      "cnc-server": "75edb3193e0f6589af3a9e8b2582f6a15053dec5782cec1ca22d2ea3a9e28273"
+    },
+    "fixture": {
+      "text_files_clean": true,
+      "plugin_url_files": 2,
+      "plugin_path_urls": 2,
+      "structured_evidence_preserved": true,
+      "jsonl_not_exported": true,
+      "ordinary_login_verified": true,
+      "cpanel_separated": true,
+      "sha256": "38fcb9399d40dc8b777eeb83c7e61ec565a7d2e61f0921207404790b7962d818"
+    },
+    "benchmark": {
+      "cms": {
+        "before": {
+          "seconds": 0.709,
+          "requests": 512,
+          "peak_active": 64,
+          "targets": 512,
+          "exit_code": 0
+        },
+        "after": {
+          "seconds": 0.711,
+          "requests": 512,
+          "peak_active": 64,
+          "targets": 512,
+          "exit_code": 0
+        },
+        "speedup": 1.0,
+        "same_clean_url_records": true
+      },
+      "deep": {
+        "before": {
+          "seconds": 0.698,
+          "requests": 512,
+          "peak_active": 64,
+          "targets": 64,
+          "exit_code": 0
+        },
+        "after": {
+          "seconds": 0.702,
+          "requests": 512,
+          "peak_active": 65,
+          "targets": 64,
+          "exit_code": 0
+        },
+        "speedup": 0.99,
+        "same_clean_url_records": true
+      }
+    },
+    "real_input_split": {
+      "bytes": [
+        20624081,
+        22772459,
+        22259706
+      ],
+      "input_preserved": true,
+      "lines": [
+        1101285,
+        1101285,
+        1101284
+      ],
+      "parts": 3,
+      "total_lines": 3303854
+    },
+    "tests_passed": true,
+    "rollback": "/opt/cnc/enum-clean-releases/c9b3270fac9002ac7b7e49d993a6f50d0bae16d7/rollback",
+    "command_id": "7fca0d17-1315-4c70-8785-953089e1dcd0"
+  },
+  "production": {
+    "scanner_only": true,
+    "services_restarted": false,
+    "jobs_cancelled": false,
+    "jobs_launched": false
+  }
+}

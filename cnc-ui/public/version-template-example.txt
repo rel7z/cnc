@@ -1,0 +1,4 @@
+# template: Plugin version checks
+# Bare folder names mean WordPress plugins.
+elementor < 3.25.0
+woocommerce >= 8.0.0 & < 9.0.0 | WooCommerce 8.x

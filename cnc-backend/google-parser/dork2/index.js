@@ -9,6 +9,7 @@ console.info = console.error;
 console.warn = console.error;
 
 import { ApifyClient } from 'apify-client';
+import { streamRun } from './stream-run.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -116,6 +117,7 @@ const seenUrls = new Set();
 
 let totalDomains = 0;
 let totalUrls = 0;
+let failedQueries = 0;
 
 // Function to extract hostname safely
 function getHostname(link) {
@@ -201,16 +203,9 @@ function saveUrl(url) {
                 };
 
                 // Run the Actor
-                const run = await client.actor('nFJndFXA5zjCTuudP').call(input);
-                const { items } = await client.dataset(run.defaultDatasetId).listItems();
-
-                if (items.length === 0) {
-                    console.error('\n[!] No results found for this query.');
-                    continue;
-                }
-
-                // Process results
-                items.forEach((item) => {
+                const run = await client.actor('nFJndFXA5zjCTuudP').start(input);
+                console.error(`[*] Apify run ${run.id}: streaming results while running`);
+                const count = await streamRun(client, run, (item) => {
                     // Handle regular search results
                     if (item.organicResults && Array.isArray(item.organicResults)) {
                         item.organicResults.forEach((result) => {
@@ -272,9 +267,11 @@ function saveUrl(url) {
                             }
                         });
                     }
-                });
+                }, { onProgress: (status) => console.error(`[*] Apify run ${run.id}: ${status}`) });
+                if (count === 0) console.error('[!] No results found for this query.');
 
             } catch (queryError) {
+                failedQueries++;
                 console.error(`\n[-] Query error for "${query}":`, queryError.message);
                 continue;
             }
@@ -287,7 +284,7 @@ function saveUrl(url) {
         ]);
 
         console.error(`\n[+] Done. ${totalDomains} unique domains discovered.`);
-        process.exit(0);
+        process.exitCode = failedQueries ? 1 : 0;
     } catch (err) {
         console.error('\n[-] Fatal error:', err.message);
         domainsStream.destroy();

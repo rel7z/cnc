@@ -10,6 +10,7 @@ The CNC server can automatically watch a folder and upload files to Google Drive
 - **Synchronous Two-Way Line Merging** - Combines remote Drive lines with new local lines, preserving order and removing duplicate lines
 - **Empty Line Filtering** - Automatically cleans out blank and whitespace-only lines during line deduplication
 - **Local File Sync** - Rewrites the local file with the merged, deduplicated content so local and Drive remain 1:1 identical
+- **Mirrored file deletion** - Removing a previously synchronized file from Drive or the watch directory removes it from the other side
 - **Deduplication & Caching** - Uses SHA256 hashes to prevent unnecessary re-uploads and re-sync loops
 - **Resume support** - Remembers synced file hashes across restarts
 - **Configurable Cleanup** - Optional local file deletion after upload (`delete_after_upload`)
@@ -72,6 +73,81 @@ Edit `server_config.json`:
 - `parent_folder_id` - (Optional) Google Drive folder ID to upload into. Leave empty to upload to root.
 - `state_file_path` - Where to store the list of uploaded file hashes
 - `delete_after_upload` - Set to `true` to delete local files after successful upload
+
+### Reconnect from a local dashboard tunnel
+
+For the AWS deployment, install the macOS tunnel once with
+`bash infra/aws/open-dashboard.sh --install`, then open
+`http://localhost:8081/dashboard`. The login agent reconnects the tunnel after
+terminal closure or network interruptions while the `cnc` AWS profile remains
+valid. If the AWS login session expires, refresh that profile and the agent
+will retry. The tunnel listens only on `127.0.0.1:8081`; its launcher and
+Session Manager plugin are stored under
+`~/Library/Application Support/CNC Dashboard Tunnel/` so macOS permits
+background access. The dashboard's Connect button uses the same origin and
+sets the callback to `http://localhost:8081/api/config/gdrive/callback`.
+Add that exact URI to the Google OAuth web client's Authorized redirect URIs
+once. The **Sync now** button queues a scan of the watch directory after the
+Google account is connected.
+
+The Linode deployment has a separate tunnel helper below.
+
+The hosted dashboard is served by the CNC web front end, while port 8080 is the
+private CNC API. Do not open `http://localhost:8080/dashboard`; that address
+refers to a service on your own computer. From this repository, run:
+
+```sh
+./infra/linode/connect-drive-tunnel.sh
+```
+
+The helper starts a persistent background tunnel, verifies it, and opens
+`http://localhost:8081/drive-local-start`. That route places the one-time OAuth
+state cookie on the callback origin and continues directly to Google. You can
+close the terminal; rerunning the command safely reuses a healthy tunnel. No
+localhost dashboard login or duplicate settings form is required. The start
+route is available only through the SSH tunnel; the public server returns HTTP
+403. Stop the tunnel later with:
+
+```sh
+./infra/linode/connect-drive-tunnel.sh --stop
+```
+
+On macOS, install the tunnel as a supervised login service so it reconnects
+after SSH, Wi-Fi, sleep, or network interruptions:
+
+```sh
+./infra/linode/connect-drive-tunnel.sh --install
+```
+
+The service listens only on `127.0.0.1:8081`. Remove it with
+`./infra/linode/connect-drive-tunnel.sh --uninstall`. macOS login agents cannot
+read SSH keys under `Documents`, so installation places a private tunnel-only
+copy under `~/.ssh/cnc-drive-tunnel` with owner-only permissions. Uninstalling
+removes that copy.
+
+The server uses `http://localhost:8081/api/config/gdrive/callback`. If a Google
+Web application client has never used that callback, Google may require that
+exact URI once in its Authorized redirect URIs. The CNC dashboard does not
+need the URI entered again.
+
+### Mirrored file deletion
+
+For files CNC has successfully synchronized, deleting the Drive copy moves the
+matching file out of the watch directory, and deleting the local watch-directory
+copy moves all matching Drive copies to Google Drive Trash. Local files removed
+because their Drive copy was deleted are kept under the hidden
+`.cnc-deleted/` recovery folder inside the watch directory. Drive deletions are
+recoverable from Drive Trash.
+
+The uploader tracks synchronized filenames in its state file. Existing hash-list
+state is migrated automatically. Files that CNC has never synchronized are not
+deleted by this mirror. With `delete_after_upload: true`, a missing local copy is
+expected, so that setting keeps the Drive copy and disables local-delete
+propagation for it.
+
+This mirrors whole-file deletion. Text file contents continue to use the
+existing append-and-deduplicate merge behavior; deleting individual lines is
+not treated as a file deletion.
 
 ### 4. Get Google Drive Folder ID (Optional)
 
