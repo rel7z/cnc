@@ -17,6 +17,10 @@ if not (root / 'generator-state.db').exists():
     (root / 'paused').touch(mode=0o600, exist_ok=True)
 for name in ('wordpress_generator.py', 'wordpress_ct.py', 'wordpress_bulk.py', 'wordpress_output.py', 'wordpress_restock.py', 'wordpress_reverse.py','wordpress_sources.py','wordpress_index.py','install-wordpress-index.py'):
     shutil.copy2(source / name, root / name)
+# Reject mixed reader/source releases before activating the service.
+subprocess.run([sys.executable, '-c',
+                'import sys; sys.path.insert(0, sys.argv[1]); import wordpress_sources as s; '
+                'assert callable(s.collection_records) and callable(s.recent_crawls)', str(root)], check=True)
 if not (root / 'candidates.db').exists():
     subprocess.run([sys.executable, root / 'wordpress_bulk.py', root / 'candidates.db',
                     'import', 'archive', '/dev/null', '--format', 'txt'], check=True)
