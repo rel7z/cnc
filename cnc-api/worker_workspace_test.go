@@ -67,6 +67,8 @@ func TestShellWorkspaceConcurrentInputsAndOutputs(t *testing.T) {
 	}))
 	defer server.Close()
 	agent, wire := workspaceAgent(t)
+	agent.config.SpreadWorkspaceRoot = t.TempDir()
+	t.Setenv("SPREAD_TEST_ROOT", agent.config.SpreadWorkspaceRoot)
 	agent.serverHTTPAddr = server.URL
 	var wg sync.WaitGroup
 	for _, id := range []string{"first", "second"} {
@@ -74,7 +76,7 @@ func TestShellWorkspaceConcurrentInputsAndOutputs(t *testing.T) {
 		go func(id string) {
 			defer wg.Done()
 			r, err := agent.executeShellTask(&Task{ID: id, Payload: map[string]interface{}{
-				"command":      "test ! -f xxz.txt && test \"$(cd \"$HOME\" && pwd -P)\" = \"$(pwd -P)\" && cat {input} > xxz.txt && sleep 0.3 && cat xxz.txt",
+				"command":      "case \"$HOME\" in \"$SPREAD_TEST_ROOT\"/shell-runs/task-*) ;; *) exit 1 ;; esac; test ! -f xxz.txt && test \"$(cd \"$HOME\" && pwd -P)\" = \"$(pwd -P)\" && cat {input} > xxz.txt && sleep 0.3 && cat xxz.txt",
 				"download_url": "/" + id, "dest_name": "x.txt", "output_file": "xxz.txt",
 			}})
 			if err != nil || r.ExitCode != 0 || r.Stdout != id+"\n" {
@@ -93,7 +95,14 @@ func TestShellWorkspaceConcurrentInputsAndOutputs(t *testing.T) {
 			t.Fatalf("old worker file changed: %s %q %v", name, data, err)
 		}
 	}
-	assertShellWorkspacesClean(t, agent)
+	entries, err := os.ReadDir(filepath.Join(agent.config.SpreadWorkspaceRoot, "shell-runs"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("spread workspace remains after task: %v %v", entries, err)
+	}
+	retained, err := os.ReadFile(filepath.Join(agent.config.SpreadWorkspaceRoot, "x.txt"))
+	if err != nil || (string(retained) != "first\n" && string(retained) != "second\n") {
+		t.Fatalf("spread input missing after task cleanup: %q %v", retained, err)
+	}
 }
 
 func TestShellWorkspaceEmptyRunDoesNotReplayOldOutput(t *testing.T) {
@@ -223,5 +232,19 @@ func TestShellFileRecordsWithConfiguredOutputDoNotReplay(t *testing.T) {
 	r, err := agent.executeShellTask(&Task{ID: "cms-record", Payload: map[string]interface{}{"command": "printf '[FILE:drupal.txt] owned-fixture\\n'", "output_file": "ignored.txt", "file_records": true}})
 	if err != nil || r.ExitCode != 0 || workspaceStreams(t, wire)["cms-record"] != "[FILE:drupal.txt] owned-fixture\n" {
 		t.Fatalf("records missing or duplicated: %+v %v", r, err)
+	}
+}
+
+func TestSpreadConfigRetainsDefaultRoot(t *testing.T) {
+	if got := DefaultWorkerConfig().SpreadWorkspaceRoot; got != "/root" {
+		t.Fatalf("default root = %q", got)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"worker_id":"legacy"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := LoadWorkerConfig(path)
+	if err != nil || config.SpreadWorkspaceRoot != "/root" {
+		t.Fatalf("legacy config = %+v, %v", config, err)
 	}
 }

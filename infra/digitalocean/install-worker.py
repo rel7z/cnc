@@ -25,6 +25,7 @@ with tarfile.open(ROOT/'tools.tar.gz') as tar:
  tar.extractall(ROOT,filter='data')
 subprocess.run(['python3',str(STAGE/'worker_tools_manifest.py')],check=True)
 config={'server_addr':settings['controller_private_ip']+':9090','worker_id':settings['name'],'max_tasks':8,'data_dir':str(ROOT/'data'),'processor_workspace_root':'/root/processor','ssh_host':settings['public_ip'],'ssh_user':'root','ssh_port':22}
+config['spread_workspace_root'] = '/root'
 (ROOT/'config.json').write_text(json.dumps(config,indent=2)+'\n');(ROOT/'config.json').chmod(0o600)
 if settings.get('password'):
  subprocess.run(['bash','-se'],input=password_setup(settings['password']),text=True,check=True)

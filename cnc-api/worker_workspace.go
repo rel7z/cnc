@@ -2,6 +2,7 @@ package cnc
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,4 +80,37 @@ func shellWorkspaceEnv(env []string, dir string) []string {
 		result = append(result, key+"="+value)
 	}
 	return result
+}
+
+// retainSpreadInput keeps the most recently received chunk at the configured
+// stable path while execution continues to use its own task input.
+func retainSpreadInput(root, name, source string) error {
+	destination, err := shellWorkspacePath(root, name)
+	if err != nil {
+		return err
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	temp, err := os.CreateTemp(filepath.Dir(destination), ".spread-input-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temp.Name())
+	defer temp.Close()
+	if err := temp.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := io.Copy(temp, input); err != nil {
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temp.Name(), destination)
 }

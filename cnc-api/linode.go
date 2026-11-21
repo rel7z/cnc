@@ -389,7 +389,7 @@ func linodeWorkerScript(label, serverAddr, httpAddr string) (string, error) {
 	if !validLinodeLabel(label) {
 		return "", fmt.Errorf("invalid label")
 	}
-	config, _ := json.Marshal(map[string]any{"server_addr": serverAddr, "worker_id": label, "max_tasks": 2, "data_dir": "/opt/cnc/data", "processor_workspace_root": "/root/processor"})
+	config, _ := json.Marshal(map[string]any{"server_addr": serverAddr, "worker_id": label, "max_tasks": 2, "data_dir": "/opt/cnc/data", "processor_workspace_root": "/root/processor", "spread_workspace_root": "/root"})
 	// This is fetched over the cluster's private network; dashboard authentication remains intact.
 	return fmt.Sprintf(`#!/bin/bash
 set -eu

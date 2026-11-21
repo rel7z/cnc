@@ -83,7 +83,7 @@ def main():
         run(['ssh-add', str(STATE / 'id_ed25519')], env=agent_env)
         server_ip = nodes[server_name]['private_ip']
         configs = {server_name: {'http_addr': server_ip + ':8080', 'tcp_addr': server_ip + ':9090', 'data_dir': '/opt/cnc/data', 'local_admin_only': True, 'gdrive': {'enabled': False}, 'telegram': {'enabled': False}}}
-        configs.update({name: {'server_addr': server_ip + ':9090', 'worker_id': name, 'max_tasks': 2, 'data_dir': '/opt/cnc/data'} for name in workers})
+        configs.update({name: {'server_addr': server_ip + ':9090', 'worker_id': name, 'max_tasks': 2, 'data_dir': '/opt/cnc/data', 'spread_workspace_root': '/root'} for name in workers})
         encoded = base64.b64encode(json.dumps({'revision': revision, 'nodes': {name: node for name, node in nodes.items() if name == server_name or name in workers}, 'configs': configs, 'server': server_name, 'login': access}).encode()).decode()
         remote = "set -eu\nexport DEPLOY_DATA=" + shlex.quote(encoded) + "\n" + '''
 mkdir -p /opt/cnc/source

@@ -15,6 +15,7 @@ Path('/opt/cnc/config.json').write_text(json.dumps({
     'max_tasks': 2,
     'data_dir': '/opt/cnc/data',
     'processor_workspace_root': '/root/processor',
+    'spread_workspace_root': '/root',
 }) + '\n')
 PY
 SERVER_IP=$(python3 -c 'import base64,json,os; print(json.loads(base64.b64decode(os.environ["CNC_DEPLOY_DATA"]))["private_ip"])')

@@ -1,0 +1,56 @@
+{
+  "job_id": "job_1795287766_222",
+  "workers": {
+    "cnc-do-worker-1": {
+      "path": "/root/cnc-spread-durable-proof-20261122.txt",
+      "sha256": "0c530a63347080b114ee8a79cd261c35c0859d79ed1387f90ba3d20309c4dd2a",
+      "bytes": 112,
+      "task_input_cleaned": true
+    },
+    "cnc-do-worker-2": {
+      "path": "/root/cnc-spread-durable-proof-20261122.txt",
+      "sha256": "f55907b38fc93779c6e2b3510999fd98e33c8bdb8bb037ea781718a373821f65",
+      "bytes": 112,
+      "task_input_cleaned": true
+    },
+    "cnc-do-worker-3": {
+      "path": "/root/cnc-spread-durable-proof-20261122.txt",
+      "sha256": "7148f62ccb55adef4517555ea0f4fdbfcf9556a64c8da9803b82e5e9f2286b50",
+      "bytes": 112,
+      "task_input_cleaned": true
+    },
+    "cnc-do-worker-4": {
+      "path": "/root/cnc-spread-durable-proof-20261122.txt",
+      "sha256": "6ecd84652ccbacc30d315c1bc03a542faa3cfb814133943f827dfade8f6b8f38",
+      "bytes": 112,
+      "task_input_cleaned": true
+    },
+    "cnc-do-worker-5": {
+      "path": "/root/cnc-spread-durable-proof-20261122.txt",
+      "sha256": "6fad17c507931f810830a0bc10ed47bc2d149105a27acad4ad96f28210d22341",
+      "bytes": 112,
+      "task_input_cleaned": true
+    },
+    "cnc-do-worker-6": {
+      "path": "/root/cnc-spread-durable-proof-20261122.txt",
+      "sha256": "ba56697a02f210956b6a6a3affc444f9d69058171c76778635fef15096d1787a",
+      "bytes": 112,
+      "task_input_cleaned": true
+    },
+    "cnc-do-worker-7": {
+      "path": "/root/cnc-spread-durable-proof-20261122.txt",
+      "sha256": "19ab8bc084f4a0beac1be2d7c356e522cc67eda8dd682c7b55ebf1c404b90ee3",
+      "bytes": 112,
+      "task_input_cleaned": true
+    },
+    "cnc-do-worker-8": {
+      "path": "/root/cnc-spread-durable-proof-20261122.txt",
+      "sha256": "a9090c254e122600b165d999b22eab1e71c7d3c47f6e6f0ed6f9c2705be53334",
+      "bytes": 112,
+      "task_input_cleaned": true
+    }
+  },
+  "all_eight_verified": true,
+  "worker_sha256": "c308576a9de0568997a23ff592bbb37a99ec26787dd29338a9e3ef8b41ae54d8",
+  "verified_after_worker_update": true
+}

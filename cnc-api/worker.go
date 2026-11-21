@@ -77,6 +77,7 @@ type WorkerConfig struct {
 	WorkerID               string `json:"worker_id"`
 	MaxTasks               int    `json:"max_tasks"`
 	DataDir                string `json:"data_dir"`
+	SpreadWorkspaceRoot    string `json:"spread_workspace_root,omitempty"`
 }
 
 type workerStats struct {
@@ -93,6 +94,7 @@ func DefaultWorkerConfig() *WorkerConfig {
 		MaxTasks:               runtime.NumCPU() * 2,
 		DataDir:                "./worker_data",
 		ProcessorWorkspaceRoot: defaultProcessorWorkspaceRoot(),
+		SpreadWorkspaceRoot:    "/root",
 	}
 }
 
@@ -117,6 +119,9 @@ func LoadWorkerConfig(path string) (*WorkerConfig, error) {
 	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = "./worker_data"
+	}
+	if cfg.SpreadWorkspaceRoot == "" {
+		cfg.SpreadWorkspaceRoot = "/root"
 	}
 	if cfg.ProcessorWorkspaceRoot == "" {
 		cfg.ProcessorWorkspaceRoot = defaultProcessorWorkspaceRoot()
@@ -572,7 +577,11 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 	if exe, e := os.Executable(); e == nil {
 		execDir = filepath.Dir(exe)
 	}
-	workspace, err := newShellWorkspace(w.config.DataDir, cwd, execDir)
+	workspaceRoot := w.config.DataDir
+	if downloadURL != "" && destName != "" && w.config.SpreadWorkspaceRoot != "" {
+		workspaceRoot = w.config.SpreadWorkspaceRoot
+	}
+	workspace, err := newShellWorkspace(workspaceRoot, cwd, execDir)
 	if err != nil {
 		return nil, fmt.Errorf("create task workspace: %w", err)
 	}
@@ -601,6 +610,11 @@ func (w *WorkerAgent) executeShellTask(task *Task) (*TaskResult, error) {
 		log.Printf("Downloading chunk %s → %s", fullURL, localPath)
 		if err := downloadFileContext(ctx, fullURL, localPath); err != nil {
 			return nil, fmt.Errorf("download chunk: %w", err)
+		}
+		if w.config.SpreadWorkspaceRoot != "" {
+			if err := retainSpreadInput(w.config.SpreadWorkspaceRoot, destName, localPath); err != nil {
+				return nil, fmt.Errorf("retain spread input: %w", err)
+			}
 		}
 	}
 
