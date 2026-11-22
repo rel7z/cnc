@@ -10,6 +10,14 @@ import time
 source = Path(sys.argv[1])
 app = Path('/opt/cnc')
 root = app / 'wordpress-generator'
+# A migrated controller must never reactivate the retired CNC scheduler.
+marker = root / 'cutover.json'
+if marker.exists() and json.loads(marker.read_text()).get('owner') == 'internet-map':
+    subprocess.run(['systemctl', 'disable', '--now', 'cnc-wordpress-generator.service',
+                    'cnc-wordpress-generator-refresh.timer'], check=True)
+    subprocess.run(['systemctl', 'enable', '--now', 'internet-map-discovery.service'], check=True)
+    print(json.dumps({'discovery_owner': 'internet-map', 'legacy_scheduler_retired': True}))
+    raise SystemExit(0)
 root.mkdir(mode=0o700, exist_ok=True)
 for name in ('reverse-ip', 'commoncrawl', 'candidate-txt'):
     (root / name).mkdir(mode=0o700, exist_ok=True)
