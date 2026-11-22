@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 root = Path("/opt/internet-map")
+(root / "datasets").mkdir(mode=0o700, parents=True, exist_ok=True)
 node = next(Path("/opt/cnc/node-runtime").glob("*/bin/node"))
 env = root / "service.env"
 if not env.exists():

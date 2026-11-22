@@ -77,3 +77,19 @@ python3 main.py import observations.jsonl --format observations --source worker-
 The worker reads existing HTML. Observation imports validate the evidence labels
 produced by the worker. Source labels should identify the dataset and producing
 job. Transport authentication and job scheduling are separate integrations.
+
+## Dataset storage on DigitalOcean
+
+Store original dataset files in /opt/internet-map/datasets/ on the controller.
+The SQLite catalog is /opt/internet-map/data/catalog.db.
+Both paths are persistent and separate from the web build directory.
+Dataset files and runtime databases are excluded from Git.
+
+For a .org snapshot already placed on the server:
+
+```bash
+cd /opt/internet-map
+python3 org_zone.py /opt/internet-map/datasets/org.zone.gz --source czds-org --database /opt/internet-map/data/catalog.db
+```
+
+Refresh the application after import to read the updated local catalog.
