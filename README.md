@@ -221,3 +221,5 @@ restore_snapshot("/path/to/backup.manifest.json.gz", "/path/to/restored-catalog.
 Restore requires a missing destination and verifies every part, the assembled
 checksum and SQLite integrity. Stop the relevant service before deliberately
 replacing a live database with a verified restored copy.
+
+Production verification (2026-11-22): authenticated bidirectional coordination and an eight-worker harmless roundtrip passed. All three database snapshots were downloaded from Drive and restored with exact hashes and SQLite integrity checks. See `docs/cnc-integration-verification-2026-11-22.json`.
