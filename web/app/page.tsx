@@ -76,8 +76,42 @@ type ResourceInfo = {
   };
 };
 
+type ClusterNode = {
+  node_id: string;
+  ip_address?: string | null;
+  status: string;
+  speed: number;
+  scanned_count: number;
+  wp_count: number;
+  last_heartbeat?: string | null;
+};
+
+type ClusterStatus = {
+  nodes: ClusterNode[];
+  total_nodes: number;
+  active_nodes: number;
+  cluster_speed: number;
+  cluster_scanned: number;
+  cluster_wp: number;
+};
+
+const WORKER_SPECS = [
+  { id: "cnc-do-worker-1", vpc: "10.104.0.3", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
+  { id: "cnc-do-worker-2", vpc: "10.104.0.4", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
+  { id: "cnc-do-worker-3", vpc: "10.104.0.5", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
+  { id: "cnc-do-worker-4", vpc: "10.104.0.6", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
+  { id: "cnc-do-worker-5", vpc: "10.104.0.7", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
+  { id: "cnc-do-worker-6", vpc: "10.104.0.8", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
+  { id: "cnc-do-worker-7", vpc: "10.104.0.9", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
+  { id: "cnc-do-worker-8", vpc: "10.104.0.10", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
+];
+
 export default function Page() {
   const [activeTab, setActiveTab] = useState<"intel" | "scanner" | "catalog">("intel");
+
+  // Distributed Cluster Swarm State
+  const [clusterStatus, setClusterStatus] = useState<ClusterStatus | null>(null);
+  const [clusterBusy, setClusterBusy] = useState(false);
 
   // Global / Header Stats
   const [stats, setStats] = useState<{ urls: number; imports: number; wordpress: number } | null>(null);
