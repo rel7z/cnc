@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 
 type Site = { url: string; host: string };
 type Observation = { source: string; imported_at: string; evidence: string[] };
@@ -29,11 +29,80 @@ type IntelSourceData = {
   line_count: number;
 };
 
-export default function Page() {
-  const [activeTab, setActiveTab] = useState<"catalog" | "intel" | "scanner">("intel");
+type SignatureStat = { name: string; count: number };
 
-  // Catalog State
+type CrawlerRecentItem = {
+  url: string;
+  host: string;
+  status_code: number;
+  title: string;
+  signatures: string[];
+  content_length: number;
+  scanned_at: string;
+};
+
+type CrawlerStatus = {
+  running: boolean;
+  pid?: number;
+  scanned: number;
+  html_indexed?: number;
+  wordpress_found: number;
+  speed: number;
+  last_url?: string;
+};
+
+export default function Page() {
+  const [activeTab, setActiveTab] = useState<"intel" | "scanner" | "catalog">("intel");
+
+  // Global / Header Stats
   const [stats, setStats] = useState<{ urls: number; imports: number; wordpress: number } | null>(null);
+  const [intelStats, setIntelStats] = useState<{ total_pages: number; total_bytes: number } | null>(null);
+  const [crawlerStatus, setCrawlerStatus] = useState<CrawlerStatus>({
+    running: false,
+    scanned: 0,
+    html_indexed: 0,
+    wordpress_found: 0,
+    speed: 0,
+  });
+
+  // Tab 1: Intel (PublicWWW) State
+  const [intelQuery, setIntelQuery] = useState("");
+  const [intelInput, setIntelInput] = useState("gtag('config'");
+  const [selectedSignature, setSelectedSignature] = useState("");
+  const [signatureList, setSignatureList] = useState<SignatureStat[]>([]);
+  const [intelPage, setIntelPage] = useState(1);
+  const [intelResults, setIntelResults] = useState<IntelResultItem[]>([]);
+  const [intelTotal, setIntelTotal] = useState(0);
+  const [intelHasMore, setIntelHasMore] = useState(false);
+  const [intelBusy, setIntelBusy] = useState(false);
+  const [intelError, setIntelError] = useState("");
+
+  // Full Source View Modal
+  const [viewSourceUrl, setViewSourceUrl] = useState("");
+  const [sourceData, setSourceData] = useState<IntelSourceData | null>(null);
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const [sourceCopied, setSourceCopied] = useState(false);
+
+  // Tab 2: Live Scanner & Crawler State
+  const [scanTargetUrl, setScanTargetUrl] = useState("");
+  const [scanResult, setScanResult] = useState<{
+    url: string;
+    host: string;
+    title: string;
+    status_code: number;
+    content_length: number;
+    signatures: string[];
+  } | null>(null);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanError, setScanError] = useState("");
+
+  // Crawler Controls State
+  const [crawlerConcurrency, setCrawlerConcurrency] = useState(500);
+  const [crawlerLimit, setCrawlerLimit] = useState(0);
+  const [crawlerActionBusy, setCrawlerActionBusy] = useState(false);
+  const [recentFeed, setRecentFeed] = useState<CrawlerRecentItem[]>([]);
+
+  // Tab 3: Catalog State
   const [sites, setSites] = useState<Site[]>([]);
   const [host, setHost] = useState("");
   const [filter, setFilter] = useState("");
@@ -48,42 +117,175 @@ export default function Page() {
   const [selectedObsUrl, setSelectedObsUrl] = useState("");
   const [observations, setObservations] = useState<Observation[]>([]);
 
-  // Intel (PublicWWW) State
-  const [intelQuery, setIntelQuery] = useState("");
-  const [intelInput, setIntelInput] = useState("gtag('config'");
-  const [intelPage, setIntelPage] = useState(1);
-  const [intelResults, setIntelResults] = useState<IntelResultItem[]>([]);
-  const [intelTotal, setIntelTotal] = useState(0);
-  const [intelHasMore, setIntelHasMore] = useState(false);
-  const [intelBusy, setIntelBusy] = useState(false);
-  const [intelError, setIntelError] = useState("");
-  const [intelStats, setIntelStats] = useState<{ total_pages: number; total_bytes: number } | null>(null);
+  // Load General Stats & Crawler Status
+  const loadGeneralStats = useCallback(async () => {
+    try {
+      const res = await fetch("/api/catalog/stats?extended=1");
+      if (res.ok) {
+        const data = await res.json();
+        setStats({ urls: data.urls, imports: data.imports, wordpress: data.wordpress });
+        if (data.scanner) {
+          setCrawlerStatus(data.scanner);
+        }
+      }
+      const iRes = await fetch("/api/catalog/intel-stats");
+      if (iRes.ok) {
+        setIntelStats(await iRes.json());
+      }
+    } catch {}
+  }, []);
 
-  // Full Source View Modal
-  const [viewSourceUrl, setViewSourceUrl] = useState("");
-  const [sourceData, setSourceData] = useState<IntelSourceData | null>(null);
-  const [sourceLoading, setSourceLoading] = useState(false);
-  const [sourceCopied, setSourceCopied] = useState(false);
-
-  // Live Scanner State
-  const [scanTargetUrl, setScanTargetUrl] = useState("");
-  const [scanResult, setScanResult] = useState<any>(null);
-  const [scanBusy, setScanBusy] = useState(false);
-  const [scanError, setScanError] = useState("");
-  const [crawlerStatus, setCrawlerStatus] = useState<any>(null);
-
-  // Load Catalog Stats
   useEffect(() => {
-    const abort = new AbortController();
-    async function loadStats() {
+    void loadGeneralStats();
+  }, [loadGeneralStats, catalogRefresh]);
+
+  // Load Signatures List
+  useEffect(() => {
+    async function loadSignatures() {
       try {
-        const res = await fetch("/api/catalog/stats", { signal: abort.signal });
-        if (res.ok) setStats(await res.json());
+        const res = await fetch("/api/catalog/intel-signatures");
+        if (res.ok) {
+          const data = await res.json();
+          setSignatureList(data.signatures || []);
+        }
       } catch {}
     }
-    void loadStats();
+    void loadSignatures();
+  }, [activeTab]);
+
+  // Polling for Crawler Updates and Recent Feed
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    const fetchCrawlerData = async () => {
+      try {
+        const stRes = await fetch("/api/catalog/scanner");
+        if (stRes.ok) {
+          const st: CrawlerStatus = await stRes.json();
+          setCrawlerStatus(st);
+        }
+        const recRes = await fetch("/api/catalog/scanner-recent");
+        if (recRes.ok) {
+          const rec = await recRes.json();
+          setRecentFeed(rec.recent || []);
+        }
+        // Also refresh intel stats
+        const iRes = await fetch("/api/catalog/intel-stats");
+        if (iRes.ok) {
+          setIntelStats(await iRes.json());
+        }
+      } catch {}
+    };
+
+    if (crawlerStatus.running || activeTab === "scanner") {
+      void fetchCrawlerData();
+      interval = setInterval(fetchCrawlerData, 2000);
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [crawlerStatus.running, activeTab]);
+
+  // Crawler Start / Stop handlers
+  const handleStartCrawler = async () => {
+    setCrawlerActionBusy(true);
+    try {
+      const res = await fetch("/api/catalog/scanner-start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "start",
+          concurrency: crawlerConcurrency,
+          limit: crawlerLimit,
+        }),
+      });
+      if (res.ok) {
+        void loadGeneralStats();
+      }
+    } catch {}
+    finally {
+      setCrawlerActionBusy(false);
+    }
+  };
+
+  const handleStopCrawler = async () => {
+    setCrawlerActionBusy(true);
+    try {
+      const res = await fetch("/api/catalog/scanner-stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop" }),
+      });
+      if (res.ok) {
+        void loadGeneralStats();
+      }
+    } catch {}
+    finally {
+      setCrawlerActionBusy(false);
+    }
+  };
+
+  // Search Intel
+  useEffect(() => {
+    if (activeTab !== "intel" || (!intelQuery && !selectedSignature)) {
+      setIntelResults([]);
+      setIntelTotal(0);
+      return;
+    }
+    const abort = new AbortController();
+    setIntelBusy(true);
+    setIntelError("");
+    async function search() {
+      try {
+        const params = new URLSearchParams({
+          q: intelQuery,
+          signature: selectedSignature,
+          page: String(intelPage),
+          limit: "25",
+        });
+        const res = await fetch("/api/catalog/intel-search?" + params, { signal: abort.signal });
+        const data = await res.json();
+        if (!res.ok) throw Error(data.error || "Search failed");
+        setIntelResults(data.items || []);
+        setIntelTotal(data.total || 0);
+        setIntelHasMore(Boolean(data.has_more));
+      } catch (err) {
+        if (!abort.signal.aborted) {
+          setIntelError(err instanceof Error ? err.message : "Search failed");
+        }
+      } finally {
+        if (!abort.signal.aborted) setIntelBusy(false);
+      }
+    }
+    void search();
     return () => abort.abort();
-  }, [catalogRefresh]);
+  }, [intelQuery, selectedSignature, intelPage, activeTab]);
+
+  // Load Source View Data
+  useEffect(() => {
+    if (!viewSourceUrl) {
+      setSourceData(null);
+      return;
+    }
+    const abort = new AbortController();
+    setSourceLoading(true);
+    async function loadSource() {
+      try {
+        const res = await fetch("/api/catalog/intel-source?" + new URLSearchParams({ url: viewSourceUrl }), {
+          signal: abort.signal,
+        });
+        const data = await res.json();
+        if (!res.ok) throw Error(data.error || "Failed to load source");
+        setSourceData(data);
+      } catch {
+        setSourceData(null);
+      } finally {
+        setSourceLoading(false);
+      }
+    }
+    void loadSource();
+    return () => abort.abort();
+  }, [viewSourceUrl]);
 
   // Load Catalog Sites
   useEffect(() => {
@@ -135,79 +337,7 @@ export default function Page() {
     return () => abort.abort();
   }, [selectedObsUrl]);
 
-  // Load Intel Stats
-  const loadIntelStats = async () => {
-    try {
-      const res = await fetch("/api/catalog/intel-stats");
-      if (res.ok) setIntelStats(await res.json());
-      const st = await fetch("/api/catalog/intel-status");
-      if (st.ok) setCrawlerStatus(await st.json());
-    } catch {}
-  };
-
-  useEffect(() => {
-    void loadIntelStats();
-  }, [activeTab]);
-
-  // Search Intel when query or page changes
-  useEffect(() => {
-    if (activeTab !== "intel" || !intelQuery) {
-      setIntelResults([]);
-      setIntelTotal(0);
-      return;
-    }
-    const abort = new AbortController();
-    setIntelBusy(true);
-    setIntelError("");
-    async function search() {
-      try {
-        const q = new URLSearchParams({
-          q: intelQuery,
-          page: String(intelPage),
-          limit: "25",
-        });
-        const res = await fetch("/api/catalog/intel-search?" + q, { signal: abort.signal });
-        const val = await res.json();
-        if (!res.ok) throw Error(val.error);
-        setIntelResults(val.items || []);
-        setIntelTotal(val.total || 0);
-        setIntelHasMore(val.has_more || false);
-      } catch (e) {
-        if (!abort.signal.aborted) setIntelError(e instanceof Error ? e.message : "Search failed");
-      } finally {
-        if (!abort.signal.aborted) setIntelBusy(false);
-      }
-    }
-    void search();
-    return () => abort.abort();
-  }, [intelQuery, intelPage, activeTab]);
-
-  // Fetch Full HTML Source for Modal
-  useEffect(() => {
-    if (!viewSourceUrl) {
-      setSourceData(null);
-      return;
-    }
-    const abort = new AbortController();
-    setSourceLoading(true);
-    setSourceCopied(false);
-    async function fetchSource() {
-      try {
-        const res = await fetch("/api/catalog/intel-source?" + new URLSearchParams({ url: viewSourceUrl }), {
-          signal: abort.signal,
-        });
-        const val = await res.json();
-        if (res.ok) setSourceData(val);
-      } catch {}
-      finally {
-        setSourceLoading(false);
-      }
-    }
-    void fetchSource();
-    return () => abort.abort();
-  }, [viewSourceUrl]);
-
-  // Handle Live Scan
+  // Handle On-Demand Live Scan
   const handleLiveScan = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!scanTargetUrl) return;
@@ -223,7 +353,7 @@ export default function Page() {
       const data = await res.json();
       if (!res.ok) throw Error(data.error || "Scan failed");
       setScanResult(data.item);
-      void loadIntelStats();
+      void loadGeneralStats();
     } catch (err) {
       setScanError(err instanceof Error ? err.message : "Scan failed");
     } finally {
@@ -235,6 +365,41 @@ export default function Page() {
     setIntelInput(preset);
     setIntelQuery(preset);
     setIntelPage(1);
+  };
+
+  // Export search results
+  const handleExportIntel = () => {
+    if (!intelResults.length) return;
+    const urls = intelResults.map((r) => r.url).join("\n");
+    const blob = new Blob([urls], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `intel-${(intelQuery || selectedSignature || "results").replace(/[^a-zA-Z0-9]/g, "-")}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Export catalog
+  const handleExportCatalog = async () => {
+    try {
+      const q = new URLSearchParams({
+        host: filter,
+        wordpress: wordpress ? "1" : "0",
+      });
+      const res = await fetch("/api/catalog/export?" + q);
+      if (res.ok) {
+        const data = await res.json();
+        const urls = (data.urls || []).join("\n");
+        const blob = new Blob([urls], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `catalog-export-${new Date().toISOString().slice(0, 10)}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+    } catch {}
   };
 
   const highlightMatches = (text: string, query: string) => {
@@ -269,9 +434,17 @@ export default function Page() {
       <header>
         <div>
           <h1>Internet Map</h1>
-          <span>Source Code Intelligence & Catalog</span>
+          <span>PublicWWW HTML Source Intelligence & 12.25M .org Catalog</span>
         </div>
-        <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
+          {crawlerStatus.running ? (
+            <span className="pulse-indicator">
+              <span className="pulse-dot"></span>
+              Crawler Active ({crawlerStatus.speed} req/s)
+            </span>
+          ) : (
+            <span style={{ color: "#70899e", fontSize: 13 }}>⏸ Crawler Idle</span>
+          )}
           {intelStats && (
             <span style={{ color: "#78dccc", fontSize: 13 }}>
               ⚡ <strong>{intelStats.total_pages.toLocaleString()}</strong> HTML Pages Indexed (
@@ -294,7 +467,7 @@ export default function Page() {
             className={`tab-btn ${activeTab === "scanner" ? "active" : ""}`}
             onClick={() => setActiveTab("scanner")}
           >
-            🔍 Live Scanner & Crawler
+            🔍 Live Scanner & Crawler Control
           </button>
           <button
             className={`tab-btn ${activeTab === "catalog" ? "active" : ""}`}
@@ -304,30 +477,47 @@ export default function Page() {
           </button>
         </div>
 
-        {/* TAB 1: HTML INTEL (PUBLICWWW STYLE) */}
+        {/* TAB 1: HTML SOURCE INTEL (PUBLICWWW STYLE) */}
         {activeTab === "intel" && (
           <section>
-            <div style={{ marginBottom: 20 }}>
+            <div style={{ marginBottom: 18 }}>
               <h2 style={{ fontSize: 20, marginBottom: 6 }}>Source Code Intelligence Engine</h2>
               <p style={{ color: "#93a8b9", margin: 0, fontSize: 14 }}>
                 Search through indexed HTML source code for tracking codes, JavaScript snippets, AdSense, CMS tags, or specific text phrases.
               </p>
             </div>
 
+            {/* Search Input and Signature Filter */}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 setIntelPage(1);
                 setIntelQuery(intelInput.trim());
               }}
+              style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}
             >
               <input
                 type="search"
                 value={intelInput}
                 onChange={(e) => setIntelInput(e.target.value)}
                 placeholder="Search HTML source (e.g. gtag, adsbygoogle, wp-content, UA-1234, turnstile, meta generator)..."
-                style={{ fontSize: 15, padding: "12px 16px" }}
+                style={{ fontSize: 15, padding: "12px 16px", flex: "1 1 300px" }}
               />
+              <select
+                value={selectedSignature}
+                onChange={(e) => {
+                  setSelectedSignature(e.target.value);
+                  setIntelPage(1);
+                }}
+                style={{ padding: "12px 14px", minWidth: 200, fontSize: 14 }}
+              >
+                <option value="">All Technologies ({signatureList.length})</option>
+                {signatureList.map((sig) => (
+                  <option key={sig.name} value={sig.name}>
+                    {sig.name} ({sig.count.toLocaleString()})
+                  </option>
+                ))}
+              </select>
               <button className="primary" style={{ padding: "12px 24px" }} disabled={intelBusy}>
                 {intelBusy ? "Searching..." : "Search Code"}
               </button>
@@ -345,7 +535,8 @@ export default function Page() {
                 "UA-",
                 "fbq('init'",
                 'meta name="generator"',
-                "clarity.ms/tag",
+                "tailwindcss",
+                "js.stripe.com",
               ].map((chip) => (
                 <button key={chip} type="button" className="chip" onClick={() => handleIntelPreset(chip)}>
                   {chip}
@@ -355,13 +546,22 @@ export default function Page() {
 
             {intelError && <p role="alert" style={{ color: "#e74c3c" }}>{intelError}</p>}
 
-            {/* Results Header */}
-            {intelQuery && !intelBusy && (
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "16px 0" }}>
+            {/* Results Header with Export */}
+            {(intelQuery || selectedSignature) && !intelBusy && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "16px 0", flexWrap: "wrap", gap: 10 }}>
                 <p style={{ margin: 0, color: "#8ab4cc", fontSize: 14 }}>
-                  Found <strong>{intelTotal.toLocaleString()}</strong> website{intelTotal === 1 ? "" : "s"} containing code matching &ldquo;<strong>{intelQuery}</strong>&rdquo;
+                  Found <strong>{intelTotal.toLocaleString()}</strong> website{intelTotal === 1 ? "" : "s"}
+                  {intelQuery ? <> containing code matching &ldquo;<strong>{intelQuery}</strong>&rdquo;</> : ""}
+                  {selectedSignature ? <> with technology &ldquo;<strong>{selectedSignature}</strong>&rdquo;</> : ""}
                 </p>
-                <span style={{ fontSize: 13, color: "#6a8296" }}>Page {intelPage}</span>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  {intelResults.length > 0 && (
+                    <button onClick={handleExportIntel} style={{ fontSize: 12, padding: "5px 12px" }}>
+                      ⬇ Export URLs
+                    </button>
+                  )}
+                  <span style={{ fontSize: 13, color: "#6a8296" }}>Page {intelPage}</span>
+                </div>
               </div>
             )}
 
@@ -416,7 +616,7 @@ export default function Page() {
                         >
                           <span className="line-no">{line.line_number}</span>
                           <span className="line-content">
-                            {line.is_match ? highlightMatches(line.content, intelQuery) : line.content}
+                            {line.is_match && intelQuery ? highlightMatches(line.content, intelQuery) : line.content}
                           </span>
                         </div>
                       ))}
@@ -425,11 +625,11 @@ export default function Page() {
                 </div>
               ))}
 
-              {!intelBusy && intelQuery && intelResults.length === 0 && (
+              {!intelBusy && (intelQuery || selectedSignature) && intelResults.length === 0 && (
                 <div style={{ padding: 40, textAlign: "center", background: "#111a24", borderRadius: 10, border: "1px dashed #243547" }}>
-                  <p style={{ color: "#8ab4cc", fontSize: 16 }}>No matching HTML source found for &ldquo;{intelQuery}&rdquo;.</p>
+                  <p style={{ color: "#8ab4cc", fontSize: 16 }}>No matching HTML source found.</p>
                   <p style={{ color: "#546e7a", fontSize: 13, marginTop: 6 }}>
-                    Tip: Use the &ldquo;Live Scanner & Crawler&rdquo; tab to fetch and index new domains into the intelligence database!
+                    Tip: Use the &ldquo;Live Scanner & Crawler Control&rdquo; tab to fetch and index new domains into the intelligence database!
                   </p>
                 </div>
               )}
@@ -456,18 +656,18 @@ export default function Page() {
           </section>
         )}
 
-        {/* TAB 2: LIVE SCANNER & CRAWLER */}
+        {/* TAB 2: LIVE SCANNER & CRAWLER CONTROL */}
         {activeTab === "scanner" && (
           <section>
             <div style={{ marginBottom: 20 }}>
-              <h2 style={{ fontSize: 20, marginBottom: 6 }}>Live HTML Scanner & Catalog Crawler</h2>
+              <h2 style={{ fontSize: 20, marginBottom: 6 }}>Live HTML Scanner & Catalog Crawler Control</h2>
               <p style={{ color: "#93a8b9", margin: 0, fontSize: 14 }}>
-                Inspect any URL live, extract technology signatures, and index its full HTML source code into the PublicWWW intelligence engine.
+                Control the high-throughput asynchronous catalog crawler or inspect any URL live to extract technology forensics.
               </p>
             </div>
 
-            {/* Single URL Live Scanner */}
-            <div style={{ background: "#111a24", border: "1px solid #243547", borderRadius: 10, padding: 20, marginBottom: 24 }}>
+            {/* On-Demand URL Inspector */}
+            <div className="crawler-panel">
               <h3 style={{ fontSize: 16, marginTop: 0, marginBottom: 12 }}>⚡ On-Demand URL Inspector</h3>
               <form onSubmit={handleLiveScan}>
                 <input
@@ -519,12 +719,7 @@ export default function Page() {
                     </tbody>
                   </table>
                   <div style={{ marginTop: 14 }}>
-                    <button
-                      onClick={() => {
-                        setViewSourceUrl(scanResult.url);
-                      }}
-                      style={{ fontSize: 13 }}
-                    >
+                    <button onClick={() => setViewSourceUrl(scanResult.url)} style={{ fontSize: 13 }}>
                       Inspect Full HTML Source
                     </button>
                   </div>
@@ -532,26 +727,143 @@ export default function Page() {
               )}
             </div>
 
-            {/* Catalog Crawler Status */}
-            <div style={{ background: "#111a24", border: "1px solid #243547", borderRadius: 10, padding: 20 }}>
-              <h3 style={{ fontSize: 16, marginTop: 0, marginBottom: 12 }}>🤖 Catalog Background Intelligence</h3>
-              <p style={{ color: "#93a8b9", fontSize: 14 }}>
-                The background crawler scans through the <strong>12.25 million .org domains</strong> in the catalog, fetching homepages, extracting signatures, and updating the PublicWWW FTS5 index.
-              </p>
+            {/* Background Crawler Operations Panel */}
+            <div className="crawler-panel">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+                <div>
+                  <h3 style={{ fontSize: 17, margin: "0 0 4px" }}>🤖 High-Throughput Catalog Crawler</h3>
+                  <span style={{ color: "#8ab4cc", fontSize: 13 }}>
+                    Discovers WordPress and indexes full HTML across the 12.25M .org domains.
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                  {crawlerStatus.running ? (
+                    <button className="danger" onClick={handleStopCrawler} disabled={crawlerActionBusy}>
+                      {crawlerActionBusy ? "Stopping..." : "⏹ Stop Crawler"}
+                    </button>
+                  ) : (
+                    <button className="success" onClick={handleStartCrawler} disabled={crawlerActionBusy}>
+                      {crawlerActionBusy ? "Starting..." : "▶ Start Crawler"}
+                    </button>
+                  )}
+                </div>
+              </div>
 
+              {/* Live Crawler Configuration & Status */}
+              <div style={{ display: "flex", gap: 20, alignItems: "center", margin: "16px 0", flexWrap: "wrap", background: "#0c131a", padding: "12px 16px", borderRadius: 8 }}>
+                <label style={{ fontSize: 13, color: "#93a8b9" }}>
+                  Concurrency:
+                  <select
+                    value={crawlerConcurrency}
+                    onChange={(e) => setCrawlerConcurrency(Number(e.target.value))}
+                    disabled={crawlerStatus.running}
+                    style={{ marginLeft: 8, padding: "5px 10px", fontSize: 13 }}
+                  >
+                    <option value={100}>100 Workers</option>
+                    <option value={200}>200 Workers</option>
+                    <option value={500}>500 Workers (High Speed Recommended)</option>
+                    <option value={1000}>1,000 Workers (Turbo)</option>
+                  </select>
+                </label>
+
+                <label style={{ fontSize: 13, color: "#93a8b9" }}>
+                  Limit:
+                  <select
+                    value={crawlerLimit}
+                    onChange={(e) => setCrawlerLimit(Number(e.target.value))}
+                    disabled={crawlerStatus.running}
+                    style={{ marginLeft: 8, padding: "5px 10px", fontSize: 13 }}
+                  >
+                    <option value={0}>Continuous (No limit)</option>
+                    <option value={500}>500 URLs</option>
+                    <option value={2000}>2,000 URLs</option>
+                    <option value={10000}>10,000 URLs</option>
+                  </select>
+                </label>
+
+                {crawlerStatus.pid && crawlerStatus.running && (
+                  <span style={{ fontSize: 12, color: "#6ce0c7", marginLeft: "auto" }}>
+                    Process PID: <code>{crawlerStatus.pid}</code>
+                  </span>
+                )}
+              </div>
+
+              {/* Crawler Metrics */}
               <div id="metrics" style={{ margin: "20px 0" }}>
                 <div>
+                  <strong>{crawlerStatus.scanned.toLocaleString()}</strong>
+                  URLs Scanned in Session
+                </div>
+                <div>
                   <strong>{intelStats ? intelStats.total_pages.toLocaleString() : "—"}</strong>
-                  Total Pages in Intel Database
+                  Active Pages Indexed into Intel
                 </div>
                 <div>
-                  <strong>{intelStats ? (intelStats.total_bytes / (1024 * 1024)).toFixed(1) + " MB" : "—"}</strong>
-                  Total HTML Content Size
+                  <strong>{crawlerStatus.wordpress_found.toLocaleString()}</strong>
+                  WordPress Detections
                 </div>
                 <div>
-                  <strong>{crawlerStatus?.speed ? `${crawlerStatus.speed} req/s` : "Idle"}</strong>
-                  Crawler Speed
+                  <strong>{crawlerStatus.running ? `${crawlerStatus.speed} req/s` : "Idle"}</strong>
+                  Scanning Speed
                 </div>
+              </div>
+
+              {/* Live Streaming Activity Feed */}
+              <div style={{ marginTop: 24 }}>
+                <h4 style={{ fontSize: 14, color: "#8ab4cc", marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
+                  <span>Live Streaming Activity (Latest Crawled Pages)</span>
+                  {crawlerStatus.running && <span className="pulse-indicator"><span className="pulse-dot"></span> Live Feed</span>}
+                </h4>
+
+                <table className="feed-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 80 }}>Status</th>
+                      <th>URL / Title</th>
+                      <th>Detected Tech</th>
+                      <th style={{ width: 120 }}>Size / Time</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recentFeed.map((item, idx) => (
+                      <tr key={idx}>
+                        <td>
+                          <span className={`badge ${item.status_code === 200 ? "badge-status" : "badge-tech"}`}>
+                            {item.status_code}
+                          </span>
+                        </td>
+                        <td>
+                          <div style={{ fontWeight: 600, color: "#eef6fc", fontSize: 13 }}>{item.title || item.host}</div>
+                          <a href={item.url} target="_blank" rel="noopener noreferrer" style={{ color: "#78dccc", fontSize: 12 }}>
+                            {item.url} ↗
+                          </a>
+                        </td>
+                        <td>
+                          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                            {item.signatures.length > 0 ? (
+                              item.signatures.map((s) => (
+                                <span key={s} className="badge badge-tech" style={{ fontSize: 10 }}>{s}</span>
+                              ))
+                            ) : (
+                              <span style={{ color: "#546e7a", fontSize: 11 }}>—</span>
+                            )}
+                          </div>
+                        </td>
+                        <td style={{ fontSize: 12, color: "#70899e" }}>
+                          {(item.content_length / 1024).toFixed(1)} KB<br />
+                          {new Date(item.scanned_at).toLocaleTimeString()}
+                        </td>
+                      </tr>
+                    ))}
+                    {!recentFeed.length && (
+                      <tr>
+                        <td colSpan={4} style={{ textAlign: "center", color: "#6a8296", padding: 24 }}>
+                          No crawl activity recorded yet. Click &ldquo;Start Crawler&rdquo; or &ldquo;Scan & Index&rdquo; above!
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
           </section>
@@ -562,9 +874,14 @@ export default function Page() {
           <section>
             <div className="controls">
               <h2 style={{ flex: 1 }}>Catalog Delegations (.org)</h2>
-              <button disabled={busy} onClick={() => setCatalogRefresh((v) => v + 1)}>
-                Refresh
-              </button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={handleExportCatalog} title="Export filtered domains to text file">
+                  ⬇ Export Domains
+                </button>
+                <button disabled={busy} onClick={() => setCatalogRefresh((v) => v + 1)}>
+                  Refresh
+                </button>
+              </div>
             </div>
 
             {catalogError && <p role="alert">{catalogError}</p>}
@@ -594,7 +911,7 @@ export default function Page() {
                 aria-label="Search hostname"
                 value={host}
                 onChange={(e) => setHost(e.target.value)}
-                placeholder="Search hostname (e.g. wikipedia, archive, eff)"
+                placeholder="Search hostname (e.g. wikipedia, archive, eff, mozilla)"
               />
               {host && (
                 <button type="button" onClick={() => { setHost(""); setFilter(""); setPage(1); }} title="Clear search">
@@ -650,7 +967,7 @@ export default function Page() {
                 <tr>
                   <th>URL</th>
                   <th>Hostname</th>
-                  <th style={{ width: 120, textAlign: "center" }}>Actions</th>
+                  <th style={{ width: 140, textAlign: "center" }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -670,9 +987,9 @@ export default function Page() {
                             setActiveTab("scanner");
                           }}
                           style={{ padding: "3px 8px", fontSize: 12, border: "1px solid #283e52", borderRadius: 4 }}
-                          title="Scan this site"
+                          title="Scan this site live"
                         >
-                          Scan
+                          Scan Live
                         </button>
                         <a
                           href={site.url}
@@ -745,7 +1062,7 @@ export default function Page() {
               </form>
             </footer>
 
-            {/* Observations Sidebar */}
+            {/* Observations Drawer */}
             {selectedObsUrl && (
               <aside aria-label="Source observations">
                 <button onClick={() => setSelectedObsUrl("")} style={{ float: "right" }}>

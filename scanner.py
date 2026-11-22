@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""High-throughput HTML Intelligence scanner & crawler for Internet Map (PublicWWW style)."""
+"""High-performance async pipeline WordPress discovery scanner for Internet Map."""
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
+import resource
 import signal
 import sys
 import time
-from datetime import datetime, timezone
 
 try:
     import aiohttp
@@ -16,37 +18,25 @@ except ImportError:
     aiohttp = None
 
 from main import DEFAULT_DATABASE, connect
-from intel import init_intel_tables, index_pages_batch, fetch_and_index_url
+from intel import init_intel_tables, index_page
 
 STATE_FILE = Path(__file__).resolve().parent / "data/scanner-state.json"
 
-PRIORITY_PREFIXES = [
-    "blog", "foundation", "community", "news", "church", "health", "project",
-    "academy", "center", "institute", "society", "club", "charity", "world",
-    "art", "music", "youth", "green", "eco", "open", "free", "global", "action",
-    "hope", "life", "care", "support", "trust", "group", "team", "network",
-    "press", "portal", "mag", "online", "media", "forum", "tech", "edu",
-    "school", "kids", "nature", "voice", "radio", "travel", "food", "farm"
-]
+# Optimize OS file descriptor limits
+try:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(65535, hard), hard))
+except Exception:
+    pass
 
 
 def is_pid_alive(pid: int) -> bool:
     if not pid or pid <= 0:
         return False
     try:
-        res, _ = os.waitpid(pid, os.WNOHANG)
-        if res == pid:
-            return False
-    except ChildProcessError:
-        pass
-    except OSError:
-        return False
-
-    try:
         os.kill(pid, 0)
     except OSError:
         return False
-
     stat_file = Path(f"/proc/{pid}/stat")
     if stat_file.exists():
         try:
@@ -58,9 +48,23 @@ def is_pid_alive(pid: int) -> bool:
     return True
 
 
+def init_scanner_tables(db):
+    """Ensure scan_progress table and indices exist."""
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS scan_progress (
+            url TEXT PRIMARY KEY,
+            status_code INTEGER DEFAULT 0,
+            has_wordpress INTEGER DEFAULT 0,
+            evidence TEXT DEFAULT '[]',
+            scanned_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS scan_progress_wp ON scan_progress(has_wordpress) WHERE has_wordpress = 1;
+    """)
+
+
 def get_scanner_state(state_path: Path = STATE_FILE) -> dict:
     if not state_path.exists():
-        return {"running": False, "scanned": 0, "html_indexed": 0, "wordpress_found": 0, "speed": 0.0, "last_url": ""}
+        return {"running": False, "scanned": 0, "wordpress_found": 0, "speed": 0.0, "last_url": ""}
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
         if not data.get("running", False):
@@ -72,7 +76,7 @@ def get_scanner_state(state_path: Path = STATE_FILE) -> dict:
             update_scanner_state(state_path, data)
         return data
     except Exception:
-        return {"running": False, "scanned": 0, "html_indexed": 0, "wordpress_found": 0, "speed": 0.0, "last_url": ""}
+        return {"running": False, "scanned": 0, "wordpress_found": 0, "speed": 0.0, "last_url": ""}
 
 
 def update_scanner_state(state_path: Path, state: dict):
@@ -82,91 +86,158 @@ def update_scanner_state(state_path: Path, state: dict):
     tmp.replace(state_path)
 
 
-async def check_url(session, url: str, timeout_sec: float = 5.0):
-    """Fetch website HTML with short timeout and redirect handling."""
-    try:
-        async with session.get(
-            url,
-            timeout=aiohttp.ClientTimeout(total=timeout_sec, connect=3.0),
-            ssl=False,
-            allow_redirects=True,
-            max_redirects=3,
-        ) as resp:
-            status = resp.status
-            headers = {k.lower(): v for k, v in resp.headers.items()}
-            # Read first 180 KB of HTML (covers complete header, body, scripts, and footer)
-            chunk = await resp.content.read(180000)
-            text = chunk.decode("utf-8", errors="replace")
-            return url, status, headers, text
-    except Exception:
-        return url, 0, {}, ""
+# Precompiled fast regexes
+GEN_RE = re.compile(r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']WordPress\s*([^"\']*)["\']', re.IGNORECASE)
+THEME_RE = re.compile(r'/wp-content/themes/([a-zA-Z0-9_\-\.]+)/')
+PLUGIN_RE = re.compile(r'/wp-content/plugins/([a-zA-Z0-9_\-\.]+)/')
+
+
+def extract_wordpress_evidence(html: str, headers: dict) -> list[str]:
+    """Fast extraction of WordPress forensic evidence."""
+    if not html:
+        return []
+
+    # Quick check bailout to skip 99% of regexes on non-WordPress sites
+    has_wp_keyword = ("wp-" in html) or ("WordPress" in html) or ("wordpress" in html)
+    hdr_has_wp = False
+    server = ""
+    x_powered = ""
+    link_hdr = ""
+
+    if headers and isinstance(headers, dict):
+        server = headers.get("server", "").lower()
+        x_powered = headers.get("x-powered-by", "").lower()
+        link_hdr = headers.get("link", "").lower()
+        if "wordpress" in x_powered or "wordpress" in server or "api.w.org" in link_hdr:
+            hdr_has_wp = True
+
+    if not has_wp_keyword and not hdr_has_wp:
+        return []
+
+    evidence = []
+
+    # Check generator meta tag
+    gen_match = GEN_RE.search(html)
+    if gen_match:
+        ver = gen_match.group(1).strip()
+        evidence.append(f"WordPress {ver}" if ver else "WordPress generator tag")
+
+    # Check wp-content or wp-includes in source
+    has_wp_paths = ("wp-content" in html) or ("wp-includes" in html)
+    if has_wp_paths:
+        if not evidence:
+            evidence.append("WordPress Core (wp-content/wp-includes)")
+
+        theme_matches = THEME_RE.findall(html)
+        if theme_matches:
+            evidence.append(f"Theme: {theme_matches[0]}")
+
+        plugin_matches = list(dict.fromkeys(PLUGIN_RE.findall(html)))
+        for plugin in plugin_matches[:3]:
+            evidence.append(f"Plugin: {plugin}")
+
+    # Check REST API link or link rel
+    if 'rel="https://api.w.org/"' in html or "rel='https://api.w.org/'" in html or '/wp-json/' in html:
+        evidence.append("wp-json REST API")
+
+    if hdr_has_wp:
+        if "wordpress" in x_powered or "wordpress" in server:
+            evidence.append(f"Server header: {x_powered or server}")
+        if "api.w.org" in link_hdr:
+            evidence.append("REST API Link header")
+
+    return list(dict.fromkeys(evidence))
+
+
+PRIORITY_PREFIXES = [
+    "blog", "foundation", "community", "news", "church", "health", "project",
+    "academy", "center", "institute", "society", "club", "charity", "world",
+    "art", "music", "youth", "green", "eco", "open", "free", "global", "action",
+    "hope", "life", "care", "support", "trust", "group", "team", "network",
+    "press", "portal", "mag", "online", "media", "forum", "tech", "edu",
+    "school", "kids", "nature", "voice", "radio", "travel", "food", "farm"
+]
 
 
 def fetch_next_urls_batch(db, batch_size=100, prefix_index=0):
     """Fetch next batch of unscanned URLs, prioritizing high-value domains."""
-    # First try by rotating through PRIORITY_PREFIXES
     if prefix_index < len(PRIORITY_PREFIXES):
         pfx = PRIORITY_PREFIXES[prefix_index]
         rows = db.execute("""
             SELECT s.url FROM sites s
-            LEFT JOIN page_contents p ON p.url = s.url
+            LEFT JOIN scan_progress p ON p.url = s.url
             WHERE p.url IS NULL AND s.host LIKE ?
             LIMIT ?
         """, (f"{pfx}%", batch_size)).fetchall()
         if rows:
             return [r[0] for r in rows], prefix_index
-        # If this prefix is exhausted, move to next
         prefix_index += 1
 
-    # Fallback to general natural language domains
     rows = db.execute("""
         SELECT s.url FROM sites s
-        LEFT JOIN page_contents p ON p.url = s.url
-        WHERE p.url IS NULL
-          AND s.host NOT LIKE '%--%'
-          AND s.host NOT GLOB '[0-9-]*'
-        LIMIT ?
-    """, (batch_size,)).fetchall()
-    if rows:
-        return [r[0] for r in rows], prefix_index
-
-    # Final fallback to any unscanned domain
-    rows = db.execute("""
-        SELECT s.url FROM sites s
-        LEFT JOIN page_contents p ON p.url = s.url
+        LEFT JOIN scan_progress p ON p.url = s.url
         WHERE p.url IS NULL
         LIMIT ?
     """, (batch_size,)).fetchall()
     return [r[0] for r in rows], prefix_index
 
 
-async def scan_worker(database_path: Path, concurrency: int = 100, limit: int = 0, state_path: Path = STATE_FILE):
+async def check_url(session, url: str, timeout_sec: float = 2.5):
+    """Probe a URL with ultra-fast timeout (1.2s connect / 2.5s total)."""
+    try:
+        async with session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=timeout_sec, connect=1.2, sock_read=1.5),
+            ssl=False,
+            allow_redirects=True,
+            max_redirects=2,
+        ) as resp:
+            status = resp.status
+            headers = {k.lower(): v for k, v in resp.headers.items()}
+            # Read first 45 KB of HTML (sufficient for meta tags and header links)
+            chunk = await resp.content.read(45000)
+            text = chunk.decode("utf-8", errors="replace")
+            return url, status, headers, text
+    except Exception:
+        return url, 0, {}, ""
+
+
+async def scan_worker(database_path: Path, concurrency: int = 500, limit: int = 0, state_path: Path = STATE_FILE):
     if aiohttp is None:
         raise RuntimeError("aiohttp is required for async scanner. Install with: pip install aiohttp")
 
     db = connect(database_path)
+    # SQLite optimization pragmas
+    db.execute("PRAGMA synchronous = NORMAL")
+    db.execute("PRAGMA cache_size = -64000")
+    db.execute("PRAGMA temp_store = MEMORY")
+    db.execute("PRAGMA busy_timeout = 15000")
+
     init_intel_tables(db)
+    init_scanner_tables(db)
 
     now_iso = datetime.now(timezone.utc).isoformat()
     with db:
         import_id = db.execute(
             "INSERT INTO imports(source, imported_at) VALUES (?, ?)",
-            (f"intel-crawler-{now_iso[:10]}", now_iso)
+            (f"wordpress-scanner-{now_iso[:10]}", now_iso),
         ).lastrowid
 
     # Existing counts
-    total_indexed = db.execute("SELECT count(*) FROM page_contents").fetchone()[0]
-    total_wp = db.execute("SELECT count(*) FROM page_contents WHERE signatures_json LIKE '%WordPress%'").fetchone()[0]
+    scanned_total = db.execute("SELECT count(*) FROM scan_progress").fetchone()[0]
+    wp_total = db.execute("SELECT count(*) FROM scan_progress WHERE has_wordpress = 1").fetchone()[0]
+
+    last_url_row = db.execute("SELECT coalesce(max(url), '') FROM scan_progress").fetchone()
+    current_cursor = last_url_row[0] if last_url_row else ""
 
     state = {
         "running": True,
         "pid": os.getpid(),
         "started_at": now_iso,
-        "scanned": 0,
-        "html_indexed": total_indexed,
-        "wordpress_found": total_wp,
+        "scanned": scanned_total,
+        "wordpress_found": wp_total,
         "speed": 0.0,
-        "last_url": "",
+        "last_url": current_cursor,
     }
     update_scanner_state(state_path, state)
 
@@ -182,101 +253,186 @@ async def scan_worker(database_path: Path, concurrency: int = 100, limit: int = 
         except NotImplementedError:
             pass
 
+    # Use aiodns async resolver if available
+    resolver = None
+    try:
+        resolver = aiohttp.AsyncResolver(nameservers=["10.104.15.254", "1.1.1.1", "8.8.8.8"])
+    except Exception:
+        pass
+
     connector = aiohttp.TCPConnector(
         limit=concurrency,
-        limit_per_host=2,
+        limit_per_host=1,
+        resolver=resolver,
         ssl=False,
-        ttl_dns_cache=300,
+        ttl_dns_cache=600,
         force_close=False,
+        enable_cleanup_closed=True,
     )
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 (compatible; InternetMapIntel/1.0)",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 (compatible; InternetMap/2.0)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Language": "en-US,en;q=0.8",
     }
 
-    batch_size = concurrency
-    total_processed = 0
-    prefix_idx = 0
+    url_queue = asyncio.Queue(maxsize=concurrency * 3)
+    result_queue = asyncio.Queue(maxsize=concurrency * 3)
+
+    session_processed = 0
     t_start = time.time()
     last_update = t_start
 
-    print(f"[*] Starting high-throughput HTML crawler (concurrency={concurrency}, limit={limit or 'unlimited'})...", flush=True)
+    # Producer coroutine: fills URL queue from DB cursor
+    async def producer():
+        nonlocal current_cursor
+        batch_fetch = max(500, concurrency * 2)
+        while not stop_event.is_set():
+            if url_queue.qsize() < concurrency:
+                # Fetch next batch from SQLite
+                rows = db.execute(
+                    "SELECT url FROM sites WHERE url > ? ORDER BY url LIMIT ?",
+                    (current_cursor, batch_fetch),
+                ).fetchall()
+
+                if not rows:
+                    if current_cursor != "":
+                        current_cursor = ""
+                        continue
+                    break
+
+                for r in rows:
+                    if stop_event.is_set():
+                        break
+                    await url_queue.put(r[0])
+                    current_cursor = r[0]
+
+            await asyncio.sleep(0.05)
+
+    # Worker coroutine: processes individual URLs continuously
+    async def worker(session):
+        while not stop_event.is_set():
+            try:
+                url = await asyncio.wait_for(url_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+            try:
+                res = await check_url(session, url)
+                await result_queue.put(res)
+            except Exception:
+                await result_queue.put((url, 0, {}, ""))
+            finally:
+                url_queue.task_done()
+
+    # Writer coroutine: batch-commits results to SQLite and updates state
+    async def writer():
+        nonlocal scanned_total, wp_total, session_processed, last_update
+        buffer = []
+
+        while not stop_event.is_set() or not result_queue.empty():
+            try:
+                item = await asyncio.wait_for(result_queue.get(), timeout=0.2)
+                buffer.append(item)
+                result_queue.task_done()
+            except asyncio.TimeoutError:
+                pass
+
+            now = time.time()
+            if buffer and (len(buffer) >= 200 or now - last_update >= 1.0 or stop_event.is_set()):
+                batch_to_write = buffer
+                buffer = []
+                now_str = datetime.now(timezone.utc).isoformat()
+
+                with db:
+                    for url, status_code, hdrs, html_str in batch_to_write:
+                        evidence = extract_wordpress_evidence(html_str, hdrs)
+                        has_wp = 1 if len(evidence) > 0 else 0
+
+                        db.execute(
+                            """
+                            INSERT OR REPLACE INTO scan_progress(url, status_code, has_wordpress, evidence, scanned_at)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (url, status_code, has_wp, json.dumps(evidence), now_str),
+                        )
+
+                        if has_wp:
+                            wp_total += 1
+                            db.execute(
+                                """
+                                INSERT OR REPLACE INTO observations(import_id, url, evidence)
+                                VALUES (?, ?, ?)
+                                """,
+                                (import_id, url, json.dumps(evidence)),
+                            )
+                            if html_str:
+                                try:
+                                    index_page(db, url, html_str, status_code=status_code, headers=hdrs, scanned_at=now_str)
+                                except Exception:
+                                    pass
+
+                scanned_total += len(batch_to_write)
+                session_processed += len(batch_to_write)
+
+                elapsed = now - t_start
+                speed = session_processed / elapsed if elapsed > 0 else 0.0
+
+                if now - last_update >= 1.0:
+                    state["scanned"] = scanned_total
+                    state["wordpress_found"] = wp_total
+                    state["speed"] = round(speed, 1)
+                    state["last_url"] = current_cursor
+                    update_scanner_state(state_path, state)
+                    last_update = now
+                    print(
+                        f"[*] High-Speed Scanner: {scanned_total:,} URLs scanned ({round(speed, 1)} req/s) | "
+                        f"WordPress: {wp_total:,} | Cursor: {current_cursor}"
+                    )
+
+                if limit > 0 and session_processed >= limit:
+                    stop_event.set()
+                    break
 
     try:
         async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
+            producer_task = asyncio.create_task(producer())
+            writer_task = asyncio.create_task(writer())
+            worker_tasks = [asyncio.create_task(worker(session)) for _ in range(concurrency)]
+
             while not stop_event.is_set():
-                urls, prefix_idx = fetch_next_urls_batch(db, batch_size=batch_size, prefix_index=prefix_idx)
-                if not urls:
-                    print("[+] All catalog domains have been scanned!", flush=True)
+                if limit > 0 and session_processed >= limit:
                     break
+                await asyncio.sleep(0.5)
 
-                tasks = [check_url(session, u) for u in urls]
-                results = await asyncio.gather(*tasks)
+            stop_event.set()
+            producer_task.cancel()
+            for wt in worker_tasks:
+                wt.cancel()
 
-                # Prepare records for batch write
-                valid_records = []
-                now_str = datetime.now(timezone.utc).isoformat()
-                wp_batch_urls = []
-
-                for url, status_code, hdrs, html_str in results:
-                    if status_code in (200, 301, 302, 403) and html_str and len(html_str) > 100:
-                        valid_records.append({
-                            "url": url,
-                            "html": html_str,
-                            "status_code": status_code,
-                            "headers": hdrs,
-                            "scanned_at": now_str,
-                        })
-
-                if valid_records:
-                    meta_list = index_pages_batch(db, valid_records)
-                    for meta in meta_list:
-                        if "WordPress" in meta["signatures"]:
-                            wp_batch_urls.append(meta["url"])
-
-                    total_indexed += len(meta_list)
-                    total_wp += len(wp_batch_urls)
-
-                    if wp_batch_urls:
-                        with db:
-                            for wp_url in wp_batch_urls:
-                                db.execute("""
-                                    INSERT OR REPLACE INTO observations(import_id, url, evidence)
-                                    VALUES (?, ?, ?)
-                                """, (import_id, wp_url, json.dumps(["WordPress detected by HTML Intel"])))
-
-                total_processed += len(results)
-                elapsed = time.time() - t_start
-                speed = total_processed / elapsed if elapsed > 0 else 0.0
-
-                if time.time() - last_update >= 2.0:
-                    state["scanned"] = total_processed
-                    state["html_indexed"] = total_indexed
-                    state["wordpress_found"] = total_wp
-                    state["speed"] = round(speed, 1)
-                    state["last_url"] = urls[-1]
-                    update_scanner_state(state_path, state)
-                    last_update = time.time()
-                    print(f"[*] Crawled: {total_processed} | Active HTML: {total_indexed} | WordPress: {total_wp} | Speed: {round(speed, 1)} req/s", flush=True)
-
-                if limit > 0 and total_processed >= limit:
-                    break
+            # Finish remaining writer items
+            try:
+                await asyncio.wait_for(writer_task, timeout=3.0)
+            except Exception:
+                pass
 
     finally:
         state["running"] = False
         state["speed"] = 0.0
+        state["scanned"] = scanned_total
+        state["wordpress_found"] = wp_total
         update_scanner_state(state_path, state)
         db.close()
-        print(f"[+] Crawler stopped. Total processed: {total_processed}, HTML indexed: {total_indexed}, WordPress found: {total_wp}", flush=True)
+        print(f"Scanner finished. Processed: {session_processed}, WordPress found: {wp_total}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", nargs="?", help="Optional single URL to scan immediately")
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
-    parser.add_argument("--concurrency", type=int, default=100)
-    parser.add_argument("--limit", type=int, default=0, help="Stop after scanning N URLs (0 = continuous)")
+    parser.add_argument("--concurrency", type=int, default=500)
+    parser.add_argument("--limit", type=int, default=0, help="Stop after scanning N URLs (0 = unlimited)")
     parser.add_argument("--status", action="store_true", help="Print current scanner status")
     args = parser.parse_args()
 
@@ -291,14 +447,18 @@ def main():
         print(f"[*] Scanning {args.url} ...")
         db = connect(args.database)
         init_intel_tables(db)
+        init_scanner_tables(db)
         try:
-            res = fetch_and_index_url(db, args.url)
-            print(f"[+] Success! URL: {res['url']}")
-            print(f"    Host: {res['host']}")
-            print(f"    Title: {res['title']}")
-            print(f"    Status: {res['status_code']}")
-            print(f"    Size: {res['content_length']} bytes")
-            print(f"    Signatures: {', '.join(res['signatures']) or 'None'}")
+            import urllib.request
+            req = urllib.request.Request(args.url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                status = resp.status
+                headers = dict(resp.headers)
+                html = resp.read().decode("utf-8", errors="replace")
+            evidence = extract_wordpress_evidence(html, headers)
+            print(f"[+] URL: {args.url}")
+            print(f"    Status: {status}")
+            print(f"    WordPress Evidence: {evidence or 'None'}")
         except Exception as e:
             print(f"[-] Error: {e}")
             sys.exit(1)
@@ -306,7 +466,14 @@ def main():
             db.close()
         return
 
-    asyncio.run(scan_worker(args.database, concurrency=args.concurrency, limit=args.limit, state_path=state_path))
+    asyncio.run(
+        scan_worker(
+            args.database,
+            concurrency=args.concurrency,
+            limit=args.limit,
+            state_path=state_path,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ _stats_cache = {}
 
 
 def is_pid_alive(pid: int) -> bool:
-    if not pid:
+    if not pid or pid <= 0:
         return False
     try:
         res, _ = os.waitpid(pid, os.WNOHANG)
@@ -365,7 +365,7 @@ def handler(database, key):
                     return
 
                 limit = int(data.get("limit", 0))
-                concurrency = int(data.get("concurrency", 100))
+                concurrency = int(data.get("concurrency", 500))
                 scanner_script = Path(__file__).resolve().parent / "scanner.py"
                 cmd = [
                     sys.executable,

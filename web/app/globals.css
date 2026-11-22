@@ -60,6 +60,18 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .line-content{color:#c5d8e8;white-space:pre-wrap;word-break:break-all}
 .code-match-highlight{background:#ffeaa733;color:#ffeaa7;border-bottom:2px solid #fdcb6e;font-weight:600}
 
+/* Live Crawler Controls & Animations */
+.pulse-indicator{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:#55efc4}
+.pulse-dot{width:9px;height:9px;border-radius:50%;background:#55efc4;box-shadow:0 0 0 0 rgba(85,239,196,.7);animation:pulse-anim 1.6s infinite}
+@keyframes pulse-anim{0%{transform:scale(.95);box-shadow:0 0 0 0 rgba(85,239,196,.7)}70%{transform:scale(1);box-shadow:0 0 0 8px rgba(85,239,196,0)}100%{transform:scale(.95);box-shadow:0 0 0 0 rgba(85,239,196,0)}}
+button.success{background:#27ae60;color:#fff;border-color:#27ae60;font-weight:600}
+button.success:hover:not(:disabled){background:#2ecc71}
+button.danger{background:#c0392b;color:#fff;border-color:#c0392b;font-weight:600}
+button.danger:hover:not(:disabled){background:#e74c3c}
+.crawler-panel{background:#111a24;border:1px solid #243547;border-radius:10px;padding:20px;margin-bottom:22px}
+.feed-table th{background:#0e1720}
+.feed-table tr:hover td{background:#131f2b}
+
 @media(max-width:600px){
   #metrics{gap:20px}
   #metrics strong{font-size:22px}

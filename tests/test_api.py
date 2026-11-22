@@ -90,3 +90,20 @@ class APITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(source['title'], 'Example')
         self.assertIn("gtag('config'", source['html'])
+
+        # Signatures summary
+        status, sigs = self.request('/api/v1/intel/signatures')
+        self.assertEqual(status, 200)
+        self.assertTrue(any(s['name'] == 'Google Analytics' and s['count'] >= 1 for s in sigs['signatures']))
+
+        # Recent scanner feed
+        status, recent = self.request('/api/v1/scanner/recent')
+        self.assertEqual(status, 200)
+        self.assertEqual(len(recent['recent']), 1)
+        self.assertEqual(recent['recent'][0]['url'], 'https://example.org/')
+
+        # Export
+        status, exp = self.request('/api/v1/export?wordpress=1')
+        self.assertEqual(status, 200)
+        self.assertEqual(exp['total'], 1)
+        self.assertEqual(exp['urls'], ['https://example.org/'])

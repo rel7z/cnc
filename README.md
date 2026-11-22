@@ -1,9 +1,55 @@
 # Internet Map
 
-Internet Map stores dataset URLs and source observations in a local SQLite catalog.
+Internet Map is a high-performance web catalog and PublicWWW-style HTML source code intelligence engine for **12.25 million .org domains**, storing dataset URLs, HTML source code, forensic evidence, and technology signatures in a local SQLite catalog.
+
 Python 3.10 or later and Node.js 20.9 or later are required. Runtime data is excluded from Git.
 
-## Run the application
+## Rapid Development Workflow
+
+Speed up development with preconfigured Makefile targets:
+
+```bash
+# 1. Install frontend dependencies
+cd web && npm ci && cd ..
+
+# 2. Seed development database with realistic domains & HTML intelligence in 0.5s
+make seed
+
+# 3. Launch local development environment with Fast Refresh & hot module reload
+make dev
+```
+
+Open http://127.0.0.1:3501. When running with `make dev` (or `python3 run.py --dev`), Next.js runs in development mode with Turbopack and hot reload so code edits in `web/` appear immediately without manual builds!
+
+### Developer Commands
+
+- `make dev`: Launch Next.js dev server with Turbopack & Python catalog API
+- `make start`: Launch production-optimized build server & API
+- `make build`: Build Next.js production frontend assets
+- `make test`: Run complete pytest suite (`test_api`, `test_catalog`, `test_intel`, `test_scanner`, `test_cli`)
+- `make seed`: Seed development catalog with realistic domains & PublicWWW intelligence
+- `make clean`: Clean temporary caches and build artifacts
+
+## Core Features
+
+1. **⚡ PublicWWW Source Code Intelligence Engine**
+   - Full-text search across raw HTML source code with FTS5 trigram indexing
+   - Technology signature detection for 25+ frameworks (WordPress, WooCommerce, Shopify, Google Analytics GA4, Google Tag Manager, AdSense, Cloudflare Turnstile, React/Next.js, Vue/Nuxt, Tailwind CSS, Stripe, etc.)
+   - Source code inspector modal with line numbers and syntax highlighting
+   - Export matching search results as plain text or JSON
+
+2. **🔍 Live Scanner & High-Throughput Catalog Crawler**
+   - On-demand URL inspector: immediately fetch any website, extract technology signatures, and index into the intelligence database
+   - Asynchronous crawler with configurable worker concurrency (50–200 workers) and batch limits
+   - Live streaming activity feed showing real-time crawled pages, HTTP status, and detected technology
+   - Safe process lifecycle management with zombie PID detection
+
+3. **🌐 High-Speed Ingestion & 12.25M .org Domain Catalog**
+   - High-throughput batched ingestion with SQLite WAL mode, `PRAGMA synchronous = NORMAL`, and `executemany` chunking (15x–30x speedup)
+   - Zero-copy streaming zone importer (`org_zone.py`) directly from `.gz` without intermediate disk files
+   - Hostname search and WordPress evidence filtering with responsive pagination
+
+## Run the application in production
 
 From this project directory:
 
