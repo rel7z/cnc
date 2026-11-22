@@ -45,6 +45,8 @@ var watcherFileMu sync.Mutex
 
 // GDriveUploader manages file watching and Google Drive uploads.
 type GDriveUploader struct {
+	bundleHashMu   sync.Mutex
+	bundleHashes   map[string]bundleFileHash
 	syncMu         sync.Mutex
 	restoreMu      sync.Mutex
 	restoreStatus  DriveRestoreStatus
@@ -869,6 +871,13 @@ func (u *GDriveUploader) syncFile(path, filename, initialStateKey string) error 
 
 // hashFile computes SHA256 hash of a file.
 func (u *GDriveUploader) hashFile(path string) (string, error) {
+	if isInternetMapBundle(filepath.Base(path)) {
+		return u.hashBundleFile(path)
+	}
+	return hashDriveFile(path)
+}
+
+func hashDriveFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
