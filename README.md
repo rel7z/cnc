@@ -1,12 +1,31 @@
 # Internet Map
 
 Internet Map stores dataset URLs and source observations in a local SQLite catalog.
-Python 3.10 or later is required. Runtime data is excluded from Git.
+Python 3.10 or later and Node.js 20.9 or later are required. Runtime data is excluded from Git.
+
+## Run the application
+
+From this project directory:
+
+```bash
+cd web
+npm ci
+npm run build
+cd ..
+python3 run.py
+```
+
+Open http://127.0.0.1:3501. The Next.js, React and TypeScript application
+communicates with the Python catalog API through server-side route handlers.
+The launcher generates the private API key automatically for both processes.
+The browser receives catalog data. Closing the launcher stops both services.
+
+The catalog starts empty. Import a dataset and click Refresh to display it.
 
 ## Import a local .org zone snapshot
 
 ```bash
-python3 internet-map/org_zone.py /path/to/org.zone.gz --source czds-org-2026-11-22
+python3 org_zone.py /path/to/org.zone.gz --source czds-org-2026-11-22
 ```
 
 The importer reads .org NS delegation owners from plain ASCII or gzip snapshots.
@@ -21,12 +40,12 @@ TXT input contains one URL or hostname per line. CSV has a url column.
 JSONL contains objects with a url field and an optional html string.
 
 ```bash
-python3 internet-map/main.py import sites.jsonl --format jsonl --source supplied-html
-python3 internet-map/main.py stats
-python3 internet-map/main.py search --host example.org
-python3 internet-map/main.py search --wordpress
-python3 internet-map/main.py observations https://example.org/
-python3 internet-map/main.py export --wordpress > wordpress-from-dataset.txt
+python3 main.py import sites.jsonl --format jsonl --source supplied-html
+python3 main.py stats
+python3 main.py search --host example.org
+python3 main.py search --wordpress
+python3 main.py observations https://example.org/
+python3 main.py export --wordpress > wordpress-from-dataset.txt
 ```
 
 WordPress classification records generator meta tags and HTML resource references.
@@ -38,7 +57,7 @@ dataset. It does not establish the date that the source page was retrieved.
 Set CNC_API_KEY privately in the process environment.
 
 ```bash
-python3 internet-map/cnc_import.py --base-url https://YOUR_CNC_HOST --remote-file /opt/cnc/merged/wordpress.txt
+python3 cnc_import.py --base-url https://YOUR_CNC_HOST --remote-file /opt/cnc/merged/wordpress.txt
 ```
 
 HTTPS and localhost HTTP tunnels are accepted. Redirects are rejected to keep the
@@ -51,8 +70,8 @@ job monitoring, and live WordPress verification require further implementation.
 ## Classify supplied HTML on a worker
 
 ```bash
-python3 internet-map/worker.py --input html-records.jsonl --output observations.jsonl
-python3 internet-map/main.py import observations.jsonl --format observations --source worker-output
+python3 worker.py --input html-records.jsonl --output observations.jsonl
+python3 main.py import observations.jsonl --format observations --source worker-output
 ```
 
 The worker reads existing HTML. Observation imports validate the evidence labels
