@@ -1,0 +1,40 @@
+{
+  "date": "2026-11-22",
+  "owner": "internet-map",
+  "executor": "cnc",
+  "bidirectional_control_verified": true,
+  "worker_roundtrip_succeeded": 8,
+  "verification_job": "job_1795358821_609",
+  "pool_available": 5000000,
+  "scanning_paused": true,
+  "drive_authorized": true,
+  "catalog_restore": {
+    "downloaded_parts": 133,
+    "bytes": 4440117248,
+    "sha256": "6a299432b2fec9082dbcd5cba57651d8eb1227946fffc962ba705f02058264fd",
+    "integrity": "ok",
+    "sites": 12468366,
+    "observations": 12517672
+  },
+  "committed_internet_map_tests_passed": 30,
+  "generator_index_tests_passed": 65,
+  "all_three_snapshots_uploaded": true,
+  "history_fully_reconciled": true,
+  "generator_verified": 218536,
+  "catalog_classifications": 218536,
+  "total_drive_parts_restored": 217,
+  "all_snapshot_integrity_checks": "ok",
+  "checkpoint_restore": {
+    "bytes": 968798208,
+    "sha256": "23fbb913bfe8c23b698c5337a13dfc39dbc826ae5056b684737bb984f9eaf63e",
+    "parts": 29,
+    "merged_hosts": 218536,
+    "ready_candidates": 1774565
+  },
+  "candidate_restore": {
+    "bytes": 1830797312,
+    "sha256": "a2025f9c82803654a67fd5f69d10d0558320a8b019656276064e2b99bc0d5508",
+    "parts": 55,
+    "candidates": 17448104
+  }
+}
