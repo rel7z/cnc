@@ -666,7 +666,15 @@ def handler(database, key):
                 try:
                     if not isinstance(data, dict):
                         raise ValueError('Expected an action object')
-                    self.reply(200, discovery_service(database).control(data.get('action')))
+                    control = discovery_service(database)
+                    if 'sources' in data or 'commoncrawl_mode' in data:
+                        result = control.configure_sources(data)
+                    else:
+                        action = data.get('action')
+                        if type(data.get('enabled')) is bool:
+                            action = 'resume' if data['enabled'] else 'pause'
+                        result = control.control(action)
+                    self.reply(200, result)
                 except ValueError as error:
                     self.reply(409, {'error': str(error)})
                 return

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import time
 import urllib.request
@@ -55,6 +56,16 @@ def perform_install():
     override = UNITS / 'internet-map-api.service.d'
     override.mkdir(exist_ok=True)
     (override / 'coordination.conf').write_text('[Service]\nEnvironmentFile=/opt/cnc/dashboard-audit.env\nEnvironment=INTERNET_MAP_CNC_URL=http://' + config['http_addr'] + '\n')
+    values = dict(line.split('=', 1) for line in (ROOT/'service.env').read_text().splitlines() if '=' in line)
+    key = shlex.split(values['INTERNET_MAP_API_KEY'])[0]
+    if any(c in key for c in '\r\n'):
+        raise RuntimeError('Invalid map API key')
+    env = Path('/opt/cnc/internet-map.env')
+    env.write_text('INTERNET_MAP_API_URL=http://127.0.0.1:3500\nINTERNET_MAP_API_KEY=' + key + '\n')
+    env.chmod(0o600)
+    ui_override = UNITS/'cnc-ui.service.d'
+    ui_override.mkdir(exist_ok=True)
+    (ui_override/'internet-map.conf').write_text('[Service]\nEnvironmentFile=/opt/cnc/internet-map.env\n')
     run('systemctl', 'disable', 'cnc-wordpress-generator.service', 'cnc-wordpress-generator-refresh.timer')
     run('systemctl', 'daemon-reload')
     run('systemctl', 'enable', '--now', 'internet-map-discovery.service', 'internet-map-sync.timer', 'internet-map-backup.timer')

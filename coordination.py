@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -51,6 +53,7 @@ class DiscoveryControl:
                     status.update(pool_available=row[0], pool_target=row[1], pool_refilling=bool(row[2]))
         return dict(status, owner='internet-map', executor='cnc',
                     scanning_enabled=(self.root / 'cutover.json').exists() and not (self.root / 'paused').exists(),
+                    enabled=(self.root / 'cutover.json').exists() and not (self.root / 'paused').exists(),
                     collection_while_paused=True, configured=self.cnc is not None)
 
     def control(self, action):
@@ -63,6 +66,28 @@ class DiscoveryControl:
             (self.root / 'paused').unlink(missing_ok=True)
         else:
             (self.root / 'paused').touch(mode=0o600, exist_ok=True)
+        state = self.root / 'generator-state.db'
+        if state.exists():
+            subprocess.run([sys.executable, str(Path(__file__).parent / 'discovery/wordpress_output.py'),
+                            '--root', str(self.root), '--merged', '/opt/cnc/merged',
+                            '--control', 'on' if action == 'resume' else 'off'],
+                           check=True, capture_output=True, text=True, timeout=60)
+        return self.status()
+
+    def configure_sources(self, data):
+        script = Path(__file__).parent / 'discovery/wordpress_sources.py'
+        if 'sources' in data:
+            patch = data['sources']
+            allowed = {'commoncrawl', 'reverse_ip', 'ct', 'other_catalogs'}
+            if not isinstance(patch, dict) or not patch or not set(patch) <= allowed or any(type(v) is not bool for v in patch.values()):
+                raise ValueError('Expected source switches')
+            options = ['--set-json', json.dumps(patch)]
+        elif data.get('commoncrawl_mode') in ('index', 'wat'):
+            options = ['--set-mode', data['commoncrawl_mode']]
+        else:
+            raise ValueError('Expected source switches or Common Crawl mode')
+        subprocess.run([sys.executable, str(script), '--root', str(self.root), *options],
+                       check=True, capture_output=True, text=True, timeout=15)
         return self.status()
 
 

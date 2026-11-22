@@ -610,13 +610,18 @@ export default function Page() {
         </div>
 
         <div className="header-status">
-          {crawlerStatus.running ? (
+          {(clusterStatus?.active_nodes ?? 0) > 0 ? (
+            <span className="status-pill active" style={{ background: "rgba(85,239,196,0.15)", color: "#55efc4", borderColor: "#28755f" }}>
+              <span className="pulse-dot"></span>
+              Swarm Active: {clusterStatus?.active_nodes} Nodes ({clusterStatus?.cluster_speed} req/s)
+            </span>
+          ) : crawlerStatus.running ? (
             <span className="status-pill active">
               <span className="pulse-dot"></span>
               Crawler Active ({crawlerStatus.speed} req/s)
             </span>
           ) : (
-            <span className="status-pill">⏸ Crawler Idle</span>
+            <span className="status-pill">⏸ Swarm / Crawler Idle</span>
           )}
           {intelStats && (
             <span className="status-pill intel">
@@ -651,8 +656,14 @@ export default function Page() {
             className={`tab-btn ${activeTab === "scanner" ? "active" : ""}`}
             onClick={() => setActiveTab("scanner")}
           >
-            🔍 Live Scanner &amp; Crawler Control
-            {crawlerStatus.running && <span className="pulse-dot" style={{ width: 6, height: 6 }}></span>}
+            🔍 Live Scanner &amp; Swarm Fleet
+            {(clusterStatus?.active_nodes ?? 0) > 0 ? (
+              <span className="tab-badge" style={{ background: "#103f36", color: "#55efc4" }}>
+                {clusterStatus?.active_nodes} Nodes ({clusterStatus?.cluster_speed} req/s)
+              </span>
+            ) : crawlerStatus.running ? (
+              <span className="pulse-dot" style={{ width: 6, height: 6 }}></span>
+            ) : null}
           </button>
           <button
             className={`tab-btn ${activeTab === "catalog" ? "active" : ""}`}
@@ -948,10 +959,198 @@ export default function Page() {
         {activeTab === "scanner" && (
           <section>
             <div style={{ marginBottom: 20 }}>
-              <h2>Live HTML Scanner &amp; Catalog Crawler Control</h2>
+              <h2>Live HTML Scanner &amp; Swarm Fleet Control</h2>
               <p style={{ color: "#8fa8be", margin: 0, fontSize: 14 }}>
-                Control the high-throughput asynchronous catalog crawler or inspect any URL live to extract technology forensics.
+                Control the 8-node distributed crawler swarm or inspect any URL live to extract technology forensics.
               </p>
+            </div>
+
+            {/* Distributed Cluster Swarm Panel */}
+            <div className="crawler-panel" style={{ border: "1px solid #1f3b54", background: "linear-gradient(180deg, #0d1622 0%, #080e16 100%)", marginBottom: 20 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 12 }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                    <span style={{ fontSize: 20 }}>⚡</span>
+                    <h3 style={{ fontSize: 18, margin: 0, color: "#f0f6fc" }}>
+                      Distributed Cluster Swarm (8 DigitalOcean Droplets)
+                    </h3>
+                    <span className="badge" style={{ background: "rgba(108,224,199,0.15)", color: "#6ce0c7", borderColor: "#286858" }}>
+                      Private VPC Mesh (10.104.0.0/20)
+                    </span>
+                  </div>
+                  <span style={{ color: "#8ab4cc", fontSize: 13 }}>
+                    Autonomous distributed crawler fleet leasing domain batches over unmetered private network. Target: ~4,000 req/s.
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <button
+                    className="secondary"
+                    onClick={async () => {
+                      setClusterBusy(true);
+                      try {
+                        const r = await fetch("/api/catalog/cluster-nodes");
+                        if (r.ok) setClusterStatus(await r.json());
+                      } finally {
+                        setClusterBusy(false);
+                      }
+                    }}
+                    disabled={clusterBusy}
+                    style={{ fontSize: 12, padding: "7px 12px" }}
+                  >
+                    🔄 Refresh Swarm
+                  </button>
+                  <button
+                    className="danger"
+                    onClick={handleStopCluster}
+                    disabled={clusterBusy || (clusterStatus?.active_nodes ?? 0) === 0}
+                    style={{ fontSize: 13, padding: "7px 14px" }}
+                  >
+                    ⏹ Stop Swarm
+                  </button>
+                  <button
+                    className="success"
+                    onClick={handleStartCluster}
+                    disabled={clusterBusy}
+                    style={{ fontSize: 13, padding: "7px 16px" }}
+                  >
+                    {clusterBusy ? "Orchestrating..." : "▶ Start 8-Node Swarm"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Swarm Combined Telemetry Cards */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12, marginBottom: 18 }}>
+                <div style={{ background: "#0b1420", padding: "12px 14px", borderRadius: 8, border: "1px solid #1a2f45" }}>
+                  <span style={{ fontSize: 12, color: "#799cb6", display: "block", marginBottom: 2 }}>Combined Cluster Throughput</span>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                    <strong style={{ fontSize: 24, color: (clusterStatus?.cluster_speed ?? 0) > 0 ? "#55efc4" : "#e4edf5", fontWeight: 700 }}>
+                      {(clusterStatus?.cluster_speed ?? 0).toLocaleString()}
+                    </strong>
+                    <span style={{ fontSize: 12, color: "#8ab4cc" }}>req/s</span>
+                    {(clusterStatus?.cluster_speed ?? 0) > 0 && <span className="pulse-dot" style={{ width: 8, height: 8 }}></span>}
+                  </div>
+                  <span style={{ fontSize: 11, color: "#5d7b93", marginTop: 4, display: "block" }}>
+                    Capacity: 4,000 req/s across 8 droplets
+                  </span>
+                </div>
+
+                <div style={{ background: "#0b1420", padding: "12px 14px", borderRadius: 8, border: "1px solid #1a2f45" }}>
+                  <span style={{ fontSize: 12, color: "#799cb6", display: "block", marginBottom: 2 }}>Active Swarm Fleet</span>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                    <strong style={{ fontSize: 24, color: (clusterStatus?.active_nodes ?? 0) > 0 ? "#6ce0c7" : "#8ab4cc", fontWeight: 700 }}>
+                      {clusterStatus?.active_nodes ?? 0}
+                    </strong>
+                    <span style={{ fontSize: 13, color: "#8ab4cc" }}>/ 8 Droplets Online</span>
+                  </div>
+                  <span style={{ fontSize: 11, color: "#5d7b93", marginTop: 4, display: "block" }}>
+                    Controller: 10.104.0.2 (SGP1)
+                  </span>
+                </div>
+
+                <div style={{ background: "#0b1420", padding: "12px 14px", borderRadius: 8, border: "1px solid #1a2f45" }}>
+                  <span style={{ fontSize: 12, color: "#799cb6", display: "block", marginBottom: 2 }}>Swarm URLs Scanned</span>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                    <strong style={{ fontSize: 24, color: "#e4edf5", fontWeight: 700 }}>
+                      {(clusterStatus?.cluster_scanned ?? 0).toLocaleString()}
+                    </strong>
+                  </div>
+                  <span style={{ fontSize: 11, color: "#5d7b93", marginTop: 4, display: "block" }}>
+                    Total catalog: 12.25M .org domains
+                  </span>
+                </div>
+
+                <div style={{ background: "#0b1420", padding: "12px 14px", borderRadius: 8, border: "1px solid #1a2f45" }}>
+                  <span style={{ fontSize: 12, color: "#799cb6", display: "block", marginBottom: 2 }}>WordPress Sites Discovered</span>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                    <strong style={{ fontSize: 24, color: "#6ce0c7", fontWeight: 700 }}>
+                      {(clusterStatus?.cluster_wp ?? 0).toLocaleString()}
+                    </strong>
+                  </div>
+                  <span style={{ fontSize: 11, color: "#5d7b93", marginTop: 4, display: "block" }}>
+                    {(clusterStatus?.cluster_scanned ?? 0) > 0
+                      ? `${(((clusterStatus?.cluster_wp ?? 0) / (clusterStatus?.cluster_scanned ?? 1)) * 100).toFixed(1)}% detection rate`
+                      : "Evidence extraction active"}
+                  </span>
+                </div>
+
+                <div style={{ background: "#0b1420", padding: "12px 14px", borderRadius: 8, border: "1px solid #1a2f45" }}>
+                  <span style={{ fontSize: 12, color: "#799cb6", display: "block", marginBottom: 2 }}>Catalog Completion ETA</span>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                    <strong style={{ fontSize: 20, color: (clusterStatus?.cluster_speed ?? 0) > 0 ? "#55efc4" : "#8ab4cc", fontWeight: 600 }}>
+                      {(clusterStatus?.cluster_speed ?? 0) > 50
+                        ? `~${Math.round((12250000 - (clusterStatus?.cluster_scanned ?? 0)) / (clusterStatus?.cluster_speed || 1) / 60)} mins`
+                        : (clusterStatus?.cluster_speed ?? 0) > 0 ? "Calculating..." : "Idle"}
+                    </strong>
+                  </div>
+                  <span style={{ fontSize: 11, color: "#5d7b93", marginTop: 4, display: "block" }}>
+                    At 4,000 req/s: ~50 mins for 12.25M
+                  </span>
+                </div>
+              </div>
+
+              {/* 8-Worker Droplet Mesh Grid */}
+              <h4 style={{ margin: "0 0 10px", fontSize: 14, color: "#a5c2d9", display: "flex", alignItems: "center", gap: 6 }}>
+                <span>🖥️ DigitalOcean Worker Droplet Fleet</span>
+                <span style={{ fontSize: 12, color: "#6c899f", fontWeight: "normal" }}>
+                  (Each running isolated crawler service with cgroups v2 resource quotas)
+                </span>
+              </h4>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 10 }}>
+                {WORKER_SPECS.map((spec) => {
+                  const node = clusterStatus?.nodes.find((n) => n.node_id === spec.id);
+                  const isAlive = node?.status === "active";
+                  return (
+                    <div
+                      key={spec.id}
+                      style={{
+                        background: isAlive ? "#0b1622" : "#090f17",
+                        border: isAlive ? "1px solid #1f4769" : "1px solid #162433",
+                        borderRadius: 6,
+                        padding: "10px 12px",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: "#e4edf5" }}>{spec.id}</span>
+                          <span style={{ fontSize: 11, color: "#6f8b9e" }}>({spec.vpc})</span>
+                        </div>
+                        <span
+                          className="badge"
+                          style={{
+                            fontSize: 10,
+                            padding: "2px 6px",
+                            background: isAlive ? "rgba(85,239,196,0.15)" : "rgba(108,137,159,0.15)",
+                            color: isAlive ? "#55efc4" : "#6c899f",
+                            borderColor: isAlive ? "#28755f" : "#243748",
+                          }}
+                        >
+                          {isAlive ? "● ACTIVE" : "IDLE / STOPPED"}
+                        </span>
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: "#8ab4cc", marginBottom: 4 }}>
+                        <span>Throughput:</span>
+                        <strong style={{ color: (node?.speed ?? 0) > 0 ? "#55efc4" : "#6c899f" }}>
+                          {node?.speed ? `${node.speed.toFixed(1)} req/s` : "0.0 req/s"}
+                        </strong>
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: "#8ab4cc", marginBottom: 4 }}>
+                        <span>Scanned / WP:</span>
+                        <span style={{ color: "#d5e5f2" }}>
+                          {(node?.scanned_count ?? 0).toLocaleString()} <span style={{ color: "#6ce0c7" }}>({(node?.wp_count ?? 0).toLocaleString()} WP)</span>
+                        </span>
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, color: "#547087", borderTop: "1px solid #14212e", paddingTop: 4, marginTop: 4 }}>
+                        <span>Cap: CPU 150% • 1G RAM</span>
+                        <span>{node?.last_heartbeat ? "Live Heartbeat" : "Standby"}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
 
             {/* On-Demand URL Inspector */}
