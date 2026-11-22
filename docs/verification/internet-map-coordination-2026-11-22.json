@@ -36,5 +36,10 @@
     "sha256": "a2025f9c82803654a67fd5f69d10d0558320a8b019656276064e2b99bc0d5508",
     "parts": 55,
     "candidates": 17448104
+  },
+  "deployed_source_audit": {
+    "owned_source_files_verified": 20,
+    "shared_api_discovery_hooks_verified": true,
+    "unrelated_api_features_preserved": true
   }
 }

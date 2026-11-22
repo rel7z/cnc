@@ -11,3 +11,5 @@ The CNC installer now detects the Internet Map ownership marker and does not rea
 Validation: 65 migrated generator/index tests, 30 Internet Map tests, local TypeScript check and production Next.js build passed. Runtime secrets, databases, backups and datasets are excluded from commits. Internet Map source is in the owner's separate Desktop project and is published on `codex/internet-map-coordination`.
 
 The canonical catalog feed was verified live and the combined candidate pool reached 5,000,000 while scanning remained paused. The exact committed Internet Map revision passed 30 tests; the migrated generator/index suite passed 65. Compressed binary manifests avoid CNC text-line deduplication. Recovery receipts are retained under `/opt/internet-map/data/drive-restore-check-*`.
+
+Final source audit: 20 owned deployed source files verified against the committed versions; shared API discovery hooks matched by AST comparison while separately developed database-management endpoints were preserved.
