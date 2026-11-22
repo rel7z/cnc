@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Internet Map</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#0c1219;color:#e4edf5}*{box-sizing:border-box}body{margin:0}header{padding:24px 5vw;border-bottom:1px solid #273545;display:flex;align-items:center;justify-content:space-between}h1{font-size:24px;margin:0;font-weight:650;letter-spacing:-.7px}header span{color:#81acb9;font-size:13px}main{max-width:1150px;margin:40px auto;padding:0 24px}form,.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}input,button{font:inherit;border-radius:7px;border:1px solid #354655;padding:10px 14px;background:#131e29;color:inherit}input[type=password],input[type=search]{flex:1;min-width:180px}button{cursor:pointer}button.primary{background:#6ce0c7;color:#0d2022;border-color:#6ce0c7;font-weight:650}button:disabled{opacity:.4;cursor:default}#metrics{display:flex;gap:48px;margin:34px 0;color:#93a8b9}#metrics strong{font-size:28px;color:#eef6fc;display:block;font-weight:500}table{border-collapse:collapse;width:100%;margin-top:24px}th,td{text-align:left;padding:16px 12px;border-bottom:1px solid #253343}th{color:#91a7b9;font-size:12px;text-transform:uppercase;font-weight:500}td button{padding:0;background:none;border:none;text-align:left;color:#78dccc;overflow-wrap:anywhere}footer{display:flex;justify-content:flex-end;align-items:center;gap:15px;margin-top:20px}#notice{min-height:24px;color:#e9bd86;margin:18px 0}dialog{background:#14202c;color:inherit;border:1px solid #456071;border-radius:12px;width:min(750px,90vw)}dialog::backdrop{background:#0009}article{border-top:1px solid #334655;padding:18px 0;overflow-wrap:anywhere}small{color:#9bafbf}label{display:flex;align-items:center;gap:8px}h2{font-size:18px}p{line-height:1.6}@media(max-width:600px){#metrics{gap:22px}#metrics strong{font-size:23px}header span{display:none}}
+</style>
+<header><h1>Internet Map</h1><span>Dataset intelligence</span></header>
+<main>
+<form id="connection"><input id="key" type="password" autocomplete="off" aria-label="API key" placeholder="Internet Map API key" required><button class="primary">Connect</button><button id="disconnect" type="button">Disconnect</button></form>
+<div id="notice" role="status" aria-live="polite">Connect to explore your catalog.</div>
+<section id="catalog" hidden>
+<div id="metrics"></div>
+<form id="search"><input id="host" type="search" aria-label="Filter hostname" placeholder="Search hostname"><label><input id="wordpress" type="checkbox">WordPress evidence</label><button class="primary">Search</button></form>
+<table><thead><tr><th>URL · open observations</th><th>Hostname</th></tr></thead><tbody id="rows"></tbody></table>
+<footer><button id="previous">Previous</button><span id="page"></span><button id="next">Next</button></footer>
+</section>
+<dialog id="details"><form method="dialog"><button style="float:right">Close</button></form><h2 id="selected"></h2><div id="observations"></div></dialog>
+</main>
+<script>
+const el=id=>document.getElementById(id);let key="",page=1,busy=false;
+async function api(path){const response=await fetch("/api/v1/"+path,{headers:{Authorization:"Bearer "+key},signal:AbortSignal.timeout(10000),cache:"no-store"});const data=await response.json();if(!response.ok)throw Error(data.error||"Request failed");return data}
+function node(tag,text){const item=document.createElement(tag);item.textContent=text;return item}
+async function run(action){if(busy)return;busy=true;document.querySelectorAll("button").forEach(b=>b.disabled=true);el("notice").textContent="Loading…";try{await action();el("notice").textContent=""}catch(e){el("notice").textContent=e.name==="TimeoutError"?"Request timed out. Try again.":e.message}finally{busy=false;document.querySelectorAll("button").forEach(b=>b.disabled=false);paging()}}
+let more=false;
+function paging(){el("previous").disabled=page<=1;el("next").disabled=!more}
+async function load(){const q=new URLSearchParams({host:el("host").value,wordpress:el("wordpress").checked?"1":"0",page:String(page)});const data=await api("sites?"+q);more=data.has_more;el("rows").replaceChildren();for(const item of data.items){const row=node("tr",""),cell=node("td",""),button=node("button",item.url);button.onclick=()=>run(async()=>{const data=await api("observations?"+new URLSearchParams({url:item.url}));el("selected").textContent=item.url;el("observations").replaceChildren();for(const observation of data.items){const entry=node("article","");entry.append(node("p",observation.source),node("small",observation.imported_at),node("p",observation.evidence.join(" · ")||"No WordPress evidence recorded"));el("observations").append(entry)}if(!data.items.length)el("observations").append(node("p","No observations."));el("details").showModal()});cell.append(button);row.append(cell,node("td",item.host));el("rows").append(row)}if(!data.items.length){const cell=node("td","No matching URLs.");cell.colSpan=2;const row=node("tr","");row.append(cell);el("rows").append(row)}el("page").textContent="Page "+page}
+el("connection").onsubmit=e=>{e.preventDefault();run(async()=>{key=el("key").value;const stats=await api("stats");el("key").value="";el("metrics").replaceChildren();for(const [label,value]of [["URLs",stats.urls],["Dataset imports",stats.imports],["WordPress evidence",stats.wordpress]]){const item=node("div",label);item.prepend(node("strong",Number(value).toLocaleString()));el("metrics").append(item)}page=1;await load();el("catalog").hidden=false})};
+el("disconnect").onclick=()=>{key="";el("key").value="";el("catalog").hidden=true;el("rows").replaceChildren();el("details").close();el("observations").replaceChildren();el("notice").textContent="Disconnected."};
+el("search").onsubmit=e=>{e.preventDefault();run(async()=>{page=1;await load()})};
+el("previous").onclick=()=>run(async()=>{page--;await load()});el("next").onclick=()=>run(async()=>{page++;await load()});
+</script></html>

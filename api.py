@@ -7,9 +7,12 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import time
 from urllib.parse import parse_qs, urlsplit
 
-from main import normalize
+from main import DEFAULT_DATABASE, normalize
+
+_stats_cache = {}
 
 
 def handler(database, key):
@@ -46,21 +49,38 @@ def handler(database, key):
                 with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
                     db.row_factory = sqlite3.Row
                     if parsed.path == "/api/v1/stats":
-                        result = {
-                            "urls": db.execute("SELECT count(*) FROM sites").fetchone()[0],
-                            "imports": db.execute("SELECT count(*) FROM imports").fetchone()[0],
-                            "wordpress": db.execute("SELECT count(DISTINCT url) FROM observations WHERE evidence!='[]'").fetchone()[0],
-                        }
+                        now = time.monotonic()
+                        cached = _stats_cache.get(str(database))
+                        if cached and (now - cached["timestamp"] < 10):
+                            result = cached["data"]
+                        else:
+                            result = {
+                                "urls": db.execute("SELECT count(*) FROM sites").fetchone()[0],
+                                "imports": db.execute("SELECT count(*) FROM imports").fetchone()[0],
+                                "wordpress": db.execute("SELECT count(DISTINCT url) FROM observations WHERE evidence!='[]'").fetchone()[0],
+                            }
+                            _stats_cache[str(database)] = {"timestamp": now, "data": result}
                     elif parsed.path == "/api/v1/sites":
                         page = int(query.get("page", ["1"])[0])
                         if not 1 <= page <= 10000000:
                             raise ValueError("Invalid page")
+                        limit = int(query.get("limit", ["25"])[0])
+                        if not 1 <= limit <= 100:
+                            limit = 25
                         host = query.get("host", [""])[0].lower()
-                        condition = "instr(s.host,?)>0"
+                        conditions = []
+                        params = []
+                        if host:
+                            conditions.append("instr(s.host,?)>0")
+                            params.append(host)
                         if query.get("wordpress", ["0"])[0] == "1":
-                            condition += " AND EXISTS(SELECT 1 FROM observations o WHERE o.url=s.url AND o.evidence!='[]')"
-                        rows = db.execute("SELECT s.url,s.host FROM sites s WHERE " + condition + " ORDER BY s.url LIMIT 26 OFFSET ?", (host, (page-1)*25)).fetchall()
-                        result = {"items": [dict(r) for r in rows[:25]], "has_more": len(rows)>25, "page": page}
+                            conditions.append("EXISTS(SELECT 1 FROM observations o WHERE o.url=s.url AND o.evidence!='[]')")
+                        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+                        fetch_count = limit + 1
+                        offset = (page - 1) * limit
+                        params.extend([fetch_count, offset])
+                        rows = db.execute("SELECT s.url,s.host FROM sites s" + where + " ORDER BY s.url LIMIT ? OFFSET ?", params).fetchall()
+                        result = {"items": [dict(r) for r in rows[:limit]], "has_more": len(rows)>limit, "page": page}
                     elif parsed.path == "/api/v1/observations":
                         _, url = normalize(query.get("url", [""])[0])
                         rows = db.execute("SELECT i.source,i.imported_at,o.evidence FROM observations o JOIN imports i ON i.id=o.import_id WHERE o.url=? ORDER BY i.id DESC LIMIT 100", (url,))
@@ -78,7 +98,7 @@ def handler(database, key):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=Path("internet-map/data/catalog.db"))
+    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     parser.add_argument("--port", type=int, default=3500)
     args = parser.parse_args()
     key = os.environ.get("INTERNET_MAP_API_KEY", "")

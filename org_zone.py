@@ -5,16 +5,27 @@ import gzip
 from pathlib import Path
 import tempfile
 
-from main import connect, ingest
+from main import DEFAULT_DATABASE, connect, ingest
+
+
+def strip_comments(text):
+    in_quote = False
+    for i, char in enumerate(text):
+        if char == '"':
+            in_quote = not in_quote
+        elif char == ';' and not in_quote:
+            return text[:i]
+    return text
 
 
 def delegations(stream):
     origin = "org."
     owner = None
     depth = 0
+    last_emitted = None
     for number, raw in enumerate(stream, 1):
         # Delegation records in CZDS snapshots use unquoted owner/type fields.
-        line = raw.split(";", 1)[0].rstrip()
+        line = strip_comments(raw).rstrip()
         if not line.strip():
             continue
         fields = line.split()
@@ -61,7 +72,9 @@ def delegations(stream):
             raise ValueError(f"Invalid delegation at line {number}")
         if not all(c in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in label):
             raise ValueError(f"Invalid delegation at line {number}")
-        yield name
+        if name != last_emitted:
+            last_emitted = name
+            yield name
     if depth:
         raise ValueError("Incomplete multiline zone record")
 
@@ -70,12 +83,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
     parser.add_argument("--source", required=True)
-    parser.add_argument("--database", type=Path, default=Path("internet-map/data/catalog.db"))
+    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     args = parser.parse_args()
     opening = gzip.open if args.input.suffix == ".gz" else open
     with tempfile.TemporaryDirectory(prefix="internet-map-zone-") as folder:
         extracted = Path(folder) / "delegations.txt"
-        with opening(args.input, "rt", encoding="ascii") as stream, extracted.open("w") as output:
+        with opening(args.input, "rt", encoding="ascii", errors="replace") as stream, extracted.open("w") as output:
             for domain in delegations(stream):
                 output.write(domain + "\n")
         db = connect(args.database)

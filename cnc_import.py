@@ -7,7 +7,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 
-from main import connect, ingest
+from main import DEFAULT_DATABASE, connect, ingest
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -19,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--remote-file", required=True)
-    parser.add_argument("--database", type=Path, default=Path("internet-map/data/catalog.db"))
+    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     args = parser.parse_args()
     base = urllib.parse.urlsplit(args.base_url)
     if base.scheme != "https" and not (

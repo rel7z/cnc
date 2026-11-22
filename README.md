@@ -20,6 +20,11 @@ communicates with the Python catalog API through server-side route handlers.
 The launcher generates the private API key automatically for both processes.
 The browser receives catalog data. Closing the launcher stops both services.
 
+The catalog groups URLs by scheme, hostname, and port; paths and queries are discarded.
+Duplicate records within an import merge their WordPress evidence. All commands
+default to `data/catalog.db` beside the Python source, regardless of working directory.
+For `main.py`, place an explicit `--database` option before the subcommand.
+
 The catalog starts empty. Import a dataset and click Refresh to display it.
 
 ## Import a local .org zone snapshot

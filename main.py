@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 from datetime import datetime, timezone
 
 
+DEFAULT_DATABASE = Path(__file__).resolve().parent / "data/catalog.db"
+
 def normalize(value):
     value = value.strip()
     if not value or any(c.isspace() for c in value):
@@ -63,7 +65,7 @@ class WordPressHTML(HTMLParser):
             except ValueError:
                 continue
             for marker in ("wp-content", "wp-includes"):
-                if "/" + marker + "/" in path:
+                if "/" + marker + "/" in "/" + path.lstrip("/"):
                     self.evidence.add(marker + " resource reference")
 
     handle_startendtag = handle_starttag
@@ -80,6 +82,8 @@ def connect(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
     db.execute("PRAGMA foreign_keys=ON")
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
     db.executescript("""
         CREATE TABLE IF NOT EXISTS imports (
             id INTEGER PRIMARY KEY, source TEXT NOT NULL,
@@ -89,6 +93,7 @@ def connect(path):
         CREATE TABLE IF NOT EXISTS sites (
             url TEXT PRIMARY KEY, host TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS sites_host ON sites(host);
         CREATE TABLE IF NOT EXISTS observations (
             import_id INTEGER NOT NULL REFERENCES imports(id),
             url TEXT NOT NULL REFERENCES sites(url),
@@ -96,6 +101,7 @@ def connect(path):
             PRIMARY KEY(import_id, url)
         );
         CREATE INDEX IF NOT EXISTS observations_url ON observations(url);
+        CREATE INDEX IF NOT EXISTS observations_wp_url ON observations(url) WHERE evidence != '[]';
     """)
     return db
 
@@ -129,6 +135,14 @@ def ingest(db, args):
             result = db.execute("INSERT OR IGNORE INTO observations VALUES (?,?,?)",
                                 (ident, url, json.dumps(evidence)))
             accepted += result.rowcount
+            if not result.rowcount and evidence:
+                previous = db.execute(
+                    "SELECT evidence FROM observations WHERE import_id=? AND url=?",
+                    (ident, url),
+                ).fetchone()[0]
+                merged = sorted(set(json.loads(previous)) | set(evidence))
+                db.execute("UPDATE observations SET evidence=? WHERE import_id=? AND url=?",
+                           (json.dumps(merged), ident, url))
         db.execute("UPDATE imports SET accepted=?,rejected=? WHERE id=?",
                    (accepted, rejected, ident))
     print(f"Imported {accepted} unique URLs from {args.source}. Rejected {rejected} rows.")
@@ -136,21 +150,23 @@ def ingest(db, args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=Path("internet-map/data/catalog.db"))
+    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    db_parent = argparse.ArgumentParser(add_help=False)
+    db_parent.add_argument("--database", type=Path, default=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command", required=True)
-    load = commands.add_parser("import")
+    load = commands.add_parser("import", parents=[db_parent])
     load.add_argument("input", type=Path)
     load.add_argument("--format", choices=("txt", "csv", "jsonl", "observations"), required=True)
     load.add_argument("--source", required=True)
-    search = commands.add_parser("search")
+    search = commands.add_parser("search", parents=[db_parent])
     search.add_argument("--host", default="")
     search.add_argument("--wordpress", action="store_true")
     search.add_argument("--limit", type=int, default=100)
-    export = commands.add_parser("export")
+    export = commands.add_parser("export", parents=[db_parent])
     export.add_argument("--wordpress", action="store_true")
-    inspect = commands.add_parser("observations")
+    inspect = commands.add_parser("observations", parents=[db_parent])
     inspect.add_argument("url")
-    commands.add_parser("stats")
+    commands.add_parser("stats", parents=[db_parent])
     args = parser.parse_args()
     db = connect(args.database)
     try:
