@@ -9,6 +9,10 @@ const ALLOWED = [
   "database-maintenance",
   "database-import",
   "database-delete",
+  "database-bundle-status",
+  "database-bundle-create",
+  "database-bundle-verify",
+  "database-sync",
   "sources",
   "discovery-status",
   "discovery-workers",
@@ -54,6 +58,14 @@ function getBackendUrl(resource: string): URL {
       path = "/api/v1/database/sources/sample";
     } else if (resource === "database-delete") {
       path = "/api/v1/database/sources/delete";
+    } else if (resource === "database-bundle-status") {
+      path = "/api/v1/database/bundle/status";
+    } else if (resource === "database-bundle-create") {
+      path = "/api/v1/database/bundle/create";
+    } else if (resource === "database-bundle-verify") {
+      path = "/api/v1/database/bundle/verify";
+    } else if (resource === "database-sync") {
+      path = "/api/v1/database/sync";
     } else {
       path = "/api/v1/database/" + resource.slice(9);
     }

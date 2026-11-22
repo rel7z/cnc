@@ -223,3 +223,71 @@ class APITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(del_res['success'])
         self.assertEqual(del_res['deleted_imports'], 1)
+
+    def test_database_bundle_and_sync(self):
+        # 1. Status without key or previous backup
+        status, res = self.request('/api/v1/database/bundle/status')
+        self.assertEqual(status, 200)
+        self.assertEqual(res['status'], 'ok')
+        self.assertFalse(res['is_backup_running'])
+
+        # 2. Trigger sync
+        status, sync_res = self.request('/api/v1/database/sync', method='POST')
+        self.assertEqual(status, 200)
+        self.assertTrue(sync_res['success'])
+        self.assertEqual(sync_res['imported'], 0)
+
+        # 3. Status reflects sync
+        status, res = self.request('/api/v1/database/bundle/status')
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(res['sync'])
+        self.assertEqual(res['sync']['data']['imported'], 0)
+
+        # 4. Attempt bundle creation without key should return error
+        status, err_bundle = self.request('/api/v1/database/bundle/create', method='POST')
+        self.assertEqual(status, 500)
+        self.assertFalse(err_bundle['success'])
+        self.assertIn('Recovery key missing', err_bundle['message'])
+
+        # 5. Provide key and test bundle creation and verification
+        import os
+        from bundle import DATABASES
+        key_file = Path(self.temp.name) / 'internet-map-recovery.key'
+        key_file.write_bytes(b'k' * 32)
+        old_key_env = os.environ.get('RECOVERY_KEY_PATH')
+        os.environ['RECOVERY_KEY_PATH'] = str(key_file)
+        try:
+            # Create dummy secondary databases and minimum source files so bundle passes
+            (Path(self.temp.name) / 'api.py').write_text('# api')
+            (Path(self.temp.name) / 'infra').mkdir(parents=True, exist_ok=True)
+            (Path(self.temp.name) / 'infra/install-services.py').write_text('# install')
+            for rel in DATABASES:
+                p = Path(self.temp.name) / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                if not p.exists():
+                    with connect(p) as db_dummy:
+                        db_dummy.execute('CREATE TABLE dummy(x)')
+
+            status, ok_bundle = self.request('/api/v1/database/bundle/create', method='POST')
+            self.assertEqual(status, 200)
+            self.assertTrue(ok_bundle['success'])
+
+            # Wait briefly or simulate bundle completion
+            import time
+            time.sleep(0.5)
+
+            status, res = self.request('/api/v1/database/bundle/status')
+            self.assertEqual(status, 200)
+            self.assertTrue(res['key_configured'])
+            self.assertIn('drive', res)
+
+            # Test verify endpoint
+            status, verify_res = self.request('/api/v1/database/bundle/verify', method='POST')
+            self.assertEqual(status, 200)
+            self.assertTrue(verify_res['success'])
+            self.assertEqual(verify_res['integrity'], 'ok')
+        finally:
+            if old_key_env is not None:
+                os.environ['RECOVERY_KEY_PATH'] = old_key_env
+            else:
+                os.environ.pop('RECOVERY_KEY_PATH', None)

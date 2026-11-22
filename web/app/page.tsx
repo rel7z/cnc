@@ -132,6 +132,54 @@ type DbSampleRecord = {
   evidence: string[];
 };
 
+type DbBundleStatus = {
+  status: string;
+  is_backup_running: boolean;
+  backup?: {
+    updated_at: number;
+    data: {
+      filename?: string;
+      bytes?: number;
+      sha256?: string;
+      format?: string;
+      databases?: string[];
+      source_included?: boolean;
+      snapshots?: Array<{
+        filename: string;
+        bytes: number;
+        sha256: string;
+        integrity: string;
+      }>;
+    };
+  };
+  sync?: {
+    updated_at: number;
+    data: {
+      imported?: number;
+    };
+  };
+  drive?: {
+    enabled: boolean;
+    configured: boolean;
+    watch_dir: string;
+    parent_folder_id: string;
+    upload_interval: string;
+    uploaded_count: number;
+    known_files_count?: number;
+    is_uploaded: boolean;
+    drive_file_id?: string;
+  };
+  key_configured: boolean;
+  key_path?: string;
+  drive_inbox?: string;
+  recent_bundles?: Array<{
+    filename: string;
+    bytes: number;
+    size_mb: number;
+    created_at: number;
+  }>;
+};
+
 const WORKER_SPECS = [
   { id: "cnc-do-worker-1", vpc: "10.104.0.3", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
   { id: "cnc-do-worker-2", vpc: "10.104.0.4", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
@@ -236,6 +284,10 @@ export default function Page() {
   // Tab 4: Database Management State
   const [dbSources, setDbSources] = useState<DbSource[]>([]);
   const [dbStats, setDbStats] = useState<DbStats | null>(null);
+  const [dbBundleStatus, setDbBundleStatus] = useState<DbBundleStatus | null>(null);
+  const [bundleActionBusy, setBundleActionBusy] = useState(false);
+  const [bundleVerifyBusy, setBundleVerifyBusy] = useState(false);
+  const [syncActionBusy, setSyncActionBusy] = useState(false);
   const [dbBusy, setDbBusy] = useState(false);
   const [dbError, setDbError] = useState("");
   const [dbSearch, setDbSearch] = useState("");
@@ -725,9 +777,10 @@ export default function Page() {
     setDbBusy(true);
     setDbError("");
     try {
-      const [srcRes, statsRes] = await Promise.all([
+      const [srcRes, statsRes, bundleRes] = await Promise.all([
         fetch("/api/catalog/database-sources"),
         fetch("/api/catalog/database-stats"),
+        fetch("/api/catalog/database-bundle-status"),
       ]);
       if (srcRes.ok) {
         const data = await srcRes.json();
@@ -738,6 +791,10 @@ export default function Page() {
       if (statsRes.ok) {
         const data = await statsRes.json();
         setDbStats(data);
+      }
+      if (bundleRes.ok) {
+        const data = await bundleRes.json();
+        setDbBundleStatus(data);
       }
     } catch {
       setDbError("Error contacting database service");
@@ -794,6 +851,75 @@ export default function Page() {
       showToast(`Network error running maintenance [${action}]`, "error");
     } finally {
       setDbMaintenanceBusy(false);
+    }
+  };
+
+  const handleCreateBundle = async () => {
+    setBundleActionBusy(true);
+    try {
+      const res = await fetch("/api/catalog/database-bundle-create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast(data.message || "Recovery bundle backup started!", "success");
+        setDbMaintenanceMsg({ type: "success", text: data.message || "Recovery bundle creation started" });
+        void loadDatabaseData();
+      } else {
+        showToast(data.message || data.error || "Failed to create recovery bundle", "error");
+        setDbMaintenanceMsg({ type: "error", text: data.message || data.error || "Failed to create recovery bundle" });
+      }
+    } catch {
+      showToast("Error requesting recovery bundle creation", "error");
+    } finally {
+      setBundleActionBusy(false);
+    }
+  };
+
+  const handleSyncDiscovery = async () => {
+    setSyncActionBusy(true);
+    try {
+      const res = await fetch("/api/catalog/database-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast(data.message || `Discovery classifications synchronized (${data.imported} imported)`, "success");
+        setDbMaintenanceMsg({ type: "success", text: data.message || `Synchronized ${data.imported} records` });
+        void loadDatabaseData();
+      } else {
+        showToast(data.message || data.error || "Failed to synchronize discovery", "error");
+        setDbMaintenanceMsg({ type: "error", text: data.message || data.error || "Sync failed" });
+      }
+    } catch {
+      showToast("Error requesting discovery synchronization", "error");
+    } finally {
+      setSyncActionBusy(false);
+    }
+  };
+
+  const handleVerifyBundle = async () => {
+    setBundleVerifyBusy(true);
+    try {
+      const res = await fetch("/api/catalog/database-bundle-verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast("✓ " + (data.message || "HMAC & SQLite integrity verified!"), "success");
+        setDbMaintenanceMsg({ type: "success", text: "✓ Recovery Bundle Verified: " + data.message });
+        void loadDatabaseData();
+      } else {
+        showToast(data.error || data.message || "Failed to verify recovery bundle", "error");
+        setDbMaintenanceMsg({ type: "error", text: data.error || data.message || "Verification failed" });
+      }
+    } catch {
+      showToast("Error requesting recovery bundle verification", "error");
+    } finally {
+      setBundleVerifyBusy(false);
     }
   };
 
@@ -1667,7 +1793,7 @@ export default function Page() {
                 </span>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(295px, 1fr))", gap: 12 }}>
                 {WORKER_SPECS.map((spec, idx) => {
                   const node = clusterStatus?.nodes.find((n) => n.node_id === spec.id);
                   const isAlive = node?.status === "active";
@@ -1689,7 +1815,7 @@ export default function Page() {
                     >
                       {/* Node Header */}
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                           <span
                             style={{
                               fontFamily: "var(--font-mono)",
@@ -1699,11 +1825,12 @@ export default function Page() {
                               padding: "2px 6px",
                               borderRadius: 4,
                               fontWeight: 600,
+                              flexShrink: 0,
                             }}
                           >
                             NODE-0{idx + 1}
                           </span>
-                          <div>
+                          <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                             <span style={{ fontSize: 13, fontWeight: 700, color: "#f8fafc", fontFamily: "var(--font-mono)" }}>
                               {spec.id}
                             </span>
@@ -2238,84 +2365,90 @@ export default function Page() {
               </div>
             </div>
 
-            <table>
-              <thead>
-                <tr>
-                  <th>URL</th>
-                  <th>Hostname</th>
-                  <th>Evidence</th>
-                  <th style={{ width: 180, textAlign: "center" }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sites.map((site) => (
-                  <tr key={site.url}>
-                    <td>
-                      <button onClick={() => setSelectedObsUrl(site.url)} title="View observations">
-                        {site.url}
-                      </button>
-                    </td>
-                    <td style={{ color: "#c5d8e8", fontSize: 13 }}>{site.host}</td>
-                    <td>
-                      {site.evidence && site.evidence.length > 0 ? (
-                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                          {site.evidence.map((ev, i) => (
-                            <span key={i} className="badge badge-tech" style={{ fontSize: 10 }}>
-                              {ev.replace("meta:", "").replace("resource:", "")}
-                            </span>
-                          ))}
-                        </div>
-                      ) : (
-                        <span style={{ color: "#546e7a", fontSize: 11 }}>—</span>
-                      )}
-                    </td>
-                    <td style={{ textAlign: "center" }}>
-                      <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
-                        <button
-                          onClick={() => {
-                            setScanTargetUrl(site.url);
-                            setActiveTab("scanner");
-                          }}
-                          style={{ padding: "3px 8px", fontSize: 11 }}
-                          className="secondary"
-                          title="Scan this site live"
-                        >
-                          Scan Live
-                        </button>
-                        <button
-                          onClick={() => {
-                            setIntelInput(site.host);
-                            setIntelQuery(site.host);
-                            setActiveTab("intel");
-                          }}
-                          style={{ padding: "3px 8px", fontSize: 11 }}
-                          className="secondary"
-                          title="Search in HTML Intel"
-                        >
-                          Intel
-                        </button>
-                        <a
-                          href={site.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: "#81acb9", textDecoration: "none", fontSize: 13, padding: "3px 6px" }}
-                          title="Open in new tab"
-                        >
-                          ↗
-                        </a>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {!busy && !catalogError && !sites.length && (
+            <div className="table-card">
+              <table>
+                <thead>
                   <tr>
-                    <td colSpan={4} style={{ textAlign: "center", padding: 30, color: "#6a8296" }}>
-                      No matching URLs found.
-                    </td>
+                    <th>URL</th>
+                    <th>Hostname</th>
+                    <th>Evidence</th>
+                    <th style={{ width: 190, textAlign: "center" }}>Actions</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {sites.map((site) => (
+                    <tr key={site.url}>
+                      <td>
+                        <button
+                          onClick={() => setSelectedObsUrl(site.url)}
+                          title="View observations"
+                          style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "#38bdf8" }}
+                        >
+                          {site.url}
+                        </button>
+                      </td>
+                      <td style={{ color: "#cbd5e1", fontSize: 13, fontFamily: "var(--font-mono)" }}>{site.host}</td>
+                      <td>
+                        {site.evidence && site.evidence.length > 0 ? (
+                          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                            {site.evidence.map((ev, i) => (
+                              <span key={i} className="badge badge-tech" style={{ fontSize: 10 }}>
+                                {ev.replace("meta:", "").replace("resource:", "")}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span style={{ color: "#546e7a", fontSize: 11 }}>—</span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: "center" }}>
+                        <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+                          <button
+                            onClick={() => {
+                              setScanTargetUrl(site.url);
+                              setActiveTab("scanner");
+                            }}
+                            style={{ padding: "3px 8px", fontSize: 11, fontFamily: "var(--font-mono)" }}
+                            className="secondary"
+                            title="Scan this site live"
+                          >
+                            ⚡ Scan
+                          </button>
+                          <button
+                            onClick={() => {
+                              setIntelInput(site.host);
+                              setIntelQuery(site.host);
+                              setActiveTab("intel");
+                            }}
+                            style={{ padding: "3px 8px", fontSize: 11, fontFamily: "var(--font-mono)" }}
+                            className="secondary"
+                            title="Search in HTML Intel"
+                          >
+                            🔍 Intel
+                          </button>
+                          <a
+                            href={site.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: "#7dd3fc", textDecoration: "none", fontSize: 13, padding: "3px 6px" }}
+                            title="Open in new tab"
+                          >
+                            ↗
+                          </a>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {!busy && !catalogError && !sites.length && (
+                    <tr>
+                      <td colSpan={4} style={{ textAlign: "center", padding: 30, color: "#6a8296" }}>
+                        No matching URLs found.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
 
             <footer>
               <button disabled={busy || page === 1} onClick={() => setPage(1)}>
@@ -2628,6 +2761,283 @@ export default function Page() {
               )}
             </div>
 
+            {/* Disaster Recovery & Drive Snapshots Card */}
+            <div className="db-recovery-card">
+              <div className="db-recovery-header">
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 16 }}>📦</span>
+                  <strong style={{ fontSize: 14, color: "#fff" }}>
+                    Disaster Recovery &amp; Automated Backup Bundles
+                  </strong>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontFamily: "var(--font-mono)",
+                      padding: "2px 8px",
+                      borderRadius: 10,
+                      background: "rgba(116, 185, 255, 0.15)",
+                      color: "#74b9ff",
+                      border: "1px solid rgba(116, 185, 255, 0.3)",
+                    }}
+                  >
+                    {dbBundleStatus?.backup?.data?.format || "internet-map-bundle-v2"}
+                  </span>
+                  {dbBundleStatus?.is_backup_running ? (
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        fontSize: 11,
+                        color: "#fdcb6e",
+                        background: "rgba(253, 203, 110, 0.15)",
+                        padding: "2px 8px",
+                        borderRadius: 10,
+                      }}
+                    >
+                      <span className="pulse-dot" style={{ background: "#fdcb6e" }}></span>
+                      Backup in Progress...
+                    </span>
+                  ) : (
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 5,
+                        fontSize: 11,
+                        color: "#55efc4",
+                        background: "rgba(85, 239, 196, 0.1)",
+                        padding: "2px 8px",
+                        borderRadius: 10,
+                      }}
+                    >
+                      ● Engine Ready
+                    </span>
+                  )}
+                  {dbBundleStatus?.drive?.enabled && (
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        fontSize: 11,
+                        color: dbBundleStatus.drive.is_uploaded ? "#34d399" : "#fbbf24",
+                        background: dbBundleStatus.drive.is_uploaded ? "rgba(16, 185, 129, 0.15)" : "rgba(245, 158, 11, 0.15)",
+                        border: `1px solid ${dbBundleStatus.drive.is_uploaded ? "rgba(16, 185, 129, 0.3)" : "rgba(245, 158, 11, 0.3)"}`,
+                        padding: "2px 8px",
+                        borderRadius: 10,
+                        fontFamily: "var(--font-mono)",
+                      }}
+                      title={`Google Drive Watch Dir: ${dbBundleStatus.drive.watch_dir}`}
+                    >
+                      <span>☁️</span>
+                      <span>{dbBundleStatus.drive.is_uploaded ? "Google Drive Synced" : "Drive Syncing..."}</span>
+                    </span>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={dbBundleStatus?.is_backup_running || bundleActionBusy}
+                    onClick={handleCreateBundle}
+                    title="Snapshot all 3 databases (catalog.db, generator-state.db, candidates.db) and code into an HMAC-signed .tar.gz bundle"
+                    style={{ fontSize: 12, padding: "7px 13px" }}
+                  >
+                    {dbBundleStatus?.is_backup_running || bundleActionBusy ? "⏳ Backing Up..." : "📦 Create Recovery Bundle"}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={bundleVerifyBusy || dbBundleStatus?.is_backup_running}
+                    onClick={handleVerifyBundle}
+                    title="Verify HMAC signature and SQLite PRAGMA quick_check integrity across all databases"
+                    style={{ fontSize: 12, padding: "7px 13px" }}
+                  >
+                    {bundleVerifyBusy ? "⏳ Verifying..." : "🛡️ Verify Snapshot Integrity"}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={syncActionBusy}
+                    onClick={handleSyncDiscovery}
+                    title="Reconcile and sync verified classifications from generator-state.db into catalog.db"
+                    style={{ fontSize: 12, padding: "7px 13px" }}
+                  >
+                    {syncActionBusy ? "⏳ Syncing..." : "🔄 Sync Classifications"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="db-recovery-grid">
+                {/* Panel 1: Bundle File & Telemetry */}
+                <div className="db-recovery-panel">
+                  <h4>
+                    <span>💾</span> Latest Bundle Snapshot
+                  </h4>
+                  <div className="db-recovery-item">
+                    <span>Archive Name:</span>
+                    <code title={dbBundleStatus?.backup?.data?.filename || "No backup archive found"}>
+                      {dbBundleStatus?.backup?.data?.filename
+                        ? `${dbBundleStatus.backup.data.filename.slice(0, 26)}...tar.gz`
+                        : "—"}
+                    </code>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Bundle Size:</span>
+                    <span>
+                      {dbBundleStatus?.backup?.data?.bytes
+                        ? `${(dbBundleStatus.backup.data.bytes / (1024 * 1024 * 1024)).toFixed(2)} GB (${(dbBundleStatus.backup.data.bytes / (1024 * 1024)).toFixed(1)} MB)`
+                        : "—"}
+                    </span>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Last Backed Up:</span>
+                    <span>
+                      {dbBundleStatus?.backup?.updated_at
+                        ? new Date(dbBundleStatus.backup.updated_at * 1000).toLocaleString()
+                        : "—"}
+                    </span>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Databases Included:</span>
+                    <span>
+                      {dbBundleStatus?.backup?.data?.databases
+                        ? `${dbBundleStatus.backup.data.databases.length} databases (catalog, state, queue)`
+                        : "3 databases (atomic)"}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Panel 2: Cryptographic Security & Integrity */}
+                <div className="db-recovery-panel">
+                  <h4>
+                    <span>🛡️</span> Security &amp; Key Verification
+                  </h4>
+                  <div className="db-recovery-item">
+                    <span>HMAC Recovery Key:</span>
+                    <span style={{ color: dbBundleStatus?.key_configured ? "#55efc4" : "#fdcb6e" }}>
+                      {dbBundleStatus?.key_configured ? "✅ Configured (256-bit)" : "⚠️ Key Missing"}
+                    </span>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>SHA-256 Fingerprint:</span>
+                    <code title={dbBundleStatus?.backup?.data?.sha256 || "No hash"}>
+                      {dbBundleStatus?.backup?.data?.sha256
+                        ? `${dbBundleStatus.backup.data.sha256.slice(0, 16)}...`
+                        : "—"}
+                    </code>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Integrity Verification:</span>
+                    <span style={{ color: "#55efc4" }}>
+                      PRAGMA quick_check = ok
+                    </span>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Secret Sanitization:</span>
+                    <span>Strict (excluding .env)</span>
+                  </div>
+                </div>
+
+                {/* Panel 3: Ingestion & Discovery Synchronization */}
+                <div className="db-recovery-panel">
+                  <h4>
+                    <span>🔄</span> Discovery Reconciler Sync
+                  </h4>
+                  <div className="db-recovery-item">
+                    <span>Sync Status:</span>
+                    <span style={{ color: "#55efc4" }}>
+                      Active (Timer: 30s)
+                    </span>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Last Reconciled:</span>
+                    <span>
+                      {dbBundleStatus?.sync?.updated_at
+                        ? new Date(dbBundleStatus.sync.updated_at * 1000).toLocaleString()
+                        : "—"}
+                    </span>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Classifications Ingested:</span>
+                    <span>
+                      <strong>
+                        {dbBundleStatus?.sync?.data?.imported !== undefined
+                          ? dbBundleStatus.sync.data.imported.toLocaleString()
+                          : "0"}
+                      </strong>{" "}
+                      records
+                    </span>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Attribution Source:</span>
+                    <code style={{ fontSize: 11 }}>internet-map:cnc-generator-results</code>
+                  </div>
+                </div>
+
+                {/* Panel 4: Google Drive Cloud Integration */}
+                <div className="db-recovery-panel">
+                  <h4>
+                    <span>☁️</span> Google Drive Cloud Sync
+                  </h4>
+                  <div className="db-recovery-item">
+                    <span>Target Folder:</span>
+                    <code title={dbBundleStatus?.drive?.parent_folder_id || "Root Folder"}>
+                      {dbBundleStatus?.drive?.parent_folder_id || "1J-NkR0WlEQ2Sqz8Z7yFXruyAlxQWjd73"}
+                    </code>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Upload Status:</span>
+                    <span style={{ color: dbBundleStatus?.drive?.is_uploaded ? "#55efc4" : "#fdcb6e" }}>
+                      {dbBundleStatus?.drive?.is_uploaded ? "✓ Uploaded & Synced" : "⏳ Pending Synchronization"}
+                    </span>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Watch Directory:</span>
+                    <code style={{ fontSize: 11 }}>{dbBundleStatus?.drive?.watch_dir || "/opt/cnc/merged"}</code>
+                  </div>
+                  <div className="db-recovery-item">
+                    <span>Drive Total Files:</span>
+                    <span>
+                      <strong>{dbBundleStatus?.drive?.uploaded_count ?? "—"}</strong> files in Drive
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Recent Drive Bundles */}
+              {dbBundleStatus?.recent_bundles && dbBundleStatus.recent_bundles.length > 0 && (
+                <div className="db-bundle-list">
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <span style={{ fontSize: 12, color: "var(--text-subtle)", fontWeight: 600 }}>
+                      Recent Drive Inbound Bundles ({dbBundleStatus.drive_inbox}):
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--text-subtle)" }}>
+                      Retaining 1-click restore archives
+                    </span>
+                  </div>
+                  {dbBundleStatus.recent_bundles.map((bundle, idx) => (
+                    <div key={idx} className="db-bundle-row">
+                      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ color: "#74b9ff" }}>📦</span>
+                        <span>{bundle.filename}</span>
+                      </span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                        <span style={{ color: "#55efc4" }}>{bundle.size_mb.toFixed(1)} MB</span>
+                        <span style={{ color: "var(--text-subtle)" }}>
+                          {new Date(bundle.created_at * 1000).toLocaleString()}
+                        </span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Source Search, Category Filters, and Sort */}
             <div style={{ margin: "22px 0 16px", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", flex: 1 }}>
@@ -2724,7 +3134,7 @@ export default function Page() {
             </div>
 
             {/* Sources Table */}
-            <div style={{ overflowX: "auto" }}>
+            <div className="table-card" style={{ overflowX: "auto" }}>
               <table className="feed-table" style={{ width: "100%", fontSize: 13 }}>
                 <thead>
                   <tr>

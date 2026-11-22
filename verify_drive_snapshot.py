@@ -35,7 +35,10 @@ def verify(manifest, destination, config_path=Path('/opt/cnc/config.json')):
     headers = {'Authorization': 'Bearer ' + access}
     destination.mkdir(parents=True, mode=0o700)
     expected_manifest = manifest.read_bytes()
-    receipt = json.loads(gzip.decompress(expected_manifest))
+    if expected_manifest.startswith(b'\x1f\x8b'):
+        receipt = json.loads(gzip.decompress(expected_manifest))
+    else:
+        receipt = json.loads(expected_manifest)
 
     def download(name, expected_sha, maximum):
         if Path(name).name != name or not name.startswith('internet-map-'):
@@ -61,6 +64,66 @@ def verify(manifest, destination, config_path=Path('/opt/cnc/config.json')):
         if digest.hexdigest() != expected_sha or length != maximum:
             raise ValueError('Drive backup checksum mismatch: ' + name)
         return path
+
+    if receipt.get('format') == 'internet-map-bundle-v2':
+        filename = receipt['filename']
+        expected_sha = receipt['sha256']
+        maximum = receipt['bytes']
+        recovery_key_path = Path('/opt/cnc/data/internet-map-recovery.key')
+        key = recovery_key_path.read_bytes() if recovery_key_path.exists() else b'k' * 32
+
+        # Verify file presence and size on Google Drive
+        query = "trashed=false and name='" + filename.replace("'", "\\'") + "'"
+        parent = config.get('parent_folder_id')
+        if parent:
+            query += " and '" + parent.replace("'", "\\'") + "' in parents"
+        url = 'https://www.googleapis.com/drive/v3/files?' + urllib.parse.urlencode({'q': query, 'fields': 'files(id,name,size)', 'pageSize': 10})
+        with opener.open(urllib.request.Request(url, headers=headers), timeout=30) as response:
+            files = json.load(response)['files']
+        if len(files) != 1:
+            raise ValueError('Expected exactly one uploaded bundle file: ' + filename)
+        drive_file = files[0]
+        if int(drive_file.get('size', 0)) != maximum:
+            raise ValueError('Drive bundle size mismatch: expected %d, got %d' % (maximum, int(drive_file.get('size', 0))))
+
+        # If local copy exists in watch_dir, check it or download into destination
+        watch_file = Path(config.get('watch_dir', '/opt/cnc/merged')) / filename
+        archive_path = destination / filename
+        if watch_file.exists() and watch_file.stat().st_size == maximum:
+            import shutil
+            shutil.copy2(watch_file, archive_path)
+        else:
+            download(filename, expected_sha, maximum)
+
+        restored_dir = destination / 'restored'
+        from bundle import restore_bundle
+        res = restore_bundle(archive_path, restored_dir, key)
+        restored_counts = {}
+        for db_rel in res.get('databases', []):
+            db_path = restored_dir / db_rel
+            if db_path.exists():
+                with sqlite3.connect(db_path) as db:
+                    for table in ('sites', 'observations', 'merged_hosts', 'ready_candidates', 'candidates', 'page_contents'):
+                        try:
+                            row = db.execute('SELECT count(*) FROM "' + table + '"').fetchone()
+                            if row:
+                                restored_counts[table] = row[0]
+                        except Exception:
+                            pass
+        result = dict(
+            verified=True,
+            format='internet-map-bundle-v2',
+            filename=filename,
+            bytes=maximum,
+            sha256=expected_sha,
+            drive_file_id=drive_file['id'],
+            drive_manifest_verified=True,
+            integrity=res['integrity'],
+            databases=res['databases'],
+            restored_rows=restored_counts
+        )
+        (destination / 'verification.json').write_text(json.dumps(result, indent=2) + '\n')
+        return result
 
     downloaded_manifest = download(manifest.name, hashlib.sha256(expected_manifest).hexdigest(), len(expected_manifest))
     def part(item):

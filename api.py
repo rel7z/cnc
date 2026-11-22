@@ -3,17 +3,19 @@
 import argparse
 import concurrent.futures
 from datetime import datetime, timezone
+import fcntl
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
-import re
 from pathlib import Path
 import re
+import shutil
 import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -145,6 +147,263 @@ def get_process_memory_mb(pid: int) -> float:
         except Exception:
             pass
     return 0.0
+
+
+def find_application_root(database_path: Path) -> Path:
+    p = Path(database_path).resolve()
+    if p.parent.name == "data":
+        return p.parent.parent
+    return p.parent
+
+
+def get_recovery_paths(database_path: Path):
+    root = find_application_root(database_path)
+    data_dir = root / "data" if (root / "data").exists() else Path(database_path).resolve().parent
+    inbox_env = os.environ.get("DRIVE_INBOX")
+    if inbox_env:
+        drive_inbox = Path(inbox_env)
+    elif Path("/opt/cnc/merged").exists():
+        drive_inbox = Path("/opt/cnc/merged")
+    else:
+        drive_inbox = data_dir / "bundles"
+
+    key_env = os.environ.get("RECOVERY_KEY_PATH")
+    if key_env:
+        key_path = Path(key_env)
+    elif Path("/opt/cnc/data/internet-map-recovery.key").exists():
+        key_path = Path("/opt/cnc/data/internet-map-recovery.key")
+    elif (data_dir / "internet-map-recovery.key").exists():
+        key_path = data_dir / "internet-map-recovery.key"
+    else:
+        key_path = Path("/opt/cnc/data/internet-map-recovery.key")
+
+    return root, data_dir, drive_inbox, key_path
+
+
+def get_bundle_status(database_path: Path):
+    root, data_dir, drive_inbox, key_path = get_recovery_paths(database_path)
+    backup_status_file = data_dir / "backup-status.json"
+    sync_status_file = data_dir / "sync-status.json"
+    backup_lock = data_dir / "backup.lock"
+
+    is_running = False
+    if backup_lock.exists():
+        try:
+            with backup_lock.open("r+") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except (BlockingIOError, OSError):
+            is_running = True
+
+    backup_info = None
+    if backup_status_file.exists():
+        try:
+            raw = json.loads(backup_status_file.read_text())
+            mtime = backup_status_file.stat().st_mtime
+            backup_info = {
+                "updated_at": int(mtime),
+                "data": raw,
+            }
+        except Exception:
+            pass
+
+    sync_info = None
+    if sync_status_file.exists():
+        try:
+            raw = json.loads(sync_status_file.read_text())
+            mtime = sync_status_file.stat().st_mtime
+            sync_info = {
+                "updated_at": int(mtime),
+                "data": raw,
+            }
+        except Exception:
+            pass
+
+    has_key = False
+    if key_path.exists():
+        try:
+            has_key = len(key_path.read_bytes()) >= 32
+        except Exception:
+            pass
+
+    recent_bundles = []
+    if drive_inbox.exists() and drive_inbox.is_dir():
+        try:
+            for p in sorted(drive_inbox.glob("internet-map-backup-*.tar.gz"), key=lambda x: x.stat().st_mtime, reverse=True)[:5]:
+                st = p.stat()
+                recent_bundles.append({
+                    "filename": p.name,
+                    "bytes": st.st_size,
+                    "size_mb": round(st.st_size / (1024 * 1024), 2),
+                    "created_at": int(st.st_mtime),
+                })
+        except Exception:
+            pass
+
+    drive_info = {
+        "enabled": False,
+        "configured": False,
+        "watch_dir": str(drive_inbox),
+        "parent_folder_id": "",
+        "upload_interval": "1s",
+        "uploaded_count": 0,
+        "known_files_count": 0,
+        "is_uploaded": False,
+        "drive_file_id": None,
+    }
+
+    config_path = Path("/opt/cnc/config.json")
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text()).get("gdrive", {})
+            drive_info["enabled"] = bool(cfg.get("enabled", False))
+            drive_info["configured"] = True
+            drive_info["watch_dir"] = cfg.get("watch_dir", str(drive_inbox))
+            drive_info["parent_folder_id"] = cfg.get("parent_folder_id", "")
+            drive_info["upload_interval"] = cfg.get("upload_interval", "1s")
+
+            state_dir = Path("/opt/cnc/data/gdrive")
+            if state_dir.exists():
+                states = list(state_dir.glob("*-state.json"))
+                if states:
+                    s = json.loads(states[0].read_text())
+                    uploaded = s.get("uploaded", [])
+                    known = s.get("known_files", [])
+                    drive_info["uploaded_count"] = len(uploaded)
+                    drive_info["known_files_count"] = len(known)
+                    if backup_info and backup_info.get("data") and "filename" in backup_info["data"]:
+                        fn = backup_info["data"]["filename"]
+                        is_known = fn in known
+                        is_up = any(fn in item for item in uploaded)
+                        drive_info["is_uploaded"] = is_up or is_known
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "is_backup_running": is_running,
+        "backup": backup_info,
+        "sync": sync_info,
+        "drive": drive_info,
+        "key_configured": has_key,
+        "key_path": str(key_path),
+        "drive_inbox": str(drive_inbox),
+        "recent_bundles": recent_bundles,
+    }
+
+
+def verify_bundle_archive(database_path: Path):
+    root, data_dir, drive_inbox, key_path = get_recovery_paths(database_path)
+    status_file = data_dir / "backup-status.json"
+    if not status_file.exists():
+        return {"success": False, "status": "error", "message": "No backup status found. Run a backup first."}
+
+    try:
+        receipt = json.loads(status_file.read_text())
+        fname = receipt.get("filename")
+        if not fname:
+            return {"success": False, "status": "error", "message": "No backup filename in status."}
+
+        archive = drive_inbox / fname
+        if not archive.exists():
+            return {"success": False, "status": "error", "message": f"Archive {fname} not found in {drive_inbox}."}
+
+        if not key_path.exists() or len(key_path.read_bytes()) < 32:
+            return {"success": False, "status": "error", "message": f"Recovery key missing or invalid at {key_path}."}
+        key = key_path.read_bytes()
+
+        import tempfile
+        from bundle import restore_bundle
+        with tempfile.TemporaryDirectory(prefix=".verify-bundle-") as tmp:
+            res = restore_bundle(archive, Path(tmp) / "restore_test", key)
+        return {
+            "success": True,
+            "status": "verified",
+            "filename": fname,
+            "bytes": receipt.get("bytes"),
+            "sha256": receipt.get("sha256"),
+            "integrity": res.get("integrity", "ok"),
+            "databases": res.get("databases", []),
+            "message": "Cryptographic HMAC signature verified and all SQLite databases passed integrity check."
+        }
+    except Exception as e:
+        return {"success": False, "status": "error", "message": f"Verification failed: {e}"}
+
+
+def trigger_bundle_creation(database_path: Path):
+    root, data_dir, drive_inbox, key_path = get_recovery_paths(database_path)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock_file_path = data_dir / "backup.lock"
+
+    if not key_path.exists() or len(key_path.read_bytes()) < 32:
+        return {
+            "success": False,
+            "status": "error",
+            "message": f"Recovery key missing or invalid at {key_path} (must be at least 32 bytes)"
+        }
+
+    # If systemd service exists and systemctl is available, trigger via systemctl
+    if shutil.which("systemctl") and Path("/etc/systemd/system/internet-map-backup.service").exists():
+        try:
+            res = subprocess.run(["systemctl", "is-active", "internet-map-backup.service"], capture_output=True, text=True)
+            if res.stdout.strip() in ("activating", "active"):
+                return {"success": True, "status": "running", "message": "Recovery bundle backup is already in progress"}
+            subprocess.run(["systemctl", "start", "internet-map-backup.service"], check=True)
+            return {"success": True, "status": "started", "message": "Recovery bundle backup initiated via systemd"}
+        except Exception:
+            pass
+
+    # Check lock non-blocking
+    try:
+        test_f = lock_file_path.open("a+")
+        fcntl.flock(test_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(test_f.fileno(), fcntl.LOCK_UN)
+        test_f.close()
+    except (BlockingIOError, OSError):
+        return {"success": True, "status": "running", "message": "Recovery bundle backup is already in progress"}
+
+    def run_backup():
+        try:
+            with lock_file_path.open("w") as lock_f:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                key = key_path.read_bytes()
+                from bundle import create_bundle
+                res = create_bundle(root, drive_inbox, key)
+                output = data_dir / "backup-status.json"
+                tmp = output.with_suffix(".tmp")
+                tmp.write_text(json.dumps(res, indent=2) + "\n")
+                tmp.replace(output)
+        except Exception as err:
+            sys.stderr.write(f"Background bundle creation error: {err}\n")
+
+    thread = threading.Thread(target=run_backup, daemon=True)
+    thread.start()
+    return {"success": True, "status": "started", "message": "Recovery bundle backup initiated in background"}
+
+
+def trigger_sync(database_path: Path):
+    root, data_dir, _, _ = get_recovery_paths(database_path)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    sync_lock = data_dir / "sync.lock"
+    discovery_state = data_dir / "discovery/generator-state.db"
+
+    try:
+        with sync_lock.open("w") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            from catalog_sync import sync_verified
+            res = sync_verified(database_path, discovery_state)
+            output = data_dir / "sync-status.json"
+            tmp = output.with_suffix(".tmp")
+            tmp.write_text(json.dumps(res, indent=2) + "\n")
+            tmp.replace(output)
+            return {
+                "success": True,
+                "status": "ok",
+                "imported": res.get("imported", 0),
+                "message": f"Successfully synchronized {res.get('imported', 0)} classifications from discovery"
+            }
+    except Exception as e:
+        return {"success": False, "status": "error", "message": str(e)}
 
 
 def handler(database, key):
@@ -615,6 +874,9 @@ def handler(database, key):
                                 "user_version": user_version,
                             },
                         }
+
+                    elif parsed.path in ("/api/v1/database/bundle/status", "/api/v1/database-bundle-status"):
+                        result = get_bundle_status(database)
 
                     elif parsed.path in ("/api/v1/export", "/api/v1/download", "/api/v1/export.txt", "/api/v1/download.txt"):
                         fmt = query.get("format", ["txt" if parsed.path in ("/api/v1/download", "/api/v1/export.txt", "/api/v1/download.txt") else "json"])[0].lower()
@@ -1159,6 +1421,21 @@ def handler(database, key):
                     self.reply(200, {"success": True, "item": res})
                 except Exception as e:
                     self.reply(500, {"error": str(e)})
+                return
+
+            if parsed.path in ("/api/v1/database/bundle/create", "/api/v1/database-bundle-create"):
+                res = trigger_bundle_creation(database)
+                self.reply(200 if res.get("success") else 500, res)
+                return
+
+            if parsed.path in ("/api/v1/database/bundle/verify", "/api/v1/database-bundle-verify"):
+                res = verify_bundle_archive(database)
+                self.reply(200 if res.get("success") else 500, res)
+                return
+
+            if parsed.path in ("/api/v1/database/sync", "/api/v1/database-sync"):
+                res = trigger_sync(database)
+                self.reply(200 if res.get("success") else 500, res)
                 return
 
             if parsed.path in ("/api/v1/database/maintenance", "/api/v1/database-maintenance"):
