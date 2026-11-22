@@ -81,6 +81,53 @@ SIGNATURE_RULES = [
     ("Microsoft Clarity", [
         (r'clarity\.ms/tag/', re.IGNORECASE),
     ]),
+    ("WooCommerce", [
+        (r'woocommerce', re.IGNORECASE),
+        (r'wc-ajax=', re.IGNORECASE),
+    ]),
+    ("Squarespace", [
+        (r'static1\.squarespace\.com', re.IGNORECASE),
+        (r'squarespace-core', re.IGNORECASE),
+    ]),
+    ("Wix", [
+        (r'wix\.com/', re.IGNORECASE),
+        (r'parastorage\.com', re.IGNORECASE),
+    ]),
+    ("Webflow", [
+        (r'assets\.website-files\.com', re.IGNORECASE),
+        (r'wf-page', re.IGNORECASE),
+    ]),
+    ("Drupal", [
+        (r'Drupal\.settings', 0),
+        (r'sites/all/themes', re.IGNORECASE),
+        (r'sites/default/files', re.IGNORECASE),
+    ]),
+    ("Joomla", [
+        (r'<meta[^>]+content=["\']Joomla', re.IGNORECASE),
+        (r'templates/[^"\']+/css', re.IGNORECASE),
+    ]),
+    ("Intercom", [
+        (r'widget\.intercom\.io', re.IGNORECASE),
+        (r'Intercom\s*\(\s*["\']boot["\']', re.IGNORECASE),
+    ]),
+    ("HubSpot", [
+        (r'js\.hs-scripts\.com', re.IGNORECASE),
+        (r'hbspt\.forms\.create', re.IGNORECASE),
+    ]),
+    ("Sentry", [
+        (r'browser\.sentry-cdn\.com', re.IGNORECASE),
+        (r'Sentry\.init', re.IGNORECASE),
+    ]),
+    ("Segment", [
+        (r'cdn\.segment\.com/analytics\.js', re.IGNORECASE),
+    ]),
+    ("reCAPTCHA", [
+        (r'google\.com/recaptcha', re.IGNORECASE),
+        (r'grecaptcha', re.IGNORECASE),
+    ]),
+    ("hCaptcha", [
+        (r'hcaptcha\.com/1/api\.js', re.IGNORECASE),
+    ]),
 ]
 
 
@@ -228,81 +275,235 @@ def index_page(db, url_val, html_content, status_code=200, headers=None, scanned
     }
 
 
-def search_intel(db, query, page=1, limit=25):
-    """Search for HTML snippets and keywords across indexed web pages."""
+def index_pages_batch(db, records):
+    """Index a batch of pages in a single SQLite transaction for max throughput."""
+    if not records:
+        return []
+    results = []
+    with db:
+        for rec in records:
+            url_val = rec["url"]
+            html_content = rec["html"]
+            status_code = rec.get("status_code", 200)
+            headers = rec.get("headers")
+            scanned_at = rec.get("scanned_at") or datetime.now(timezone.utc).isoformat()
+
+            try:
+                host, url = normalize(url_val)
+            except Exception:
+                continue
+
+            title = extract_title(html_content)
+            signatures = detect_signatures(html_content, headers)
+            headers_str = json.dumps(headers or {})
+            sigs_str = json.dumps(signatures)
+            content_len = len(html_content.encode("utf-8", errors="replace"))
+
+            db.execute("INSERT OR IGNORE INTO sites VALUES (?, ?)", (url, host))
+            db.execute("""
+                INSERT INTO page_contents(url, host, status_code, title, html, headers_json, signatures_json, content_length, scanned_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    host=excluded.host,
+                    status_code=excluded.status_code,
+                    title=excluded.title,
+                    html=excluded.html,
+                    headers_json=excluded.headers_json,
+                    signatures_json=excluded.signatures_json,
+                    content_length=excluded.content_length,
+                    scanned_at=excluded.scanned_at
+            """, (url, host, status_code, title, html_content, headers_str, sigs_str, content_len, scanned_at))
+
+            try:
+                db.execute("DELETE FROM html_intel_fts WHERE url=?", (url,))
+                db.execute("INSERT INTO html_intel_fts(url, host, title, html) VALUES (?, ?, ?, ?)",
+                           (url, host, title, html_content))
+            except sqlite3.OperationalError:
+                pass
+
+            results.append({
+                "url": url,
+                "host": host,
+                "status_code": status_code,
+                "title": title,
+                "signatures": signatures,
+                "content_length": content_len,
+                "scanned_at": scanned_at,
+            })
+    return results
+
+
+def search_intel(db, query="", signature="", page=1, limit=25):
+    """Search for HTML snippets, keywords, and technology signatures across indexed web pages."""
     query = (query or "").strip()
-    if not query:
-        return {"query": "", "total": 0, "page": page, "limit": limit, "items": []}
+    signature = (signature or "").strip()
+
+    if not query and not signature:
+        return {"query": "", "signature": "", "total": 0, "page": page, "limit": limit, "items": []}
 
     offset = (page - 1) * limit
     db.row_factory = sqlite3.Row
-
-    # Attempt FTS5 trigram search first if available
     items = []
     total = 0
-    used_fts = False
-    try:
-        # Trigram matching in FTS5 requires matching phrases
-        # We quote query to match literal substring
-        escaped_query = '"' + query.replace('"', '""') + '"'
-        count_row = db.execute(
-            "SELECT count(*) FROM html_intel_fts WHERE html_intel_fts MATCH ?",
-            (escaped_query,)
-        ).fetchone()
-        if count_row:
-            total = count_row[0]
-            rows = db.execute("""
-                SELECT p.url, p.host, p.title, p.status_code, p.content_length, p.scanned_at,
-                       p.signatures_json, p.html
-                FROM html_intel_fts f
-                JOIN page_contents p ON p.url = f.url
-                WHERE html_intel_fts MATCH ?
-                ORDER BY p.scanned_at DESC
-                LIMIT ? OFFSET ?
-            """, (escaped_query, limit, offset)).fetchall()
-            used_fts = True
-    except sqlite3.OperationalError:
-        used_fts = False
 
-    # Fallback to direct substring search if FTS not available or failed
-    if not used_fts:
+    if not query and signature:
+        # Search by signature alone
+        sig_pattern = f'%"{signature}"%'
         count_row = db.execute(
-            "SELECT count(*) FROM page_contents WHERE instr(lower(html), lower(?)) > 0",
-            (query,)
+            "SELECT count(*) FROM page_contents WHERE signatures_json LIKE ?",
+            (sig_pattern,)
         ).fetchone()
         total = count_row[0] if count_row else 0
         rows = db.execute("""
             SELECT url, host, title, status_code, content_length, scanned_at,
                    signatures_json, html
             FROM page_contents
-            WHERE instr(lower(html), lower(?)) > 0
+            WHERE signatures_json LIKE ?
             ORDER BY scanned_at DESC
             LIMIT ? OFFSET ?
-        """, (query, limit, offset)).fetchall()
+        """, (sig_pattern, limit, offset)).fetchall()
 
-    for r in rows:
-        snips = extract_snippets(r["html"], query)
-        sigs = json.loads(r["signatures_json"]) if r["signatures_json"] else []
-        items.append({
-            "url": r["url"],
-            "host": r["host"],
-            "title": r["title"],
-            "status_code": r["status_code"],
-            "content_length": r["content_length"],
-            "scanned_at": r["scanned_at"],
-            "signatures": sigs,
-            "match_count": snips["match_count"],
-            "snippets": snips["snippets"],
-        })
+        for r in rows:
+            sigs = json.loads(r["signatures_json"]) if r["signatures_json"] else []
+            # Preview first 3 lines of HTML as snippet
+            lines = [line.strip() for line in r["html"].splitlines()[:10] if line.strip()][:3]
+            snips = [{
+                "line_number": idx + 1,
+                "matched_line": line[:150],
+                "context": [{"line_number": idx + 1, "content": line[:150], "is_match": True}]
+            } for idx, line in enumerate(lines)]
+            items.append({
+                "url": r["url"],
+                "host": r["host"],
+                "title": r["title"],
+                "status_code": r["status_code"],
+                "content_length": r["content_length"],
+                "scanned_at": r["scanned_at"],
+                "signatures": sigs,
+                "match_count": 1,
+                "snippets": snips,
+            })
+
+    elif query and signature:
+        # Search by both query text and signature
+        sig_pattern = f'%"{signature}"%'
+        count_row = db.execute(
+            "SELECT count(*) FROM page_contents WHERE instr(lower(html), lower(?)) > 0 AND signatures_json LIKE ?",
+            (query, sig_pattern)
+        ).fetchone()
+        total = count_row[0] if count_row else 0
+        rows = db.execute("""
+            SELECT url, host, title, status_code, content_length, scanned_at,
+                   signatures_json, html
+            FROM page_contents
+            WHERE instr(lower(html), lower(?)) > 0 AND signatures_json LIKE ?
+            ORDER BY scanned_at DESC
+            LIMIT ? OFFSET ?
+        """, (query, sig_pattern, limit, offset)).fetchall()
+
+        for r in rows:
+            snips = extract_snippets(r["html"], query)
+            sigs = json.loads(r["signatures_json"]) if r["signatures_json"] else []
+            items.append({
+                "url": r["url"],
+                "host": r["host"],
+                "title": r["title"],
+                "status_code": r["status_code"],
+                "content_length": r["content_length"],
+                "scanned_at": r["scanned_at"],
+                "signatures": sigs,
+                "match_count": snips["match_count"],
+                "snippets": snips["snippets"],
+            })
+
+    else:
+        # Search by query text (using FTS5 trigram or fallback)
+        used_fts = False
+        try:
+            escaped_query = '"' + query.replace('"', '""') + '"'
+            count_row = db.execute(
+                "SELECT count(*) FROM html_intel_fts WHERE html_intel_fts MATCH ?",
+                (escaped_query,)
+            ).fetchone()
+            if count_row:
+                total = count_row[0]
+                rows = db.execute("""
+                    SELECT p.url, p.host, p.title, p.status_code, p.content_length, p.scanned_at,
+                           p.signatures_json, p.html
+                    FROM html_intel_fts f
+                    JOIN page_contents p ON p.url = f.url
+                    WHERE html_intel_fts MATCH ?
+                    ORDER BY p.scanned_at DESC
+                    LIMIT ? OFFSET ?
+                """, (escaped_query, limit, offset)).fetchall()
+                used_fts = True
+        except sqlite3.OperationalError:
+            used_fts = False
+
+        if not used_fts:
+            count_row = db.execute(
+                "SELECT count(*) FROM page_contents WHERE instr(lower(html), lower(?)) > 0",
+                (query,)
+            ).fetchone()
+            total = count_row[0] if count_row else 0
+            rows = db.execute("""
+                SELECT url, host, title, status_code, content_length, scanned_at,
+                       signatures_json, html
+                FROM page_contents
+                WHERE instr(lower(html), lower(?)) > 0
+                ORDER BY scanned_at DESC
+                LIMIT ? OFFSET ?
+            """, (query, limit, offset)).fetchall()
+
+        for r in rows:
+            snips = extract_snippets(r["html"], query)
+            sigs = json.loads(r["signatures_json"]) if r["signatures_json"] else []
+            items.append({
+                "url": r["url"],
+                "host": r["host"],
+                "title": r["title"],
+                "status_code": r["status_code"],
+                "content_length": r["content_length"],
+                "scanned_at": r["scanned_at"],
+                "signatures": sigs,
+                "match_count": snips["match_count"],
+                "snippets": snips["snippets"],
+            })
 
     return {
         "query": query,
+        "signature": signature,
         "total": total,
         "page": page,
         "limit": limit,
         "has_more": (offset + len(items)) < total,
         "items": items,
     }
+
+
+def get_signatures_summary(db):
+    """Return count of occurrences of each technology signature across page_contents."""
+    db.row_factory = sqlite3.Row
+    try:
+        rows = db.execute("SELECT signatures_json FROM page_contents WHERE signatures_json != '[]'").fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    counts = {}
+    for r in rows:
+        try:
+            sigs = json.loads(r["signatures_json"])
+            for s in sigs:
+                counts[s] = counts.get(s, 0) + 1
+        except Exception:
+            pass
+
+    all_rule_names = [rule[0] for rule in SIGNATURE_RULES]
+    for name in all_rule_names:
+        if name not in counts:
+            counts[name] = 0
+
+    return sorted([{"name": k, "count": v} for k, v in counts.items()], key=lambda x: (-x["count"], x["name"]))
 
 
 def fetch_and_index_url(db, target_url, timeout=10, max_size=2 * 1024 * 1024):

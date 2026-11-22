@@ -9,20 +9,31 @@ const ALLOWED = [
   "intel-search",
   "intel-source",
   "intel-stats",
+  "intel-signatures",
   "intel-scan",
   "intel-status",
+  "scanner",
+  "scanner-status",
+  "scanner-recent",
+  "scanner-start",
+  "scanner-stop",
+  "export",
 ];
 
 function getBackendUrl(resource: string): URL {
   const base = new URL(process.env.INTERNET_MAP_API_URL || "http://127.0.0.1:3500");
   if (base.protocol !== "https:" && !(base.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(base.hostname))) {
-    throw Error("Invalid API origin");
+    throw new Error("Invalid API origin");
   }
-  if (base.username || base.password) throw Error("Invalid API origin");
+  if (base.username || base.password) throw new Error("Invalid API origin");
 
   let path = "/api/v1/" + resource;
   if (resource.startsWith("intel-")) {
     path = "/api/v1/intel/" + resource.slice(6);
+  } else if (resource.startsWith("scanner-")) {
+    path = "/api/v1/scanner/" + resource.slice(8);
+  } else if (resource === "scanner") {
+    path = "/api/v1/scanner/status";
   }
   return new URL(path, base);
 }
@@ -40,7 +51,19 @@ export async function GET(request: NextRequest, context: { params: Promise<{ res
 
   try {
     const url = getBackendUrl(resource);
-    for (const name of ["host", "page", "wordpress", "url", "limit", "q"]) {
+    for (const name of [
+      "host",
+      "page",
+      "wordpress",
+      "url",
+      "limit",
+      "q",
+      "signature",
+      "with_evidence",
+      "extended",
+      "scanner",
+      "format",
+    ]) {
       const val = request.nextUrl.searchParams.get(name);
       if (val !== null) url.searchParams.set(name, val);
     }
@@ -72,7 +95,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ re
 
   try {
     const url = getBackendUrl(resource);
-    for (const name of ["url", "limit"]) {
+    for (const name of ["url", "limit", "concurrency", "action"]) {
       const val = request.nextUrl.searchParams.get(name);
       if (val !== null) url.searchParams.set(name, val);
     }

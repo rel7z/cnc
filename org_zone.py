@@ -86,16 +86,15 @@ def main():
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     args = parser.parse_args()
     opening = gzip.open if args.input.suffix == ".gz" else open
-    with tempfile.TemporaryDirectory(prefix="internet-map-zone-") as folder:
-        extracted = Path(folder) / "delegations.txt"
-        with opening(args.input, "rt", encoding="ascii", errors="replace") as stream, extracted.open("w") as output:
-            for domain in delegations(stream):
-                output.write(domain + "\n")
-        db = connect(args.database)
-        try:
-            ingest(db, argparse.Namespace(input=extracted, format="txt", source=args.source))
-        finally:
-            db.close()
+    db = connect(args.database)
+    try:
+        with opening(args.input, "rt", encoding="ascii", errors="replace") as stream:
+            def stream_records():
+                for domain in delegations(stream):
+                    yield {"url": domain}
+            ingest(db, argparse.Namespace(input=None, format="txt", source=args.source), stream_records=stream_records())
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

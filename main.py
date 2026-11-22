@@ -85,6 +85,8 @@ def connect(path):
     db.execute("PRAGMA foreign_keys=ON")
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=NORMAL")
+    db.execute("PRAGMA cache_size=-64000")
+    db.execute("PRAGMA temp_store=MEMORY")
     db.executescript("""
         CREATE TABLE IF NOT EXISTS imports (
             id INTEGER PRIMARY KEY, source TEXT NOT NULL,
@@ -107,13 +109,33 @@ def connect(path):
     return db
 
 
-def ingest(db, args):
+BATCH_SIZE = 25000
+
+
+def ingest(db, args, stream_records=None):
     now = datetime.now(timezone.utc).isoformat()
     accepted = rejected = 0
+    t0 = datetime.now().timestamp()
+    last_log = t0
+    source_records = stream_records if stream_records is not None else records(args.input, getattr(args, "format", "txt"))
+
     with db:
         ident = db.execute("INSERT INTO imports(source,imported_at) VALUES (?,?)",
                            (args.source, now)).lastrowid
-        for record in records(args.input, args.format):
+
+        sites_batch = []
+        obs_batch = []
+        import_urls = {}
+
+        def flush():
+            if sites_batch:
+                db.executemany("INSERT OR IGNORE INTO sites VALUES (?,?)", sites_batch)
+                sites_batch.clear()
+            if obs_batch:
+                db.executemany("INSERT OR IGNORE INTO observations VALUES (?,?,?)", obs_batch)
+                obs_batch.clear()
+
+        for record in source_records:
             try:
                 value = record.get("url")
                 if not isinstance(value, str):
@@ -122,31 +144,176 @@ def ingest(db, args):
             except (ValueError, UnicodeError):
                 rejected += 1
                 continue
+
             html = record.get("html", "")
             if not isinstance(html, str):
                 raise ValueError("HTML must be a string")
             evidence = wordpress_evidence(html)
+
             if getattr(args, "format", "") == "observations":
                 supplied = record.get("wordpress_evidence")
                 allowed = {"WordPress generator tag", "wp-content resource reference", "wp-includes resource reference"}
                 if not isinstance(supplied, list) or any(not isinstance(item, str) or item not in allowed for item in supplied):
                     raise ValueError("Invalid worker evidence")
                 evidence = sorted(set(supplied))
-            db.execute("INSERT OR IGNORE INTO sites VALUES (?,?)", (url, host))
-            result = db.execute("INSERT OR IGNORE INTO observations VALUES (?,?,?)",
-                                (ident, url, json.dumps(evidence)))
-            accepted += result.rowcount
-            if not result.rowcount and evidence:
-                previous = db.execute(
-                    "SELECT evidence FROM observations WHERE import_id=? AND url=?",
-                    (ident, url),
-                ).fetchone()[0]
-                merged = sorted(set(json.loads(previous)) | set(evidence))
-                db.execute("UPDATE observations SET evidence=? WHERE import_id=? AND url=?",
-                           (json.dumps(merged), ident, url))
+
+            if url in import_urls:
+                if evidence:
+                    prev = import_urls[url]
+                    merged = sorted(set(prev) | set(evidence))
+                    if merged != prev:
+                        import_urls[url] = merged
+                        updated_in_batch = False
+                        for idx in range(len(obs_batch) - 1, -1, -1):
+                            if obs_batch[idx][1] == url:
+                                obs_batch[idx] = (ident, url, json.dumps(merged))
+                                updated_in_batch = True
+                                break
+                        if not updated_in_batch:
+                            db.execute("UPDATE observations SET evidence=? WHERE import_id=? AND url=?",
+                                       (json.dumps(merged), ident, url))
+            else:
+                import_urls[url] = evidence
+                sites_batch.append((url, host))
+                obs_batch.append((ident, url, json.dumps(evidence)))
+                accepted += 1
+
+            if len(sites_batch) >= BATCH_SIZE:
+                flush()
+                now_t = datetime.now().timestamp()
+                if now_t - last_log >= 3.0:
+                    speed = accepted / (now_t - t0) if now_t > t0 else 0
+                    print(f"[*] Ingested {accepted:,} records ({int(speed):,} rec/s)...", flush=True)
+                    last_log = now_t
+
+        flush()
         db.execute("UPDATE imports SET accepted=?,rejected=? WHERE id=?",
                    (accepted, rejected, ident))
+
     print(f"Imported {accepted} unique URLs from {args.source}. Rejected {rejected} rows.")
+
+
+def seed_catalog(db, count=250):
+    """Seed the catalog and intel database with rich realistic datasets for fast development."""
+    from intel import init_intel_tables, index_pages_batch
+    init_intel_tables(db)
+
+    CATEGORIES = ["foundation", "community", "charity", "news", "health", "tech", "blog", "center", "project", "open"]
+    TOPICS = ["ocean", "wildlife", "climate", "code", "kids", "peace", "science", "arts", "future", "solar", "food", "data", "music", "books"]
+
+    FAMOUS_ORGS = [
+        ("wikipedia.org", "Wikipedia, the free encyclopedia", "<html><head><title>Wikipedia, the free encyclopedia</title></head><body><h1>Welcome to Wikipedia</h1><script>gtag('config', 'G-WIKI123');</script></body></html>"),
+        ("wordpress.org", "Blog Tool, Publishing Platform, and CMS - WordPress.org", "<html><head><title>WordPress.org</title><meta name=\"generator\" content=\"WordPress 6.4.3\" /><link rel=\"stylesheet\" href=\"/wp-content/themes/pub/wporg/style.css\" /></head><body>WordPress Foundation</body></html>"),
+        ("eff.org", "Electronic Frontier Foundation | Defending Freedom in the Digital World", "<html><head><title>Electronic Frontier Foundation</title><script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\"></script></head><body>EFF Action Center</body></html>"),
+        ("archive.org", "Internet Archive: Digital Library of Free Books, Movies, Music & Wayback Machine", "<html><head><title>Internet Archive</title><script>gtag('config', 'UA-99999');</script></head><body>Wayback Machine</body></html>"),
+        ("mozilla.org", "Internet for people, not profit — Mozilla", "<html><head><title>Mozilla</title><script src=\"https://www.googletagmanager.com/gtm.js?id=GTM-MOZ1\"></script></head><body class=\"tailwindcss\">Mozilla Foundation</body></html>"),
+        ("apache.org", "Welcome to The Apache Software Foundation!", "<html><head><title>The Apache Software Foundation</title></head><body>Apache HTTP Server & Foundation</body></html>"),
+        ("fsf.org", "Free Software Foundation — working together for free software", "<html><head><title>Free Software Foundation</title></head><body>GNU and Free Software</body></html>"),
+        ("redcross.org", "American Red Cross | Help Those Affected by Disasters", "<html><head><title>American Red Cross</title><script src=\"https://js.stripe.com/v3/\"></script></head><body>Donate to Red Cross</body></html>"),
+        ("khanacademy.org", "Khan Academy | Free Online Courses, Lessons & Practice", "<html><head><title>Khan Academy</title><script>window.__NEXT_DATA__ = {};</script></head><body>Learn anything</body></html>"),
+        ("ted.org", "TED: Ideas Worth Spreading", "<html><head><title>TED Talks</title><script src=\"https://connect.facebook.net/en_US/fbevents.js\"></script></head><body>TED Conferences</body></html>"),
+    ]
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    raw_records = []
+    intel_records = []
+
+    # Add famous organizations
+    for host, title, html in FAMOUS_ORGS:
+        url = f"https://{host}/"
+        raw_records.append({"url": url, "html": html})
+        intel_records.append({"url": url, "html": html, "status_code": 200, "headers": {"server": "nginx"}})
+
+    # Generate procedural realistic domains up to count
+    i = 0
+    while len(raw_records) < count:
+        cat = CATEGORIES[i % len(CATEGORIES)]
+        top = TOPICS[(i * 3 + 1) % len(TOPICS)]
+        num = i + 101
+        host = f"{top}-{cat}{num}.org"
+        url = f"https://{host}/"
+
+        mod = i % 5
+        if mod == 0:
+            # WordPress site with theme and plugin
+            theme = ["astra", "twentytwentyfour", "generatepress", "oceanwp"][i % 4]
+            wp_ver = ["6.4.3", "6.3.2", "6.2.1"][i % 3]
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <title>{top.title()} {cat.title()} Initiative - Welcome</title>
+  <meta name="generator" content="WordPress {wp_ver}">
+  <link rel="stylesheet" href="/wp-content/themes/{theme}/style.css">
+  <link rel="stylesheet" href="/wp-content/plugins/woocommerce/assets/css/woocommerce.css">
+  <script src="/wp-includes/js/jquery/jquery.min.js"></script>
+  <script>gtag('config', 'G-{i}WP99');</script>
+</head>
+<body class="home blog">
+  <h1>Welcome to {top.title()} {cat.title()}</h1>
+  <p>Dedicated to global progress and collaboration.</p>
+</body>
+</html>"""
+            raw_records.append({"url": url, "html": html})
+            intel_records.append({"url": url, "html": html, "status_code": 200, "headers": {"server": "Apache"}})
+        elif mod == 1:
+            # E-commerce / Stripe site
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <title>{top.title()} Store & Goods</title>
+  <script src="https://js.stripe.com/v3/"></script>
+  <script src="https://cdn.shopify.com/s/files/store.js"></script>
+  <script>(adsbygoogle = window.adsbygoogle || []).push({{}});</script>
+</head>
+<body>
+  <h1>Support our {cat}</h1>
+</body>
+</html>"""
+            raw_records.append({"url": url, "html": html})
+            intel_records.append({"url": url, "html": html, "status_code": 200, "headers": {"server": "cloudflare"}})
+        elif mod == 2:
+            # Modern React / Tailwind site
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <title>{top.title()} {cat.title()} Portal</title>
+  <script>window.__NEXT_DATA__ = {{}}; gtag('config', 'UA-{num}-1');</script>
+  <link rel="stylesheet" href="/_next/static/css/styles.css">
+</head>
+<body class="tailwindcss bg-slate-900 text-white">
+  <h1>Modern {cat} Platform</h1>
+</body>
+</html>"""
+            raw_records.append({"url": url, "html": html})
+            intel_records.append({"url": url, "html": html, "status_code": 200, "headers": {"server": "Vercel"}})
+        elif mod == 3:
+            # Simple static community site
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <title>{top.title()} Community Network</title>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>
+</head>
+<body>
+  <h1>Join the community</h1>
+</body>
+</html>"""
+            raw_records.append({"url": url, "html": html})
+            intel_records.append({"url": url, "html": html, "status_code": 200, "headers": {"server": "cloudflare"}})
+        else:
+            # Raw DNS delegation with no HTML evidence recorded
+            raw_records.append({"url": url, "html": ""})
+        i += 1
+
+    # Ingest into catalog
+    class DummyArgs:
+        source = "dev-seed-dataset"
+        format = "jsonl"
+    ingest(db, DummyArgs(), stream_records=raw_records)
+
+    # Index active HTML into intel database
+    index_pages_batch(db, intel_records)
+    print(f"[+] Successfully seeded {len(raw_records)} domains and {len(intel_records)} HTML intelligence pages!")
 
 
 def main():
@@ -172,12 +339,16 @@ def main():
     export.add_argument("--wordpress", action="store_true")
     inspect = commands.add_parser("observations", parents=[db_parent])
     inspect.add_argument("url")
+    seed_cmd = commands.add_parser("seed", parents=[db_parent])
+    seed_cmd.add_argument("--count", type=int, default=250, help="Number of demo domains to generate")
     commands.add_parser("stats", parents=[db_parent])
     args = parser.parse_args()
     db = connect(args.database)
     try:
         if args.command == "import":
             ingest(db, args)
+        elif args.command == "seed":
+            seed_catalog(db, count=args.count)
         elif args.command == "stats":
             print("Unique URLs", db.execute("SELECT count(*) FROM sites").fetchone()[0])
             print("Imports", db.execute("SELECT count(*) FROM imports").fetchone()[0])

@@ -15,9 +15,37 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from main import DEFAULT_DATABASE, normalize
-from intel import init_intel_tables, search_intel, fetch_and_index_url
+from intel import init_intel_tables, search_intel, fetch_and_index_url, get_signatures_summary
 
 _stats_cache = {}
+
+
+def is_pid_alive(pid: int) -> bool:
+    if not pid:
+        return False
+    try:
+        res, _ = os.waitpid(pid, os.WNOHANG)
+        if res == pid:
+            return False
+    except ChildProcessError:
+        pass
+    except OSError:
+        return False
+
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+
+    stat_file = Path(f"/proc/{pid}/stat")
+    if stat_file.exists():
+        try:
+            fields = stat_file.read_text().split()
+            if len(fields) >= 3 and fields[2] == "Z":
+                return False
+        except Exception:
+            pass
+    return True
 
 
 def get_scanner_state(state_path: Path) -> dict:
@@ -25,13 +53,13 @@ def get_scanner_state(state_path: Path) -> dict:
         return {"running": False, "scanned": 0, "wordpress_found": 0, "speed": 0.0, "last_url": ""}
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
+        if not data.get("running", False):
+            return data
         pid = data.get("pid")
-        if pid:
-            try:
-                os.kill(pid, 0)
-                data["running"] = True
-            except OSError:
-                data["running"] = False
+        if pid and not is_pid_alive(pid):
+            data["running"] = False
+            data["speed"] = 0.0
+            update_scanner_state(state_path, data)
         return data
     except Exception:
         return {"running": False, "scanned": 0, "wordpress_found": 0, "speed": 0.0, "last_url": ""}
@@ -220,11 +248,54 @@ def handler(database, key):
 
                     elif parsed.path == "/api/v1/intel/search":
                         search_q = query.get("q", [""])[0]
+                        sig_filter = query.get("signature", [""])[0]
                         page = int(query.get("page", ["1"])[0])
                         limit = int(query.get("limit", ["25"])[0])
                         if not 1 <= limit <= 100:
                             limit = 25
-                        result = search_intel(db, search_q, page=page, limit=limit)
+                        result = search_intel(db, search_q, signature=sig_filter, page=page, limit=limit)
+
+                    elif parsed.path == "/api/v1/intel/signatures":
+                        from intel import get_signatures_summary
+                        result = {"signatures": get_signatures_summary(db)}
+
+                    elif parsed.path in ("/api/v1/scanner/recent", "/api/v1/scanner-recent"):
+                        try:
+                            rows = db.execute("""
+                                SELECT url, host, status_code, title, signatures_json, content_length, scanned_at
+                                FROM page_contents
+                                ORDER BY scanned_at DESC
+                                LIMIT 20
+                            """).fetchall()
+                            recent_items = [{
+                                "url": r["url"],
+                                "host": r["host"],
+                                "status_code": r["status_code"],
+                                "title": r["title"],
+                                "signatures": json.loads(r["signatures_json"]) if r["signatures_json"] else [],
+                                "content_length": r["content_length"],
+                                "scanned_at": r["scanned_at"],
+                            } for r in rows]
+                        except sqlite3.OperationalError:
+                            recent_items = []
+                        result = {"recent": recent_items}
+
+                    elif parsed.path == "/api/v1/export":
+                        is_wp = query.get("wordpress", ["0"])[0] == "1"
+                        host_filter = query.get("host", [""])[0].lower()
+                        sql = "SELECT s.url FROM sites s"
+                        conditions = []
+                        params = []
+                        if host_filter:
+                            conditions.append("instr(s.host, ?) > 0")
+                            params.append(host_filter)
+                        if is_wp:
+                            conditions.append("EXISTS(SELECT 1 FROM observations o WHERE o.url = s.url AND o.evidence != '[]')")
+                        if conditions:
+                            sql += " WHERE " + " AND ".join(conditions)
+                        sql += " ORDER BY s.url LIMIT 50000"
+                        rows = db.execute(sql, params).fetchall()
+                        result = {"total": len(rows), "urls": [r[0] for r in rows]}
 
                     elif parsed.path == "/api/v1/intel/source":
                         _, target_url = normalize(query.get("url", [""])[0])
