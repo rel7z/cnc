@@ -1,0 +1,18 @@
+{
+  "date": "2026-11-22",
+  "controller_ip": "157.245.153.108",
+  "region": "sgp1",
+  "servers": 9,
+  "workers": 8,
+  "memory_mb_per_server": 8192,
+  "vcpus_per_server": 4,
+  "monthly_usd_total": 432,
+  "hardware_and_binary_checksums_verified": true,
+  "harmless_worker_tasks_succeeded": 8,
+  "durable_root_inputs_verified": true,
+  "drive_enabled": true,
+  "drive_authorized": true,
+  "manager_url": "http://localhost:8119/dashboard",
+  "processor_paused": true,
+  "private_tools_accessed": false
+}
