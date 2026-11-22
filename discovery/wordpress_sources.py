@@ -27,8 +27,11 @@ def read(root):
 
 
 def allowed(policy,root=None):
-    return tuple(source for name,group in GROUPS.items() if policy.get(name) for source in group
+    result = tuple(source for name,group in GROUPS.items() if policy.get(name) for source in group
                  if source!='commoncrawl' or root is None or not (Path(root)/'commoncrawl-mode.json').exists())
+    if root is not None and (Path(root)/'cutover.json').exists():
+        result += ('catalog',)
+    return result
 
 
 def update(root,patch):

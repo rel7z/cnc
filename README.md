@@ -177,6 +177,9 @@ python3 feed_server.py /path/to/my_domains.txt --source "custom-feed-20261122"
 
 Internet Map owns the discovery code in `discovery/`, its persistent state in
 `/opt/internet-map/data/discovery/`, and the main catalog in `data/catalog.db`.
+The checkpointed `catalog_feed.py` admits existing catalog sites into the same
+unique five-million candidate pool while respecting checked hosts and the pause
+boundary (collection continues, scanner dispatch stops).
 CNC remains the worker executor: the migrated algorithm submits signed jobs to
 its private API and reconciles their results. The old CNC generator service is
 disabled. Its original directory is a compatibility symlink to the migrated
@@ -212,7 +215,7 @@ From the Internet Map source directory, call:
 
 ```python
 from backup import restore_snapshot
-restore_snapshot("/path/to/backup.manifest.json", "/path/to/restored-catalog.db")
+restore_snapshot("/path/to/backup.manifest.json.gz", "/path/to/restored-catalog.db")
 ```
 
 Restore requires a missing destination and verifies every part, the assembled

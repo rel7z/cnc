@@ -47,6 +47,8 @@ class CoordinationTests(unittest.TestCase):
                 db.execute('CREATE TABLE content(value)');db.execute("INSERT INTO content VALUES ('verified')")
             receipt=publish_snapshot(source,root/'drive')
             manifest=root/'drive'/receipt['manifest']
+            self.assertTrue(manifest.name.endswith('.json.gz'))
+            self.assertIn(b'\x00',manifest.read_bytes()[:10])
             restore_snapshot(manifest,root/'restored.db')
             with sqlite3.connect(root/'restored.db') as db:self.assertEqual(db.execute('SELECT value FROM content').fetchone(),('verified',))
             part=root/'drive'/receipt['parts'][0]['filename'];part.write_bytes(b'corrupt')

@@ -36,6 +36,7 @@ import wordpress_restock as restock
 import wordpress_reverse as reverse_workers
 import wordpress_sources as source_policy
 import wordpress_index as cc_index
+import catalog_feed
 
 ACTOR = "wordpress-generator"
 SHARD_TARGETS = 10_000
@@ -1705,6 +1706,7 @@ def main():
         # Managed workers expand the non-reverse input seeds; no random-IP feed.
         pool_reader = threading.Thread(target=pool_feed, args=(args, state), daemon=True)
         pool_reader.start()
+        threading.Thread(target=catalog_feed.run, args=(args,state), daemon=True).start()
         threading.Thread(target=cc_index.run, args=(args,state), daemon=True).start()
         threading.Thread(target=reverse_workers.run, args=(api, args, state), daemon=True).start()
         threading.Thread(target=restock.run, args=(api, args, state), kwargs={"allow_new":True}, daemon=True).start()

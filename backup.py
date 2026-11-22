@@ -66,8 +66,8 @@ def publish_snapshot(database, output, chunk_size=32 << 20):
                                   sha256=hashlib.sha256(block).hexdigest()))
         receipt.update(format='internet-map-sqlite-v1', encoding='gzip-parts', parts=parts,
                        database=Path(database).name)
-        manifest = Path(work) / (name + '.manifest.json')
-        manifest.write_text(json.dumps(receipt, indent=2) + '\n')
+        manifest = Path(work) / (name + '.manifest.json.gz')
+        manifest.write_bytes(gzip.compress((json.dumps(receipt, indent=2) + '\n').encode(), compresslevel=3, mtime=0))
         manifest.chmod(0o600)
         os.replace(manifest, output / manifest.name)
         return dict(receipt, manifest=manifest.name)
@@ -78,7 +78,8 @@ def restore_snapshot(manifest, destination):
     manifest, destination = Path(manifest).resolve(), Path(destination).resolve()
     if destination.exists():
         raise ValueError('Restore requires a separate, missing database path')
-    receipt = json.loads(manifest.read_text())
+    raw = manifest.read_bytes()
+    receipt = json.loads(gzip.decompress(raw) if raw.startswith(b'\x1f\x8b') else raw)
     if receipt.get('format') != 'internet-map-sqlite-v1' or not receipt.get('parts'):
         raise ValueError('Invalid snapshot manifest')
     destination.parent.mkdir(parents=True, exist_ok=True)
