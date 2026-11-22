@@ -67,3 +67,20 @@ class CoordinationTests(unittest.TestCase):
                 evidence=db.execute('SELECT evidence FROM observations').fetchone()[0]
                 self.assertIn('generator classification',evidence)
                 self.assertNotIn('generator tag',evidence)
+
+    def test_failed_cutover_restores_original_state_path(self):
+        import importlib.util
+        from unittest.mock import patch, Mock
+        spec=importlib.util.spec_from_file_location('map_migration',Path(__file__).parents[1]/'infra/install-discovery.py')
+        migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);old=root/'old';state=root/'new';units=root/'units'
+            old.mkdir();units.mkdir();(old/'checkpoint').write_text('preserve')
+            def fail():
+                old.rename(state);old.symlink_to(state,target_is_directory=True)
+                raise RuntimeError('activation failed')
+            with patch.multiple(migration,OLD=old,STATE=state,UNITS=units),patch.object(migration,'perform_install',side_effect=fail),patch.object(migration.subprocess,'run',return_value=Mock(returncode=0)):
+                with self.assertRaises(RuntimeError):migration.install()
+            self.assertTrue(old.is_dir());self.assertFalse(old.is_symlink())
+            self.assertEqual((old/'checkpoint').read_text(),'preserve')
+            self.assertFalse(state.exists())
