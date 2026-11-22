@@ -174,6 +174,42 @@ class DriveTests(unittest.TestCase):
             drive.sync_controller(self.config,self.profile)
             restore.assert_not_called()
 
+    def test_recovery_transfer_starts_fresh_controller_and_retries_only_pending_install(self):
+        import base64
+        import os
+        controller=self.root/'recovery-controller'
+        app=self.root/'recovered-app'
+        helper=controller/'recovery/internet_map_recovery.py'
+        helper.parent.mkdir(parents=True);helper.touch()
+        binary=self.root/'fixture-bin';binary.mkdir()
+        log=self.root/'systemctl.log'
+        command=binary/'systemctl'
+        command.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CNC_RECOVERY_TEST_LOG"\nif [ "$1" = "is-active" ]; then exit 3; fi\nexit 0\n')
+        command.chmod(0o700)
+        env=dict(os.environ,PATH=str(binary)+':'+os.environ['PATH'],CNC_RECOVERY_TEST_LOG=str(log))
+        script=drive.RECOVERY_SCRIPT.replace('/opt/cnc/',str(controller)+'/').replace('/opt/internet-map',str(app))
+        key=b'fixture-recovery-private-key!!!!'
+        def invoke(value=key):
+            return subprocess.run([sys.executable,'-c',script],input=json.dumps({'key':base64.b64encode(value).decode()}),text=True,capture_output=True,env=env)
+        result=invoke()
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'],'recovering')
+        self.assertIn('start --no-block internet-map-recovery.service',log.read_text())
+        saved=controller/'data/internet-map-recovery.key'
+        self.assertEqual(saved.read_bytes(),key)
+        self.assertEqual(saved.stat().st_mode & 0o777,0o600)
+        (app/'data').mkdir(parents=True)
+        (app/'data/drive-recovery.json').write_text('{}')
+        self.assertEqual(json.loads(invoke().stdout)['status'],'recovering')
+        (app/'data/recovery-installed.json').write_text('{}')
+        before=log.read_text()
+        self.assertEqual(json.loads(invoke().stdout)['status'],'existing')
+        self.assertEqual(log.read_text(),before)
+        result=invoke(b'x'*32)
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(saved.read_bytes(),key)
+        self.assertEqual(log.read_text(),before)
+
     def test_session_transfer_atomic_private_and_safe_to_retry(self):
         config=self.root/'controller.json'
         config.write_text(json.dumps({'data_dir':str(self.root/'data'),'gdrive':{}}))
