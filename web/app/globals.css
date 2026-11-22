@@ -627,3 +627,96 @@ p {
 @media (max-width: 480px) {
   #metrics { grid-template-columns: 1fr; }
 }
+
+/* Database Management Styles */
+.db-maintenance-bar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  background: #0f1620;
+  border: 1px solid #1c2b3a;
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin: 18px 0;
+}
+
+.db-alert {
+  padding: 12px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  margin: 14px 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.db-alert.success {
+  background: rgba(39, 174, 96, 0.12);
+  border: 1px solid #27ae60;
+  color: #55efc4;
+}
+
+.db-alert.error {
+  background: rgba(231, 76, 60, 0.12);
+  border: 1px solid #e74c3c;
+  color: #ff7675;
+}
+
+.db-source-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.db-source-tag.worker {
+  background: rgba(116, 185, 255, 0.15);
+  color: #74b9ff;
+  border: 1px solid rgba(116, 185, 255, 0.3);
+}
+
+.db-source-tag.zone {
+  background: rgba(162, 155, 254, 0.15);
+  color: #a29bfe;
+  border: 1px solid rgba(162, 155, 254, 0.3);
+}
+
+.db-source-tag.discovery {
+  background: rgba(85, 239, 196, 0.15);
+  color: #55efc4;
+  border: 1px solid rgba(85, 239, 196, 0.3);
+}
+
+.db-source-tag.generator {
+  background: rgba(253, 203, 110, 0.15);
+  color: #fdcb6e;
+  border: 1px solid rgba(253, 203, 110, 0.3);
+}
+
+.db-source-tag.custom {
+  background: rgba(223, 230, 233, 0.12);
+  color: #dfe6e9;
+  border: 1px solid rgba(223, 230, 233, 0.25);
+}
+
+.db-action-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.db-action-btn:hover {
+  transform: translateY(-1px);
+}
+

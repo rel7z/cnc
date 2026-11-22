@@ -480,11 +480,149 @@ def handler(database, key):
                             recent_items = []
                         result = {"recent": recent_items}
 
+                    elif parsed.path in ("/api/v1/database/sources", "/api/v1/sources"):
+                        rows = db.execute("""
+                            SELECT 
+                                i.id,
+                                i.source,
+                                i.imported_at,
+                                i.accepted,
+                                i.rejected,
+                                count(o.url) AS observations_count,
+                                count(CASE WHEN o.evidence != '[]' AND o.evidence IS NOT NULL THEN 1 END) AS wp_count
+                            FROM imports i
+                            LEFT JOIN observations o ON o.import_id = i.id
+                            GROUP BY i.id
+                            ORDER BY i.id DESC
+                        """).fetchall()
+                        sources = [
+                            {
+                                "id": r["id"],
+                                "source": r["source"],
+                                "imported_at": r["imported_at"],
+                                "accepted": r["accepted"],
+                                "rejected": r["rejected"],
+                                "observation_count": r["observations_count"],
+                                "observations_count": r["observations_count"],
+                                "wp_count": r["wp_count"],
+                                "wordpress_count": r["wp_count"],
+                            }
+                            for r in rows
+                        ]
+                        result = {
+                            "total_sources": len(sources),
+                            "sources": sources,
+                        }
+
+                    elif parsed.path in ("/api/v1/database/sources/sample", "/api/v1/sources/sample"):
+                        import_id = int(query.get("id", ["0"])[0])
+                        import_row = db.execute(
+                            "SELECT id, source, imported_at, accepted FROM imports WHERE id = ?",
+                            (import_id,),
+                        ).fetchone()
+                        if not import_row:
+                            self.reply(404, {"error": "Source not found"})
+                            return
+                        obs_rows = db.execute("""
+                            SELECT o.url, s.host, o.evidence
+                            FROM observations o
+                            LEFT JOIN sites s ON s.url = o.url
+                            WHERE o.import_id = ?
+                            ORDER BY o.url
+                            LIMIT 50
+                        """, (import_id,)).fetchall()
+                        sample = [
+                            {
+                                "url": r["url"],
+                                "host": r["host"] or urlsplit(r["url"]).hostname or "",
+                                "evidence": json.loads(r["evidence"]) if r["evidence"] else [],
+                            }
+                            for r in obs_rows
+                        ]
+                        result = {
+                            "source": {
+                                "id": import_row["id"],
+                                "source": import_row["source"],
+                                "imported_at": import_row["imported_at"],
+                                "accepted": import_row["accepted"],
+                            },
+                            "sample": sample,
+                            "sample_records": sample,
+                            "count": len(sample),
+                            "sample_count": len(sample),
+                        }
+
+                    elif parsed.path in ("/api/v1/database/stats", "/api/v1/database-stats"):
+                        db_file = database
+                        db_size = db_file.stat().st_size if db_file.exists() else 0
+                        wal_file = db_file.with_name(db_file.name + "-wal")
+                        wal_size = wal_file.stat().st_size if wal_file.exists() else 0
+                        shm_file = db_file.with_name(db_file.name + "-shm")
+                        shm_size = shm_file.stat().st_size if shm_file.exists() else 0
+
+                        sites_count = db.execute("SELECT count(*) FROM sites").fetchone()[0]
+                        imports_count = db.execute("SELECT count(*) FROM imports").fetchone()[0]
+                        obs_count = db.execute("SELECT count(*) FROM observations").fetchone()[0]
+                        wp_obs_count = db.execute(
+                            "SELECT count(DISTINCT url) FROM observations WHERE evidence != '[]'"
+                        ).fetchone()[0]
+
+                        pc_count = 0
+                        if table_exists(db, "page_contents"):
+                            try:
+                                pc_count = db.execute("SELECT count(*) FROM page_contents").fetchone()[0]
+                            except Exception:
+                                pass
+
+                        sp_count = 0
+                        if table_exists(db, "scan_progress"):
+                            try:
+                                sp_count = db.execute("SELECT count(*) FROM scan_progress").fetchone()[0]
+                            except Exception:
+                                pass
+
+                        journal_mode = db.execute("PRAGMA journal_mode").fetchone()[0]
+                        page_size = db.execute("PRAGMA page_size").fetchone()[0]
+                        page_count = db.execute("PRAGMA page_count").fetchone()[0]
+                        user_version = db.execute("PRAGMA user_version").fetchone()[0]
+
+                        size_mb = round(db_size / (1024 * 1024), 2)
+                        wal_mb = round(wal_size / (1024 * 1024), 2)
+
+                        result = {
+                            "database_path": str(db_file),
+                            "size_bytes": db_size,
+                            "database_size_bytes": db_size,
+                            "size_mb": size_mb,
+                            "database_size_mb": size_mb,
+                            "wal_size_bytes": wal_size,
+                            "wal_size_mb": wal_mb,
+                            "shm_size_kb": round(shm_size / 1024, 1),
+                            "page_size": page_size,
+                            "page_count": page_count,
+                            "tables": {
+                                "sites": sites_count,
+                                "imports": imports_count,
+                                "observations": obs_count,
+                                "wordpress_verified": wp_obs_count,
+                                "page_contents": pc_count,
+                                "scan_progress": sp_count,
+                            },
+                            "engine": {
+                                "journal_mode": journal_mode,
+                                "page_size": page_size,
+                                "page_count": page_count,
+                                "user_version": user_version,
+                            },
+                        }
+
                     elif parsed.path in ("/api/v1/export", "/api/v1/download", "/api/v1/export.txt", "/api/v1/download.txt"):
                         fmt = query.get("format", ["txt" if parsed.path in ("/api/v1/download", "/api/v1/export.txt", "/api/v1/download.txt") else "json"])[0].lower()
                         field = query.get("field", ["url"])[0].lower()
                         is_wp = query.get("wordpress", ["0"])[0] in ("1", "true") or query.get("type", [""])[0] == "wordpress"
                         host_filter = query.get("host", [""])[0].lower()
+                        source_id = int(query.get("source_id", ["0"])[0])
+                        source_filter = query.get("source", [""])[0].strip()
                         sig_filter = query.get("signature", [""])[0].strip()
                         query_filter = query.get("q", [""])[0].strip()
                         status_filter = query.get("status_code", [""])[0]
@@ -499,6 +637,11 @@ def handler(database, key):
                         custom_name = query.get("filename", [""])[0].strip()
                         if custom_name:
                             filename = custom_name if custom_name.endswith(".txt") else f"{custom_name}.txt"
+                        elif source_id > 0:
+                            filename = f"source-{source_id}-{date_str}.txt"
+                        elif source_filter:
+                            clean_src = re.sub(r'[^a-zA-Z0-9_\-]', '', source_filter.lower().replace(":", "_").replace("/", "_"))
+                            filename = f"source-{clean_src}-{date_str}.txt"
                         elif is_wp:
                             filename = f"wordpress-sites-{date_str}.txt"
                         elif sig_filter:
@@ -523,7 +666,24 @@ def handler(database, key):
                         conditions = []
                         params = []
 
-                        if query_filter and has_pc and has_fts:
+                        if source_id > 0 or source_filter:
+                            sql = "SELECT s.url, s.host FROM observations o JOIN sites s ON s.url = o.url"
+                            if source_id > 0:
+                                conditions.append("o.import_id = ?")
+                                params.append(source_id)
+                            elif source_filter:
+                                conditions.append("o.import_id IN (SELECT id FROM imports WHERE source = ?)")
+                                params.append(source_filter)
+                            if is_wp:
+                                conditions.append("o.evidence != '[]' AND o.evidence IS NOT NULL")
+                            if host_filter:
+                                conditions.append("instr(s.host, ?) > 0")
+                                params.append(host_filter)
+                            if conditions:
+                                sql += " WHERE " + " AND ".join(conditions)
+                            sql += " GROUP BY s.url"
+
+                        elif query_filter and has_pc and has_fts:
                             sql = "SELECT p.url, p.host FROM page_contents p JOIN html_intel_fts f ON f.url = p.url WHERE html_intel_fts MATCH ?"
                             params.append(query_filter)
                             if sig_filter:
@@ -997,6 +1157,107 @@ def handler(database, key):
                         init_intel_tables(db_rw)
                         res = fetch_and_index_url(db_rw, target_url)
                     self.reply(200, {"success": True, "item": res})
+                except Exception as e:
+                    self.reply(500, {"error": str(e)})
+                return
+
+            if parsed.path in ("/api/v1/database/maintenance", "/api/v1/database-maintenance"):
+                action = str(data.get("action", "checkpoint")).lower()
+                try:
+                    with sqlite3.connect(database, timeout=30.0) as db_rw:
+                        db_rw.execute("PRAGMA busy_timeout = 30000")
+                        if action == "checkpoint":
+                            res = db_rw.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                            msg = f"WAL checkpoint complete (busy={res[0]}, log={res[1]}, checkpointed={res[2]})"
+                        elif action == "optimize":
+                            db_rw.execute("PRAGMA optimize")
+                            msg = "SQLite query planner statistics optimized"
+                        elif action == "integrity":
+                            check = db_rw.execute("PRAGMA integrity_check").fetchone()[0]
+                            msg = f"Integrity check: {check}"
+                        elif action == "vacuum":
+                            db_rw.execute("VACUUM")
+                            msg = "Database vacuum complete"
+                        else:
+                            self.reply(400, {"error": f"Unknown maintenance action: {action}"})
+                            return
+                    _stats_cache.clear()
+                    self.reply(200, {"success": True, "status": "ok", "action": action, "message": msg})
+                except Exception as e:
+                    self.reply(500, {"error": str(e)})
+                return
+
+            if parsed.path in ("/api/v1/database/sources/delete", "/api/v1/sources/delete"):
+                import_id = int(data.get("id") or data.get("import_id") or 0)
+                if not import_id:
+                    self.reply(400, {"error": "Missing import_id or id"})
+                    return
+                try:
+                    with sqlite3.connect(database, timeout=30.0) as db_rw:
+                        db_rw.execute("PRAGMA busy_timeout = 30000")
+                        del_obs = db_rw.execute("DELETE FROM observations WHERE import_id = ?", (import_id,)).rowcount
+                        del_imp = db_rw.execute("DELETE FROM imports WHERE id = ?", (import_id,)).rowcount
+                    _stats_cache.clear()
+                    self.reply(200, {
+                        "success": True,
+                        "status": "deleted",
+                        "import_id": import_id,
+                        "source_id": import_id,
+                        "deleted_observations": del_obs,
+                        "deleted_imports": del_imp,
+                        "message": f"Source #{import_id} deleted ({del_obs} observations removed)",
+                    })
+                except Exception as e:
+                    self.reply(500, {"error": str(e)})
+                return
+
+            if parsed.path in ("/api/v1/database/import", "/api/v1/database-import"):
+                source_label = str(data.get("source", "")).strip() or f"web-import-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+                raw_urls = data.get("urls", [])
+                if isinstance(raw_urls, str):
+                    raw_urls = [line.strip() for line in raw_urls.splitlines() if line.strip()]
+                if not raw_urls:
+                    self.reply(400, {"error": "No URLs provided to import"})
+                    return
+                now_iso = datetime.now(timezone.utc).isoformat()
+                try:
+                    with sqlite3.connect(database, timeout=30.0) as db_rw:
+                        db_rw.execute("PRAGMA busy_timeout = 30000")
+                        cur = db_rw.execute("INSERT INTO imports(source, imported_at, accepted, rejected) VALUES (?, ?, ?, ?)", (source_label, now_iso, 0, 0))
+                        new_import_id = cur.lastrowid
+                        accepted = 0
+                        rejected = 0
+                        sites_batch = []
+                        obs_batch = []
+                        for item in raw_urls:
+                            url_val = item.get("url") if isinstance(item, dict) else str(item)
+                            ev = item.get("evidence", []) if isinstance(item, dict) else []
+                            try:
+                                host, norm_url = normalize(url_val)
+                                if not host or not norm_url:
+                                    rejected += 1
+                                    continue
+                                accepted += 1
+                                sites_batch.append((norm_url, host))
+                                if ev:
+                                    obs_batch.append((new_import_id, norm_url, json.dumps(ev)))
+                            except Exception:
+                                rejected += 1
+                        if sites_batch:
+                            db_rw.executemany("INSERT OR IGNORE INTO sites VALUES (?, ?)", sites_batch)
+                        if obs_batch:
+                            db_rw.executemany("INSERT OR REPLACE INTO observations(import_id, url, evidence) VALUES (?, ?, ?)", obs_batch)
+                        db_rw.execute("UPDATE imports SET accepted = ?, rejected = ? WHERE id = ?", (accepted, rejected, new_import_id))
+                    _stats_cache.clear()
+                    self.reply(200, {
+                        "success": True,
+                        "status": "imported",
+                        "import_id": new_import_id,
+                        "source": source_label,
+                        "accepted": accepted,
+                        "rejected": rejected,
+                        "message": f"Imported {accepted} URLs into source #{new_import_id}",
+                    })
                 except Exception as e:
                     self.reply(500, {"error": str(e)})
                 return

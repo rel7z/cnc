@@ -3,6 +3,13 @@ import { NextRequest } from "next/server";
 export const dynamic = "force-dynamic";
 
 const ALLOWED = [
+  "database-sources",
+  "database-stats",
+  "database-sample",
+  "database-maintenance",
+  "database-import",
+  "database-delete",
+  "sources",
   "discovery-status",
   "discovery-workers",
   "discovery-control",
@@ -42,7 +49,17 @@ function getBackendUrl(resource: string): URL {
   if (base.username || base.password) throw new Error("Invalid API origin");
 
   let path = "/api/v1/" + resource;
-  if (resource.startsWith("discovery-")) {
+  if (resource.startsWith("database-")) {
+    if (resource === "database-sample") {
+      path = "/api/v1/database/sources/sample";
+    } else if (resource === "database-delete") {
+      path = "/api/v1/database/sources/delete";
+    } else {
+      path = "/api/v1/database/" + resource.slice(9);
+    }
+  } else if (resource === "sources") {
+    path = "/api/v1/database/sources";
+  } else if (resource.startsWith("discovery-")) {
     path = "/api/v1/discovery/" + resource.slice(10);
   } else if (resource.startsWith("intel-")) {
     path = "/api/v1/intel/" + resource.slice(6);
@@ -84,6 +101,10 @@ export async function GET(request: NextRequest, context: { params: Promise<{ res
       "filename",
       "status_code",
       "scanned",
+      "source",
+      "source_id",
+      "id",
+      "action",
       "with_evidence",
       "extended",
       "scanner",

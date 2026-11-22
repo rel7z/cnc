@@ -157,3 +157,69 @@ class APITests(unittest.TestCase):
         status, body, headers = self.request('/api/v1/download?filename=my-custom-list.txt')
         self.assertEqual(status, 200)
         self.assertIn('Content-Disposition: attachment; filename="my-custom-list.txt"', headers)
+
+    def test_database_management_and_sources(self):
+        # 1. Test listing each source in the database
+        status, sources_res = self.request('/api/v1/database/sources')
+        self.assertEqual(status, 200)
+        self.assertTrue(sources_res['total_sources'] >= 1)
+        first_src = sources_res['sources'][0]
+        self.assertIn('id', first_src)
+        self.assertIn('source', first_src)
+        self.assertIn('imported_at', first_src)
+        self.assertIn('observations_count', first_src)
+        self.assertIn('wordpress_count', first_src)
+        self.assertEqual(first_src['source'], 'api-test')
+        self.assertEqual(first_src['observations_count'], 2)
+
+        # 2. Test sampling records from a specific source
+        source_id = first_src['id']
+        status, sample_res = self.request(f'/api/v1/database/sources/sample?id={source_id}')
+        self.assertEqual(status, 200)
+        self.assertEqual(sample_res['source']['id'], source_id)
+        self.assertTrue(len(sample_res['sample']) > 0)
+        self.assertEqual(sample_res['sample'][0]['url'], 'https://example.org/')
+
+        # 3. Test downloading .txt specific to this source
+        status, body, headers = self.request(f'/api/v1/export?source_id={source_id}&format=txt')
+        self.assertEqual(status, 200)
+        self.assertIn('Content-Type: text/plain; charset=utf-8', headers)
+        self.assertIn(f'filename="source-{source_id}-', headers)
+        lines = [line.strip() for line in body.splitlines() if line.strip()]
+        self.assertIn('https://example.org/', lines)
+
+        # 4. Test database stats & PRAGMA storage engine details
+        status, stats_res = self.request('/api/v1/database/stats')
+        self.assertEqual(status, 200)
+        self.assertIn('size_bytes', stats_res)
+        self.assertIn('tables', stats_res)
+        self.assertIn('engine', stats_res)
+        self.assertEqual(stats_res['tables']['sites'], 2)
+        self.assertEqual(stats_res['tables']['imports'], 1)
+
+        # 5. Test database maintenance operations
+        for action in ('checkpoint', 'optimize', 'integrity'):
+            status, maint_res = self.request('/api/v1/database/maintenance', method='POST', body={'action': action})
+            self.assertEqual(status, 200)
+            self.assertTrue(maint_res['success'])
+
+        # 6. Test direct database import under a new source label
+        status, import_res = self.request('/api/v1/database/import', method='POST', body={
+            'source': 'test-manual-feed',
+            'urls': ['https://newsite1.org/', 'https://newsite2.org/']
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(import_res['success'])
+        self.assertEqual(import_res['accepted'], 2)
+        new_import_id = import_res['import_id']
+
+        # Verify new source appears in sources list
+        status, updated_sources = self.request('/api/v1/database/sources')
+        self.assertEqual(status, 200)
+        self.assertTrue(any(s['id'] == new_import_id and s['source'] == 'test-manual-feed' for s in updated_sources['sources']))
+
+        # 7. Test deleting a source
+        status, del_res = self.request('/api/v1/database/sources/delete', method='POST', body={'import_id': new_import_id})
+        self.assertEqual(status, 200)
+        self.assertTrue(del_res['success'])
+        self.assertEqual(del_res['deleted_imports'], 1)

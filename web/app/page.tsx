@@ -95,6 +95,43 @@ type ClusterStatus = {
   cluster_wp: number;
 };
 
+type DbSource = {
+  id: number;
+  source: string;
+  imported_at: string;
+  accepted: number;
+  rejected: number;
+  observation_count: number;
+  observations_count?: number;
+  wp_count: number;
+  wordpress_count?: number;
+};
+
+type DbStats = {
+  database_size_bytes?: number;
+  size_bytes?: number;
+  database_size_mb?: number;
+  size_mb?: number;
+  wal_size_bytes?: number;
+  wal_size_mb?: number;
+  page_size?: number;
+  page_count?: number;
+  tables: Record<string, number>;
+  engine?: {
+    journal_mode: string;
+    page_size: number;
+    page_count: number;
+    user_version: number;
+  };
+};
+
+type DbSampleRecord = {
+  url: string;
+  host: string;
+  scanned_at?: string;
+  evidence: string[];
+};
+
 const WORKER_SPECS = [
   { id: "cnc-do-worker-1", vpc: "10.104.0.3", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
   { id: "cnc-do-worker-2", vpc: "10.104.0.4", region: "SGP1", cores: "4 vCPU", ram: "8 GB" },
@@ -107,7 +144,7 @@ const WORKER_SPECS = [
 ];
 
 export default function Page() {
-  const [activeTab, setActiveTab] = useState<"intel" | "scanner" | "catalog">("intel");
+  const [activeTab, setActiveTab] = useState<"intel" | "scanner" | "catalog" | "database">("intel");
 
   // Distributed Cluster Swarm State
   const [clusterStatus, setClusterStatus] = useState<ClusterStatus | null>(null);
@@ -184,16 +221,48 @@ export default function Page() {
   const [selectedObsUrl, setSelectedObsUrl] = useState("");
   const [observations, setObservations] = useState<Observation[]>([]);
 
-  // Keyboard navigation for modal
+  // Tab 4: Database Management State
+  const [dbSources, setDbSources] = useState<DbSource[]>([]);
+  const [dbStats, setDbStats] = useState<DbStats | null>(null);
+  const [dbBusy, setDbBusy] = useState(false);
+  const [dbError, setDbError] = useState("");
+  const [dbSearch, setDbSearch] = useState("");
+  const [dbSort, setDbSort] = useState<"id_desc" | "id_asc" | "obs_desc" | "wp_desc" | "accepted_desc">("id_desc");
+  const [dbCategoryFilter, setDbCategoryFilter] = useState<string>("all");
+  const [dbMaintenanceMsg, setDbMaintenanceMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [dbMaintenanceBusy, setDbMaintenanceBusy] = useState(false);
+
+  // Sample Viewer Modal State
+  const [selectedDbSource, setSelectedDbSource] = useState<DbSource | null>(null);
+  const [sampleRecords, setSampleRecords] = useState<DbSampleRecord[]>([]);
+  const [sampleLoading, setSampleLoading] = useState(false);
+  const [sampleFilter, setSampleFilter] = useState("");
+  const [sampleCopied, setSampleCopied] = useState(false);
+
+  // Dataset Ingestion Modal State
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importSourceName, setImportSourceName] = useState("");
+  const [importUrlsText, setImportUrlsText] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importResult, setImportResult] = useState<{ accepted: number; rejected: number; source: string } | null>(null);
+
+  // Source Deletion State
+  const [deleteConfirmSource, setDeleteConfirmSource] = useState<DbSource | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
+  // Keyboard navigation for modals
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && viewSourceUrl) {
-        setViewSourceUrl("");
+      if (e.key === "Escape") {
+        if (viewSourceUrl) setViewSourceUrl("");
+        if (selectedDbSource) setSelectedDbSource(null);
+        if (showImportModal) setShowImportModal(false);
+        if (deleteConfirmSource) setDeleteConfirmSource(null);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [viewSourceUrl]);
+  }, [viewSourceUrl, selectedDbSource, showImportModal, deleteConfirmSource]);
 
   // Load General Stats & Crawler Status
   const loadGeneralStats = useCallback(async () => {
@@ -598,6 +667,212 @@ export default function Page() {
     return sourceData.html.toLowerCase().split(q).length - 1;
   }, [sourceData, sourceSearch, intelQuery]);
 
+  // Tab 4: Database Management Handlers & Data Loading
+  const loadDatabaseData = useCallback(async () => {
+    setDbBusy(true);
+    setDbError("");
+    try {
+      const [srcRes, statsRes] = await Promise.all([
+        fetch("/api/catalog/database-sources"),
+        fetch("/api/catalog/database-stats"),
+      ]);
+      if (srcRes.ok) {
+        const data = await srcRes.json();
+        setDbSources(data.sources || []);
+      } else {
+        setDbError("Failed to load database sources");
+      }
+      if (statsRes.ok) {
+        const data = await statsRes.json();
+        setDbStats(data);
+      }
+    } catch {
+      setDbError("Error contacting database service");
+    } finally {
+      setDbBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "database") {
+      void loadDatabaseData();
+    }
+  }, [activeTab, loadDatabaseData, catalogRefresh]);
+
+  const handleRunMaintenance = async (action: "checkpoint" | "optimize" | "integrity" | "vacuum") => {
+    setDbMaintenanceBusy(true);
+    setDbMaintenanceMsg(null);
+    try {
+      const res = await fetch("/api/catalog/database-maintenance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json();
+      if (res.ok && (data.status === "ok" || data.success)) {
+        let detail = data.message || "";
+        if (action === "integrity" && data.result) {
+          detail = `Result: ${JSON.stringify(data.result)}`;
+        } else if (action === "checkpoint" && data.result) {
+          detail = `WAL flushed: ${JSON.stringify(data.result)}`;
+        } else if (!detail) {
+          detail = `Operation completed successfully`;
+        }
+        setDbMaintenanceMsg({
+          type: "success",
+          text: `Maintenance [${action}] succeeded. ${detail}`,
+        });
+        await loadDatabaseData();
+        await loadGeneralStats();
+      } else {
+        setDbMaintenanceMsg({
+          type: "error",
+          text: data.error || `Maintenance [${action}] failed`,
+        });
+      }
+    } catch {
+      setDbMaintenanceMsg({
+        type: "error",
+        text: `Network error running maintenance [${action}]`,
+      });
+    } finally {
+      setDbMaintenanceBusy(false);
+    }
+  };
+
+  const handleOpenSample = async (source: DbSource) => {
+    setSelectedDbSource(source);
+    setSampleRecords([]);
+    setSampleLoading(true);
+    setSampleFilter("");
+    setSampleCopied(false);
+    try {
+      const res = await fetch(`/api/catalog/database-sample?id=${source.id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSampleRecords(data.sample_records || data.sample || []);
+      }
+    } catch {
+    } finally {
+      setSampleLoading(false);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteConfirmSource) return;
+    setDeleteBusy(true);
+    try {
+      const res = await fetch("/api/catalog/database-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: deleteConfirmSource.id }),
+      });
+      const data = await res.json();
+      if (res.ok && data.status === "deleted") {
+        setDbMaintenanceMsg({
+          type: "success",
+          text: `Deleted source #${deleteConfirmSource.id} (${deleteConfirmSource.source}) and purged ${data.deleted_observations?.toLocaleString() ?? 0} observations.`,
+        });
+        setDeleteConfirmSource(null);
+        await loadDatabaseData();
+        await loadGeneralStats();
+      } else {
+        setDbMaintenanceMsg({
+          type: "error",
+          text: data.error || "Failed to delete source",
+        });
+      }
+    } catch {
+      setDbMaintenanceMsg({
+        type: "error",
+        text: "Network error deleting source",
+      });
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  const handleImportDataset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const urls = importUrlsText
+      .split("\n")
+      .map((u) => u.trim())
+      .filter((u) => u.length > 0);
+    if (!importSourceName.trim()) {
+      alert("Please provide a source name / label");
+      return;
+    }
+    if (urls.length === 0) {
+      alert("Please provide at least one URL to ingest");
+      return;
+    }
+    setImportBusy(true);
+    setImportResult(null);
+    try {
+      const res = await fetch("/api/catalog/database-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: importSourceName.trim(),
+          urls,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.status === "imported") {
+        setImportResult(data);
+        setImportUrlsText("");
+        await loadDatabaseData();
+        await loadGeneralStats();
+      } else {
+        alert(data.error || "Failed to import dataset");
+      }
+    } catch {
+      alert("Network error importing dataset");
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const getSourceCategory = (src: string): { label: string; cls: string; type: string } => {
+    if (src.startsWith("cluster-worker")) return { label: "Swarm Worker", cls: "worker", type: "worker" };
+    if (src.startsWith("czds-") || src.endsWith(".zone")) return { label: "Zone File", cls: "zone", type: "zone" };
+    if (src.startsWith("cnc:verified-discovery")) return { label: "Verified Discovery", cls: "discovery", type: "discovery" };
+    if (src.startsWith("internet-map:cnc-generator")) return { label: "CNC Generator", cls: "generator", type: "generator" };
+    if (src.startsWith("wordpress-scanner")) return { label: "WP Crawler", cls: "discovery", type: "discovery" };
+    return { label: "Dataset", cls: "custom", type: "custom" };
+  };
+
+  const filteredDbSources = useMemo(() => {
+    let list = [...dbSources];
+    if (dbCategoryFilter !== "all") {
+      list = list.filter((s) => getSourceCategory(s.source).type === dbCategoryFilter);
+    }
+    if (dbSearch.trim()) {
+      const q = dbSearch.trim().toLowerCase();
+      list = list.filter(
+        (s) =>
+          String(s.id).includes(q) ||
+          s.source.toLowerCase().includes(q) ||
+          getSourceCategory(s.source).label.toLowerCase().includes(q)
+      );
+    }
+    list.sort((a, b) => {
+      const aObs = a.observation_count ?? a.observations_count ?? 0;
+      const bObs = b.observation_count ?? b.observations_count ?? 0;
+      const aWp = a.wp_count ?? a.wordpress_count ?? 0;
+      const bWp = b.wp_count ?? b.wordpress_count ?? 0;
+
+      if (dbSort === "id_desc") return b.id - a.id;
+      if (dbSort === "id_asc") return a.id - b.id;
+      if (dbSort === "obs_desc") return bObs - aObs;
+      if (dbSort === "wp_desc") return bWp - aWp;
+      if (dbSort === "accepted_desc") return b.accepted - a.accepted;
+      return 0;
+    });
+    return list;
+  }, [dbSources, dbCategoryFilter, dbSearch, dbSort]);
+
+
   return (
     <>
       <header>
@@ -671,6 +946,17 @@ export default function Page() {
           >
             🌐 Catalog Domains
             {stats?.urls && <span className="tab-badge">{(stats.urls / 1000000).toFixed(1)}M</span>}
+          </button>
+          <button
+            className={`tab-btn ${activeTab === "database" ? "active" : ""}`}
+            onClick={() => setActiveTab("database")}
+          >
+            🗄️ Database Management
+            {dbSources.length > 0 ? (
+              <span className="tab-badge">{dbSources.length} sources</span>
+            ) : stats?.imports ? (
+              <span className="tab-badge">{stats.imports} sources</span>
+            ) : null}
           </button>
         </div>
 
@@ -1772,6 +2058,428 @@ export default function Page() {
           </section>
         )}
 
+        {/* TAB 4: DATABASE MANAGEMENT */}
+        {activeTab === "database" && (
+          <section>
+            <div className="controls" style={{ marginBottom: 20 }}>
+              <div style={{ flex: 1 }}>
+                <h2>🗄️ Database Management &amp; Ingestion Provenance</h2>
+                <p style={{ color: "#8fa8be", margin: 0, fontSize: 14 }}>
+                  Monitor SQLite storage engine telemetry, manage individual provenance sources, download raw datasets, and perform database maintenance.
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => {
+                    setShowImportModal(true);
+                    setImportResult(null);
+                  }}
+                  title="Ingest raw URLs or domains into catalog under a custom source label"
+                >
+                  ➕ Ingest New Dataset
+                </button>
+                <button
+                  type="button"
+                  disabled={dbBusy}
+                  onClick={() => {
+                    void loadDatabaseData();
+                    void loadGeneralStats();
+                  }}
+                  title="Reload all sources and storage statistics"
+                >
+                  {dbBusy ? "Loading..." : "↻ Refresh Sources"}
+                </button>
+              </div>
+            </div>
+
+            {/* Error Banner */}
+            {dbError && (
+              <div className="db-alert error" role="alert">
+                <span>⚠️ {dbError}</span>
+                <button onClick={() => setDbError("")} style={{ padding: "2px 8px", fontSize: 11 }}>✕</button>
+              </div>
+            )}
+
+            {/* Maintenance Message Banner */}
+            {dbMaintenanceMsg && (
+              <div className={`db-alert ${dbMaintenanceMsg.type}`} role="status">
+                <span>
+                  {dbMaintenanceMsg.type === "success" ? "✅" : "❌"} {dbMaintenanceMsg.text}
+                </span>
+                <button onClick={() => setDbMaintenanceMsg(null)} style={{ padding: "2px 8px", fontSize: 11 }}>✕</button>
+              </div>
+            )}
+
+            {/* Database Engine Metrics */}
+            {(() => {
+              const dbSizeMb = dbStats?.database_size_mb ?? dbStats?.size_mb ?? 0;
+              const walSizeMb = dbStats?.wal_size_mb ?? 0;
+              const pageSize = dbStats?.page_size ?? dbStats?.engine?.page_size ?? 4096;
+              const pageCount = dbStats?.page_count ?? dbStats?.engine?.page_count ?? 0;
+
+              return (
+                <div id="metrics">
+                  <div className="metric-card">
+                    <strong>
+                      {dbStats
+                        ? dbSizeMb >= 1024
+                          ? `${(dbSizeMb / 1024).toFixed(2)} GB`
+                          : `${dbSizeMb.toFixed(1)} MB`
+                        : "—"}
+                    </strong>
+                    <span>Catalog File Size (data/catalog.db)</span>
+                  </div>
+
+                  <div className="metric-card">
+                    <strong>
+                      {dbStats ? `${walSizeMb.toFixed(2)} MB` : "—"}
+                    </strong>
+                    <span>
+                      WAL Commit Buffer
+                      {dbStats && walSizeMb > 10 && (
+                        <span style={{ color: "#fdcb6e", marginLeft: 6, fontSize: 11 }}>● Checkpoint recommended</span>
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="metric-card">
+                    <strong>{dbSources.length.toLocaleString()}</strong>
+                    <span>Active Dataset Sources</span>
+                  </div>
+
+                  <div className="metric-card">
+                    <strong>
+                      {dbStats?.tables?.observations
+                        ? dbStats.tables.observations.toLocaleString()
+                        : stats?.urls
+                        ? stats.urls.toLocaleString()
+                        : "—"}
+                    </strong>
+                    <span>Total Stored Observations</span>
+                  </div>
+
+                  <div className="metric-card">
+                    <strong>
+                      {dbStats?.tables?.sites ? dbStats.tables.sites.toLocaleString() : "—"}
+                    </strong>
+                    <span>Unique Domains / Sites</span>
+                  </div>
+
+                  <div className="metric-card">
+                    <strong style={{ fontSize: 20 }}>
+                      {dbStats ? `${pageSize.toLocaleString()} B` : "—"}
+                    </strong>
+                    <span>
+                      {dbStats ? `${pageCount.toLocaleString()} pages allocated` : "Page Allocation"}
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Storage Engine Maintenance Toolbar */}
+            <div className="db-maintenance-bar">
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginRight: 8 }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: "#e4edf5" }}>Storage Engine Operations:</span>
+              </div>
+
+              <button
+                type="button"
+                className="secondary"
+                disabled={dbMaintenanceBusy}
+                onClick={() => handleRunMaintenance("checkpoint")}
+                title="Flush WAL journal frames into catalog.db and truncate WAL file"
+                style={{ fontSize: 12, padding: "7px 12px" }}
+              >
+                ⚡ WAL Checkpoint (TRUNCATE)
+              </button>
+
+              <button
+                type="button"
+                className="secondary"
+                disabled={dbMaintenanceBusy}
+                onClick={() => handleRunMaintenance("optimize")}
+                title="Update table and index statistical histograms (PRAGMA optimize)"
+                style={{ fontSize: 12, padding: "7px 12px" }}
+              >
+                📊 Optimize Query Planner
+              </button>
+
+              <button
+                type="button"
+                className="secondary"
+                disabled={dbMaintenanceBusy}
+                onClick={() => handleRunMaintenance("integrity")}
+                title="Verify SQLite B-tree page pointers and checksums (PRAGMA integrity_check)"
+                style={{ fontSize: 12, padding: "7px 12px" }}
+              >
+                🛡️ Run Integrity Check
+              </button>
+
+              <button
+                type="button"
+                className="secondary"
+                disabled={dbMaintenanceBusy}
+                onClick={() => {
+                  if (confirm("Running VACUUM will repack catalog.db into a fresh file to eliminate page fragmentation. During vacuuming, the database lock will be held. Proceed?")) {
+                    void handleRunMaintenance("vacuum");
+                  }
+                }}
+                title="Defragment and shrink database file on disk"
+                style={{ fontSize: 12, padding: "7px 12px" }}
+              >
+                🧹 Vacuum Storage
+              </button>
+
+              {dbMaintenanceBusy && (
+                <span className="pulse-indicator" style={{ marginLeft: "auto" }}>
+                  <span className="pulse-dot"></span> Executing PRAGMA operation...
+                </span>
+              )}
+            </div>
+
+            {/* Source Search, Category Filters, and Sort */}
+            <div style={{ margin: "22px 0 16px", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", flex: 1 }}>
+                <input
+                  type="search"
+                  placeholder="Filter sources by label, name, or #ID..."
+                  value={dbSearch}
+                  onChange={(e) => setDbSearch(e.target.value)}
+                  style={{ maxWidth: 360, minWidth: 240 }}
+                />
+
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => setDbCategoryFilter("all")}
+                    className={dbCategoryFilter === "all" ? "primary" : "secondary"}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                  >
+                    All ({dbSources.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDbCategoryFilter("worker")}
+                    className={dbCategoryFilter === "worker" ? "primary" : "secondary"}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                  >
+                    🤖 Swarm ({dbSources.filter((s) => getSourceCategory(s.source).type === "worker").length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDbCategoryFilter("zone")}
+                    className={dbCategoryFilter === "zone" ? "primary" : "secondary"}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                  >
+                    🌐 Zone Files ({dbSources.filter((s) => getSourceCategory(s.source).type === "zone").length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDbCategoryFilter("discovery")}
+                    className={dbCategoryFilter === "discovery" ? "primary" : "secondary"}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                  >
+                    🎯 Discovery ({dbSources.filter((s) => getSourceCategory(s.source).type === "discovery").length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDbCategoryFilter("generator")}
+                    className={dbCategoryFilter === "generator" ? "primary" : "secondary"}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                  >
+                    ⚡ Generator ({dbSources.filter((s) => getSourceCategory(s.source).type === "generator").length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDbCategoryFilter("custom")}
+                    className={dbCategoryFilter === "custom" ? "primary" : "secondary"}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                  >
+                    📁 Custom ({dbSources.filter((s) => getSourceCategory(s.source).type === "custom").length})
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: "#8fa8be" }}>Sort:</span>
+                <select
+                  value={dbSort}
+                  onChange={(e) => setDbSort(e.target.value as any)}
+                  style={{ padding: "6px 10px", fontSize: 12 }}
+                >
+                  <option value="id_desc">Newest First (ID ↓)</option>
+                  <option value="id_asc">Oldest First (ID ↑)</option>
+                  <option value="obs_desc">Most Observations (Obs ↓)</option>
+                  <option value="wp_desc">Most WordPress Sites (WP ↓)</option>
+                  <option value="accepted_desc">Most Accepted (Accepted ↓)</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Sources List Counter */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, fontSize: 12, color: "#8fa8be" }}>
+              <span>
+                Showing <strong>{filteredDbSources.length}</strong> of <strong>{dbSources.length}</strong> sources
+                {dbSearch && ` matching "${dbSearch}"`}
+              </span>
+              <span>
+                Total observations in view:{" "}
+                <strong>
+                  {filteredDbSources
+                    .reduce((acc, s) => acc + (s.observation_count ?? s.observations_count ?? 0), 0)
+                    .toLocaleString()}
+                </strong>
+              </span>
+            </div>
+
+            {/* Sources Table */}
+            <div style={{ overflowX: "auto" }}>
+              <table className="feed-table" style={{ width: "100%", fontSize: 13 }}>
+                <thead>
+                  <tr>
+                    <th style={{ width: 60, textAlign: "center" }}>ID</th>
+                    <th>Source Label &amp; Provenance</th>
+                    <th style={{ width: 140 }}>Category</th>
+                    <th style={{ width: 150 }}>Imported At</th>
+                    <th style={{ width: 100, textAlign: "right" }}>Accepted</th>
+                    <th style={{ width: 90, textAlign: "right" }}>Rejected</th>
+                    <th style={{ width: 110, textAlign: "right" }}>Observations</th>
+                    <th style={{ width: 120, textAlign: "right" }}>WordPress</th>
+                    <th style={{ width: 230, textAlign: "center" }}>Download Datasets (.txt)</th>
+                    <th style={{ width: 130, textAlign: "center" }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredDbSources.map((src) => {
+                    const cat = getSourceCategory(src.source);
+                    const obsCount = src.observation_count ?? src.observations_count ?? 0;
+                    const wpCount = src.wp_count ?? src.wordpress_count ?? 0;
+                    const wpPct = src.accepted > 0 ? ((wpCount / src.accepted) * 100).toFixed(1) : "0.0";
+
+                    return (
+                      <tr key={src.id} style={{ borderBottom: "1px solid #1c2a38" }}>
+                        <td style={{ textAlign: "center", fontWeight: 700, color: "#8fa8be" }}>
+                          #{src.id}
+                        </td>
+                        <td>
+                          <div style={{ fontWeight: 600, color: "#e4edf5", wordBreak: "break-all" }}>
+                            {src.source}
+                          </div>
+                        </td>
+                        <td>
+                          <span className={`db-source-tag ${cat.cls}`}>
+                            {cat.label}
+                          </span>
+                        </td>
+                        <td style={{ color: "#8fa8be", fontSize: 12 }}>
+                          {src.imported_at ? new Date(src.imported_at).toLocaleString() : "—"}
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          <span className="badge" style={{ background: "rgba(39, 174, 96, 0.15)", color: "#55efc4" }}>
+                            {src.accepted.toLocaleString()}
+                          </span>
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          {src.rejected > 0 ? (
+                            <span className="badge" style={{ background: "rgba(231, 76, 60, 0.15)", color: "#ff7675" }}>
+                              {src.rejected.toLocaleString()}
+                            </span>
+                          ) : (
+                            <span style={{ color: "#576574" }}>0</span>
+                          )}
+                        </td>
+                        <td style={{ textAlign: "right", fontWeight: 600, color: "#74b9ff" }}>
+                          {obsCount.toLocaleString()}
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          {wpCount > 0 ? (
+                            <span className="badge" style={{ background: "rgba(162, 155, 254, 0.15)", color: "#a29bfe", fontWeight: 600 }}>
+                              {wpCount.toLocaleString()} ({wpPct}%)
+                            </span>
+                          ) : (
+                            <span style={{ color: "#576574" }}>0</span>
+                          )}
+                        </td>
+                        <td style={{ textAlign: "center" }}>
+                          <div style={{ display: "inline-flex", gap: 4, flexWrap: "wrap", justifyContent: "center" }}>
+                            <button
+                              type="button"
+                              className="db-action-btn secondary"
+                              onClick={() => handleDownloadTxt({ source_id: String(src.id), field: "url" })}
+                              title={`Download all URLs in source #${src.id} as plain text (.txt)`}
+                            >
+                              ⬇ URLs
+                            </button>
+                            <button
+                              type="button"
+                              className="db-action-btn secondary"
+                              onClick={() => handleDownloadTxt({ source_id: String(src.id), field: "host" })}
+                              title={`Download all Hostnames in source #${src.id} as plain text (.txt)`}
+                            >
+                              ⬇ Hosts
+                            </button>
+                            {wpCount > 0 && (
+                              <button
+                                type="button"
+                                className="db-action-btn secondary"
+                                onClick={() => handleDownloadTxt({ source_id: String(src.id), wordpress: "1", field: "url" })}
+                                title={`Download verified WordPress URLs in source #${src.id} as plain text (.txt)`}
+                                style={{ color: "#a29bfe", borderColor: "rgba(162, 155, 254, 0.4)" }}
+                              >
+                                ⬇ WP
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                        <td style={{ textAlign: "center" }}>
+                          <div style={{ display: "inline-flex", gap: 6, justifyContent: "center" }}>
+                            <button
+                              type="button"
+                              className="db-action-btn secondary"
+                              onClick={() => handleOpenSample(src)}
+                              title="Inspect sample records from this source"
+                            >
+                              👁️ Sample
+                            </button>
+                            <button
+                              type="button"
+                              className="db-action-btn danger"
+                              onClick={() => setDeleteConfirmSource(src)}
+                              title="Delete this source and its linked observations"
+                              style={{ padding: "4px 8px" }}
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {!dbBusy && filteredDbSources.length === 0 && (
+                    <tr>
+                      <td colSpan={10} style={{ padding: 40, textAlign: "center", color: "#8fa8be" }}>
+                        {dbSearch ? `No database sources match "${dbSearch}"` : "No dataset sources found in catalog."}
+                      </td>
+                    </tr>
+                  )}
+                  {dbBusy && (
+                    <tr>
+                      <td colSpan={10} style={{ padding: 40, textAlign: "center" }}>
+                        <span className="pulse-indicator">
+                          <span className="pulse-dot"></span> Loading database sources &amp; engine stats...
+                        </span>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
         {/* FULL SOURCE CODE VIEWER MODAL WITH IN-PAGE SEARCH */}
         {viewSourceUrl && (
           <>
@@ -1896,6 +2604,309 @@ export default function Page() {
                   </div>
                 </div>
               )}
+            </div>
+          </>
+        )}
+
+        {/* DATABASE SOURCE SAMPLE VIEWER MODAL */}
+        {selectedDbSource && (
+          <>
+            <div className="modal-backdrop" onClick={() => setSelectedDbSource(null)} />
+            <div className="source-modal" style={{ width: "min(1050px, 95vw)" }}>
+              <div className="source-modal-header">
+                <div>
+                  <h3 style={{ margin: 0, fontSize: 16, color: "#f0f6fc", display: "flex", alignItems: "center", gap: 8 }}>
+                    <span>👁️ Source Sample:</span>
+                    <span style={{ color: "#6ce0c7", fontFamily: "monospace" }}>{selectedDbSource.source}</span>
+                    <span className="badge" style={{ background: "#1c2a38", color: "#8fa8be" }}>
+                      ID #{selectedDbSource.id}
+                    </span>
+                  </h3>
+                  <small style={{ color: "#8fa8be" }}>
+                    Showing first 50 observations recorded in catalog.db • Imported {selectedDbSource.imported_at ? new Date(selectedDbSource.imported_at).toLocaleString() : "—"}
+                  </small>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => {
+                      const allUrls = sampleRecords.map((r) => r.url).join("\n");
+                      navigator.clipboard.writeText(allUrls);
+                      setSampleCopied(true);
+                      setTimeout(() => setSampleCopied(false), 2000);
+                    }}
+                    style={{ fontSize: 12, padding: "5px 10px" }}
+                  >
+                    {sampleCopied ? "✓ Copied!" : "📋 Copy Sample URLs"}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => handleDownloadTxt({ source_id: String(selectedDbSource.id), field: "url" })}
+                    style={{ fontSize: 12, padding: "5px 10px" }}
+                  >
+                    ⬇ Download All ({selectedDbSource.observation_count.toLocaleString()})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedDbSource(null)}
+                    style={{ fontSize: 12, padding: "5px 10px" }}
+                  >
+                    ✕ Close
+                  </button>
+                </div>
+              </div>
+
+              <div className="source-modal-body">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 10 }}>
+                  <input
+                    type="search"
+                    placeholder="Filter in sampled records..."
+                    value={sampleFilter}
+                    onChange={(e) => setSampleFilter(e.target.value)}
+                    style={{ maxWidth: 300, padding: "6px 12px", fontSize: 12 }}
+                  />
+                  <div style={{ fontSize: 12, color: "#8fa8be" }}>
+                    Sample size: <strong>{sampleRecords.length} records</strong>
+                  </div>
+                </div>
+
+                {sampleLoading ? (
+                  <div style={{ padding: 40, textAlign: "center" }}>
+                    <span className="pulse-indicator">
+                      <span className="pulse-dot"></span> Loading source records...
+                    </span>
+                  </div>
+                ) : (
+                  <div style={{ maxHeight: "58vh", overflowY: "auto", border: "1px solid #1c2a38", borderRadius: 8 }}>
+                    <table className="feed-table" style={{ width: "100%", fontSize: 12, margin: 0 }}>
+                      <thead>
+                        <tr>
+                          <th style={{ width: 40 }}>#</th>
+                          <th>URL</th>
+                          <th style={{ width: 180 }}>Hostname</th>
+                          <th style={{ width: 140 }}>Scanned At</th>
+                          <th>WordPress &amp; Tech Evidence</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sampleRecords
+                          .filter((r) => {
+                            if (!sampleFilter.trim()) return true;
+                            const q = sampleFilter.toLowerCase();
+                            return (
+                              r.url.toLowerCase().includes(q) ||
+                              r.host.toLowerCase().includes(q) ||
+                              r.evidence.some((ev) => ev.toLowerCase().includes(q))
+                            );
+                          })
+                          .map((rec, i) => (
+                            <tr key={i} style={{ borderBottom: "1px solid #162433" }}>
+                              <td style={{ color: "#495c6e", textAlign: "center" }}>{i + 1}</td>
+                              <td style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+                                <a
+                                  href={rec.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ color: "#6ce0c7", textDecoration: "none" }}
+                                >
+                                  {rec.url}
+                                </a>
+                              </td>
+                              <td style={{ color: "#8fa8be" }}>{rec.host}</td>
+                              <td style={{ color: "#8fa8be", fontSize: 11 }}>
+                                {rec.scanned_at ? new Date(rec.scanned_at).toLocaleString() : "—"}
+                              </td>
+                              <td>
+                                {rec.evidence.length > 0 ? (
+                                  rec.evidence.map((ev, ei) => (
+                                    <span
+                                      key={ei}
+                                      className="badge badge-tech"
+                                      style={{ marginRight: 4, marginBottom: 2, fontSize: 11 }}
+                                    >
+                                      {ev}
+                                    </span>
+                                  ))
+                                ) : (
+                                  <span style={{ color: "#576574" }}>—</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        {sampleRecords.length === 0 && (
+                          <tr>
+                            <td colSpan={5} style={{ padding: 30, textAlign: "center", color: "#8fa8be" }}>
+                              No sample records found for this source.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* DATASET INGESTION MODAL */}
+        {showImportModal && (
+          <>
+            <div className="modal-backdrop" onClick={() => !importBusy && setShowImportModal(false)} />
+            <div className="source-modal" style={{ width: "min(680px, 95vw)" }}>
+              <div className="source-modal-header">
+                <div>
+                  <h3 style={{ margin: 0, fontSize: 16, color: "#f0f6fc" }}>➕ Ingest New Dataset</h3>
+                  <small style={{ color: "#8fa8be" }}>
+                    Add raw URLs or domains to catalog.db under a custom provenance label
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  disabled={importBusy}
+                  onClick={() => setShowImportModal(false)}
+                  style={{ fontSize: 12, padding: "5px 10px" }}
+                >
+                  ✕ Close
+                </button>
+              </div>
+
+              <div className="source-modal-body">
+                {importResult && (
+                  <div className="db-alert success" style={{ marginBottom: 16 }}>
+                    <div>
+                      <strong>Dataset Ingestion Successful!</strong>
+                      <div style={{ fontSize: 12, marginTop: 4 }}>
+                        Source: <code>{importResult.source}</code> • Accepted: <strong>{importResult.accepted.toLocaleString()}</strong> • Rejected: <strong>{importResult.rejected.toLocaleString()}</strong>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setImportResult(null)}
+                      style={{ padding: "2px 8px", fontSize: 11 }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                <form onSubmit={handleImportDataset}>
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ display: "block", marginBottom: 6, fontWeight: 600, fontSize: 13 }}>
+                      Source Label / Provenance Tag:
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. manual-seed-20261122 or client-audit-list"
+                      value={importSourceName}
+                      onChange={(e) => setImportSourceName(e.target.value)}
+                      required
+                      style={{ width: "100%", boxSizing: "border-box" }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ display: "block", marginBottom: 6, fontWeight: 600, fontSize: 13 }}>
+                      Target URLs or Hostnames (one per line):
+                    </label>
+                    <textarea
+                      rows={10}
+                      placeholder={"https://example.org\nhttps://wordpress.org\nwikipedia.org"}
+                      value={importUrlsText}
+                      onChange={(e) => setImportUrlsText(e.target.value)}
+                      required
+                      style={{
+                        width: "100%",
+                        boxSizing: "border-box",
+                        background: "#070c12",
+                        border: "1px solid #1c2a38",
+                        borderRadius: 8,
+                        padding: "10px 14px",
+                        color: "#c5d8e8",
+                        fontFamily: "monospace",
+                        fontSize: 12,
+                        lineHeight: 1.5,
+                      }}
+                    />
+                    <small style={{ color: "#8fa8be", marginTop: 4, display: "block" }}>
+                      Paste URLs or domain names. If http/https scheme is omitted, https:// will be prepended automatically. Duplicates are merged safely.
+                    </small>
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={importBusy}
+                      onClick={() => setShowImportModal(false)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="primary"
+                      disabled={importBusy || !importSourceName.trim() || !importUrlsText.trim()}
+                    >
+                      {importBusy ? "Ingesting Dataset..." : "⚡ Ingest into Catalog"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* DELETE SOURCE CONFIRMATION MODAL */}
+        {deleteConfirmSource && (
+          <>
+            <div className="modal-backdrop" onClick={() => !deleteBusy && setDeleteConfirmSource(null)} />
+            <div className="source-modal" style={{ width: "min(520px, 95vw)" }}>
+              <div className="source-modal-header" style={{ borderBottomColor: "rgba(231, 76, 60, 0.3)" }}>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: 16, color: "#ff7675" }}>⚠️ Confirm Source Deletion</h3>
+                  <small style={{ color: "#8fa8be" }}>This action cannot be undone</small>
+                </div>
+                <button
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => setDeleteConfirmSource(null)}
+                  style={{ fontSize: 12, padding: "5px 10px" }}
+                >
+                  ✕ Close
+                </button>
+              </div>
+
+              <div className="source-modal-body">
+                <p style={{ margin: "0 0 16px", fontSize: 13, lineHeight: 1.6 }}>
+                  Are you sure you want to permanently delete dataset source{" "}
+                  <strong style={{ color: "#6ce0c7" }}>{deleteConfirmSource.source}</strong> (ID #{deleteConfirmSource.id})?
+                </p>
+                <div style={{ background: "#0b1118", border: "1px solid #1c2a38", borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 12 }}>
+                  <div>• Accepted records: <strong>{deleteConfirmSource.accepted.toLocaleString()}</strong></div>
+                  <div>• Linked observations to purge: <strong>{deleteConfirmSource.observation_count.toLocaleString()}</strong></div>
+                  <div>• Linked WordPress findings: <strong>{deleteConfirmSource.wp_count.toLocaleString()}</strong></div>
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={deleteBusy}
+                    onClick={() => setDeleteConfirmSource(null)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    disabled={deleteBusy}
+                    onClick={handleConfirmDelete}
+                  >
+                    {deleteBusy ? "Purging..." : "🗑️ Permanently Delete Source"}
+                  </button>
+                </div>
+              </div>
             </div>
           </>
         )}
