@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 import sqlite3
 from urllib.parse import urlsplit
@@ -117,6 +118,10 @@ def main():
     search.add_argument("--host", default="")
     search.add_argument("--wordpress", action="store_true")
     search.add_argument("--limit", type=int, default=100)
+    export = commands.add_parser("export")
+    export.add_argument("--wordpress", action="store_true")
+    inspect = commands.add_parser("observations")
+    inspect.add_argument("url")
     commands.add_parser("stats")
     args = parser.parse_args()
     db = connect(args.database)
@@ -126,6 +131,21 @@ def main():
         elif args.command == "stats":
             print("Unique URLs", db.execute("SELECT count(*) FROM sites").fetchone()[0])
             print("Imports", db.execute("SELECT count(*) FROM imports").fetchone()[0])
+        elif args.command == "observations":
+            _, url = normalize(args.url)
+            for source, observed, evidence in db.execute("""
+                SELECT i.source,i.imported_at,o.evidence FROM observations o
+                JOIN imports i ON i.id=o.import_id WHERE o.url=?
+                ORDER BY i.id
+            """, (url,)):
+                print(json.dumps({"url": url, "source": source, "imported_at": observed,
+                                  "wordpress_evidence": json.loads(evidence)}))
+        elif args.command == "export":
+            query = "SELECT s.url FROM sites s"
+            if args.wordpress:
+                query += " WHERE EXISTS(SELECT 1 FROM observations o WHERE o.url=s.url AND o.evidence!='[]')"
+            for url, in db.execute(query + " ORDER BY s.url"):
+                sys.stdout.write(url + "\n")
         else:
             if not 1 <= args.limit <= 10000:
                 parser.error("Limit must be between 1 and 10000")
