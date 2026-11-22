@@ -13,6 +13,8 @@ ROOT = Path('/opt/internet-map')
 OLD = Path('/opt/cnc/wordpress-generator')
 STATE = ROOT / 'data/discovery'
 UNITS = Path('/etc/systemd/system')
+RESTORING = False
+RETIRED_LEGACY = None
 
 
 def run(*args):
@@ -20,24 +22,39 @@ def run(*args):
 
 
 def perform_install():
+    global RESTORING, RETIRED_LEGACY
     config = json.loads(Path('/opt/cnc/config.json').read_text())
     op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with op.open('http://' + config['http_addr'] + '/api/jobs?active=1', timeout=15) as response:
         if json.load(response):
             raise RuntimeError('Drain active CNC jobs before moving discovery state')
     if not OLD.is_symlink():
-        if STATE.exists():
+        RESTORING = (STATE.exists() and (ROOT / 'data/restore-receipt.json').is_file()
+                     and (STATE / 'paused').is_file())
+        if STATE.exists() and not RESTORING:
             raise RuntimeError('Destination state already exists; refusing overwrite')
-        if not (OLD / 'paused').exists():
+        if OLD.exists() and not (OLD / 'paused').exists():
             raise RuntimeError('Pause discovery before migration')
-        run('systemctl', 'stop', 'cnc-wordpress-generator-refresh.timer',
-            'cnc-wordpress-generator-refresh.service', 'cnc-wordpress-generator.service')
+        legacy_units = [name for name in ('cnc-wordpress-generator-refresh.timer',
+                        'cnc-wordpress-generator-refresh.service', 'cnc-wordpress-generator.service')
+                        if (UNITS / name).exists()]
+        if legacy_units:
+            run('systemctl', 'stop', *legacy_units)
         # Rename on the same volume preserves WAL files and every checkpoint.
         STATE.parent.mkdir(parents=True, exist_ok=True)
-        OLD.rename(STATE)
+        if RESTORING:
+            if OLD.exists():
+                RETIRED_LEGACY = OLD.with_name('wordpress-generator-before-restore-' + str(time.time_ns()))
+                OLD.rename(RETIRED_LEGACY)
+        else:
+            OLD.rename(STATE)
         OLD.symlink_to(STATE, target_is_directory=True)
     if OLD.resolve() != STATE.resolve():
         raise RuntimeError('Legacy discovery path belongs to another destination')
+    if RESTORING or not (STATE / 'generator.env').exists():
+        env = STATE / 'generator.env'
+        env.write_text('GO_API_URL=http://' + config['http_addr'] + '\n')
+        env.chmod(0o600)
     common = ('[Unit]\nAfter=network-online.target cnc-server.service\n'
               'Wants=network-online.target\n[Service]\nUser=root\nUMask=0077\n'
               'WorkingDirectory=/opt/internet-map\nNoNewPrivileges=true\n')
@@ -66,7 +83,10 @@ def perform_install():
     ui_override = UNITS/'cnc-ui.service.d'
     ui_override.mkdir(exist_ok=True)
     (ui_override/'internet-map.conf').write_text('[Service]\nEnvironmentFile=/opt/cnc/internet-map.env\n')
-    run('systemctl', 'disable', 'cnc-wordpress-generator.service', 'cnc-wordpress-generator-refresh.timer')
+    legacy_units = [name for name in ('cnc-wordpress-generator.service', 'cnc-wordpress-generator-refresh.timer')
+                    if (UNITS / name).exists()]
+    if legacy_units:
+        run('systemctl', 'disable', *legacy_units)
     run('systemctl', 'daemon-reload')
     run('systemctl', 'enable', '--now', 'internet-map-discovery.service', 'internet-map-sync.timer', 'internet-map-backup.timer')
     run('systemctl', 'restart', 'internet-map-api.service')
@@ -87,8 +107,12 @@ def install():
             subprocess.run(['systemctl', 'disable', '--now', unit], capture_output=True)
         if not migrated_before and OLD.is_symlink() and OLD.resolve() == STATE.resolve():
             OLD.unlink()
-            STATE.rename(OLD)
-            (OLD/'cutover.json').unlink(missing_ok=True)
+            if RESTORING:
+                if RETIRED_LEGACY is not None:
+                    RETIRED_LEGACY.rename(OLD)
+            else:
+                STATE.rename(OLD)
+                (OLD/'cutover.json').unlink(missing_ok=True)
         override = UNITS/'internet-map-api.service.d/coordination.conf'
         override.unlink(missing_ok=True)
         subprocess.run(['systemctl','daemon-reload'],capture_output=True)

@@ -26,13 +26,6 @@ def main():
         else:
             key = args.recovery_key.read_bytes()
             result = create_bundle(args.root, args.drive_inbox, key)
-            try:
-                import urllib.request
-                req = urllib.request.Request("http://10.104.0.2:8080/api/config/gdrive/sync", data=b"", method="POST")
-                with urllib.request.urlopen(req, timeout=5):
-                    pass
-            except Exception:
-                pass
         output = data / (args.action + '-status.json')
         temporary = output.with_suffix('.tmp')
         temporary.write_text(json.dumps(result, indent=2) + '\n')

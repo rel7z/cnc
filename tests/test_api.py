@@ -285,7 +285,16 @@ class APITests(unittest.TestCase):
             status, verify_res = self.request('/api/v1/database/bundle/verify', method='POST')
             self.assertEqual(status, 200)
             self.assertTrue(verify_res['success'])
-            self.assertEqual(verify_res['integrity'], 'ok')
+            self.assertEqual(verify_res['status'], 'running')
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                _, current = self.request('/api/v1/database/bundle/status')
+                verification = current.get('verification') or {}
+                if verification.get('status') != 'running':
+                    break
+                time.sleep(0.01)
+            self.assertEqual(verification['integrity'], 'ok')
+            self.assertEqual(verification['scope'], 'local-archive')
         finally:
             if old_key_env is not None:
                 os.environ['RECOVERY_KEY_PATH'] = old_key_env

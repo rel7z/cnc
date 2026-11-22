@@ -223,3 +223,12 @@ checksum and SQLite integrity. Stop the relevant service before deliberately
 replacing a live database with a verified restored copy.
 
 Production verification (2026-11-22): authenticated bidirectional coordination and an eight-worker harmless roundtrip passed. All three database snapshots were downloaded from Drive and restored with exact hashes and SQLite integrity checks. See `docs/cnc-integration-verification-2026-11-22.json`.
+
+
+## Single-file recovery backups
+
+`maintenance.py backup` publishes one signed `.tar.gz` containing all three SQLite databases, non-secret discovery settings, leased input files, and application source. A new archive appears in the Drive inbox only after its construction finishes. The scheduled backup runs every six hours; upload transport chunks remain one Drive file.
+
+Keep the private recovery key in CNC Manager's application-support directory and on the controller outside the archive. Never commit it or upload it with the data. The CNC release's trusted recovery helper authenticates the archive before restoring to a missing directory, checks all file hashes and SQLite integrity, and keeps discovery paused. Existing installations are preserved.
+
+The dashboard starts backup and local-integrity checks in the background and polls their status. Its upload indicator uses the configured uploader state and exact filename/checksum; it is an upload acknowledgement, not a fresh cloud read. `verify_drive_snapshot.py /opt/internet-map/data/backup-status.json <new-directory>` verifies the cloud copy by actually downloading it, with no local-copy shortcut or fallback recovery key. Never verify by overwriting a live database.

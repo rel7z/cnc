@@ -133,6 +133,7 @@ type DbSampleRecord = {
 };
 
 type DbBundleStatus = {
+  verification?: { status: string; message?: string; integrity?: string; scope?: string } | null;
   status: string;
   is_backup_running: boolean;
   backup?: {
@@ -809,6 +810,17 @@ export default function Page() {
     }
   }, [activeTab, loadDatabaseData, catalogRefresh]);
 
+  useEffect(() => {
+    if (activeTab !== "database") return;
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch("/api/catalog/database-bundle-status");
+        if (response.ok) setDbBundleStatus(await response.json());
+      } catch {}
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [activeTab]);
+
   const handleRunMaintenance = async (action: "checkpoint" | "optimize" | "integrity" | "vacuum") => {
     setDbMaintenanceBusy(true);
     setDbMaintenanceMsg(null);
@@ -909,8 +921,8 @@ export default function Page() {
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        showToast("✓ " + (data.message || "HMAC & SQLite integrity verified!"), "success");
-        setDbMaintenanceMsg({ type: "success", text: "✓ Recovery Bundle Verified: " + data.message });
+        showToast(data.message || "Local archive verification started", "success");
+        setDbMaintenanceMsg({ type: "success", text: data.message || "Local archive verification started" });
         void loadDatabaseData();
       } else {
         showToast(data.error || data.message || "Failed to verify recovery bundle", "error");
@@ -2851,12 +2863,12 @@ export default function Page() {
                   <button
                     type="button"
                     className="secondary"
-                    disabled={bundleVerifyBusy || dbBundleStatus?.is_backup_running}
+                    disabled={bundleVerifyBusy || dbBundleStatus?.verification?.status === "running" || dbBundleStatus?.is_backup_running}
                     onClick={handleVerifyBundle}
                     title="Verify HMAC signature and SQLite PRAGMA quick_check integrity across all databases"
                     style={{ fontSize: 12, padding: "7px 13px" }}
                   >
-                    {bundleVerifyBusy ? "⏳ Verifying..." : "🛡️ Verify Snapshot Integrity"}
+                    {bundleVerifyBusy || dbBundleStatus?.verification?.status === "running" ? "⏳ Verifying..." : "🛡️ Verify Snapshot Integrity"}
                   </button>
 
                   <button
@@ -2872,6 +2884,13 @@ export default function Page() {
                 </div>
               </div>
 
+              {dbBundleStatus?.verification && (
+                <p role="status" style={{ fontSize: 12, padding: "0 18px" }}>
+                  Local archive verification: {dbBundleStatus.verification.status}
+                  {dbBundleStatus.verification.integrity ? " · SQLite integrity: " + dbBundleStatus.verification.integrity : ""}
+                  {dbBundleStatus.verification.status === "error" ? " · " + dbBundleStatus.verification.message : ""}
+                </p>
+              )}
               <div className="db-recovery-grid">
                 {/* Panel 1: Bundle File & Telemetry */}
                 <div className="db-recovery-panel">

@@ -262,20 +262,18 @@ def get_bundle_status(database_path: Path):
             drive_info["parent_folder_id"] = cfg.get("parent_folder_id", "")
             drive_info["upload_interval"] = cfg.get("upload_interval", "1s")
 
-            state_dir = Path("/opt/cnc/data/gdrive")
-            if state_dir.exists():
-                states = list(state_dir.glob("*-state.json"))
-                if states:
-                    s = json.loads(states[0].read_text())
-                    uploaded = s.get("uploaded", [])
-                    known = s.get("known_files", [])
-                    drive_info["uploaded_count"] = len(uploaded)
-                    drive_info["known_files_count"] = len(known)
-                    if backup_info and backup_info.get("data") and "filename" in backup_info["data"]:
-                        fn = backup_info["data"]["filename"]
-                        is_known = fn in known
-                        is_up = any(fn in item for item in uploaded)
-                        drive_info["is_uploaded"] = is_up or is_known
+            state_path = cfg.get("state_file_path")
+            if state_path and Path(state_path).is_file():
+                state = json.loads(Path(state_path).read_text())
+                uploaded = state.get("uploaded", [])
+                known = state.get("known_files", [])
+                drive_info["uploaded_count"] = len(uploaded)
+                drive_info["known_files_count"] = len(known)
+                if backup_info and backup_info.get("data"):
+                    receipt = backup_info["data"]
+                    filename, checksum = receipt.get("filename"), receipt.get("sha256")
+                    if filename and checksum:
+                        drive_info["is_uploaded"] = filename + ":" + checksum in uploaded
         except Exception:
             pass
 
@@ -289,7 +287,49 @@ def get_bundle_status(database_path: Path):
         "key_path": str(key_path),
         "drive_inbox": str(drive_inbox),
         "recent_bundles": recent_bundles,
+        "verification": read_verification_status(data_dir),
     }
+
+
+def read_verification_status(data_dir):
+    try:
+        result = json.loads((data_dir / 'verification-status.json').read_text())
+        if result.get('status') == 'running':
+            try:
+                with (data_dir / 'verification.lock').open('a') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    result.update(status='interrupted', message='Verification was interrupted; start it again.')
+            except BlockingIOError:
+                pass
+        return result
+    except (OSError, ValueError):
+        return None
+
+
+def trigger_bundle_verification(database_path: Path):
+    _, data_dir, _, _ = get_recovery_paths(database_path)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock = (data_dir / 'verification.lock').open('a')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        return dict(success=True, status='running', message='Local archive verification is already running.')
+    def save(result):
+        target = data_dir / 'verification-status.json'
+        temporary = target.with_suffix('.tmp')
+        temporary.write_text(json.dumps(result))
+        temporary.replace(target)
+    save(dict(status='running', started_at=int(time.time()), scope='local-archive'))
+    def verify():
+        try:
+            result = verify_bundle_archive(database_path)
+            result.update(completed_at=int(time.time()), scope='local-archive')
+            save(result)
+        finally:
+            lock.close()
+    threading.Thread(target=verify, daemon=True).start()
+    return dict(success=True, status='running', message='Local archive verification started. Results appear here when finished.')
 
 
 def verify_bundle_archive(database_path: Path):
@@ -313,8 +353,10 @@ def verify_bundle_archive(database_path: Path):
         key = key_path.read_bytes()
 
         import tempfile
-        from bundle import restore_bundle
-        with tempfile.TemporaryDirectory(prefix=".verify-bundle-") as tmp:
+        from bundle import digest, restore_bundle
+        if archive.stat().st_size != receipt['bytes'] or digest(archive) != receipt['sha256']:
+            raise ValueError('Archive does not match its recorded size and checksum')
+        with tempfile.TemporaryDirectory(prefix=".verify-bundle-", dir=data_dir) as tmp:
             res = restore_bundle(archive, Path(tmp) / "restore_test", key)
         return {
             "success": True,
@@ -348,7 +390,7 @@ def trigger_bundle_creation(database_path: Path):
             res = subprocess.run(["systemctl", "is-active", "internet-map-backup.service"], capture_output=True, text=True)
             if res.stdout.strip() in ("activating", "active"):
                 return {"success": True, "status": "running", "message": "Recovery bundle backup is already in progress"}
-            subprocess.run(["systemctl", "start", "internet-map-backup.service"], check=True)
+            subprocess.run(["systemctl", "start", "--no-block", "internet-map-backup.service"], check=True)
             return {"success": True, "status": "started", "message": "Recovery bundle backup initiated via systemd"}
         except Exception:
             pass
@@ -1429,7 +1471,7 @@ def handler(database, key):
                 return
 
             if parsed.path in ("/api/v1/database/bundle/verify", "/api/v1/database-bundle-verify"):
-                res = verify_bundle_archive(database)
+                res = trigger_bundle_verification(database)
                 self.reply(200 if res.get("success") else 500, res)
                 return
 

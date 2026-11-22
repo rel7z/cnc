@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import tarfile
@@ -49,6 +50,30 @@ def source_files(root):
     return sorted({name for name in names if (root / name).is_file()})
 
 
+def retain_pending_inputs(stage, root):
+    """A restored controller must not refer to vanished leased input files."""
+    with closing(sqlite3.connect(stage / DATABASES[1])) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
+        if not {'shard_leases', 'shard_hosts'} <= tables:
+            return
+        for batch, in db.execute('SELECT batch FROM shard_leases'):
+            if not re.fullmatch('[a-f0-9]{32}', batch):
+                raise ValueError('Invalid pending input identifier')
+            source = root / 'data/discovery' / (batch + '.txt')
+            target = stage / 'data/discovery' / source.name
+            if source.is_symlink():
+                raise ValueError('Pending input cannot be a symlink')
+            if source.is_file():
+                shutil.copy2(source, target)
+            else:
+                # A lease can finish after its SQLite snapshot was pinned. Its
+                # snapshot hosts still provide a complete recoverable input.
+                hosts = [row[0] for row in db.execute('SELECT host FROM shard_hosts WHERE batch=? ORDER BY host', (batch,))]
+                if not hosts or any(not isinstance(host, str) or any(c in host for c in '\r\n') for host in hosts):
+                    raise ValueError('Pending lease has no recoverable input')
+                target.write_text(''.join('https://' + host + '\n' for host in hosts), encoding='ascii')
+
+
 def create_bundle(root, output, key, include_source=True):
     root, output = Path(root).resolve(), Path(output).resolve()
     if len(key) < 32:
@@ -61,6 +86,7 @@ def create_bundle(root, output, key, include_source=True):
                         source_included=include_source, entries={})
         for relative in DATABASES:
             snapshot(root / relative, stage / relative)
+        retain_pending_inputs(stage, root)
         for name_setting in SETTINGS:
             relative = 'data/discovery/' + name_setting
             if (root / relative).is_file():

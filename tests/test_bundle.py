@@ -41,3 +41,16 @@ class BundleTests(unittest.TestCase):
             existing=r/'existing';existing.mkdir();(existing/'keep').write_text('keep')
             with self.assertRaises(ValueError):restore_bundle(archive,existing,b'k'*32)
             self.assertEqual((existing/'keep').read_text(),'keep')
+
+    def test_pending_inputs_survive_even_when_live_lease_file_has_finished(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r=Path(tmp);source=r/'source';self.make_source(source)
+            batch='a'*32
+            with closing(sqlite3.connect(source/DATABASES[1])) as db,db:
+                db.execute('CREATE TABLE shard_leases(batch TEXT)')
+                db.execute('CREATE TABLE shard_hosts(host TEXT,batch TEXT,source TEXT)')
+                db.execute('INSERT INTO shard_leases VALUES (?)',(batch,))
+                db.execute('INSERT INTO shard_hosts VALUES (?,?,?)',('fixture.example',batch,'catalog'))
+            receipt=create_bundle(source,r/'published',b'k'*32,include_source=False)
+            restore_bundle(r/'published'/receipt['filename'],r/'restored',b'k'*32)
+            self.assertEqual((r/'restored/data/discovery'/(batch+'.txt')).read_text(),'https://fixture.example\n')

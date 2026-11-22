@@ -70,7 +70,7 @@ def verify(manifest, destination, config_path=Path('/opt/cnc/config.json')):
         expected_sha = receipt['sha256']
         maximum = receipt['bytes']
         recovery_key_path = Path('/opt/cnc/data/internet-map-recovery.key')
-        key = recovery_key_path.read_bytes() if recovery_key_path.exists() else b'k' * 32
+        key = recovery_key_path.read_bytes()
 
         # Verify file presence and size on Google Drive
         query = "trashed=false and name='" + filename.replace("'", "\\'") + "'"
@@ -86,14 +86,8 @@ def verify(manifest, destination, config_path=Path('/opt/cnc/config.json')):
         if int(drive_file.get('size', 0)) != maximum:
             raise ValueError('Drive bundle size mismatch: expected %d, got %d' % (maximum, int(drive_file.get('size', 0))))
 
-        # If local copy exists in watch_dir, check it or download into destination
-        watch_file = Path(config.get('watch_dir', '/opt/cnc/merged')) / filename
-        archive_path = destination / filename
-        if watch_file.exists() and watch_file.stat().st_size == maximum:
-            import shutil
-            shutil.copy2(watch_file, archive_path)
-        else:
-            download(filename, expected_sha, maximum)
+        # Verification must exercise the cloud bytes, not a surviving local copy.
+        archive_path = download(filename, expected_sha, maximum)
 
         restored_dir = destination / 'restored'
         from bundle import restore_bundle
