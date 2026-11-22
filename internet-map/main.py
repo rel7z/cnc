@@ -32,7 +32,7 @@ def records(path, kind):
     with path.open(encoding="utf-8-sig") as stream:
         if kind == "csv":
             yield from csv.DictReader(stream)
-        elif kind == "jsonl":
+        elif kind in ("jsonl", "observations"):
             for line in stream:
                 if line.strip():
                     record = json.loads(line)
@@ -119,6 +119,12 @@ def ingest(db, args):
             if not isinstance(html, str):
                 raise ValueError("HTML must be a string")
             evidence = wordpress_evidence(html)
+            if getattr(args, "format", "") == "observations":
+                supplied = record.get("wordpress_evidence")
+                allowed = {"WordPress generator tag", "wp-content resource reference", "wp-includes resource reference"}
+                if not isinstance(supplied, list) or any(not isinstance(item, str) or item not in allowed for item in supplied):
+                    raise ValueError("Invalid worker evidence")
+                evidence = sorted(set(supplied))
             db.execute("INSERT OR IGNORE INTO sites VALUES (?,?)", (url, host))
             result = db.execute("INSERT OR IGNORE INTO observations VALUES (?,?,?)",
                                 (ident, url, json.dumps(evidence)))
@@ -134,7 +140,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     load = commands.add_parser("import")
     load.add_argument("input", type=Path)
-    load.add_argument("--format", choices=("txt", "csv", "jsonl"), required=True)
+    load.add_argument("--format", choices=("txt", "csv", "jsonl", "observations"), required=True)
     load.add_argument("--source", required=True)
     search = commands.add_parser("search")
     search.add_argument("--host", default="")

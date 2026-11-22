@@ -47,3 +47,14 @@ response and uses temporary local staging before the database transaction.
 
 The adapter currently retrieves existing output. Distributed job submission,
 job monitoring, and live WordPress verification require further implementation.
+
+## Classify supplied HTML on a worker
+
+```bash
+python3 internet-map/worker.py --input html-records.jsonl --output observations.jsonl
+python3 internet-map/main.py import observations.jsonl --format observations --source worker-output
+```
+
+The worker reads existing HTML. Observation imports validate the evidence labels
+produced by the worker. Source labels should identify the dataset and producing
+job. Transport authentication and job scheduling are separate integrations.
