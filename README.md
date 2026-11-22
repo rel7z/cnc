@@ -4,10 +4,30 @@ Internet Map is a high-performance web catalog and PublicWWW-style HTML source c
 
 Python 3.10 or later and Node.js 20.9 or later are required. Runtime data is excluded from Git.
 
-4. **🛡️ Systemd Resource Governor & Cgroups Throttling**
+## Core Features
+
+1. **⚡ PublicWWW Source Code Intelligence Engine**
+   - Full-text search across raw HTML source code with FTS5 trigram indexing (`tokenize='trigram'`)
+   - Technology signature detection for 25+ frameworks (WordPress, WooCommerce, Shopify, Google Analytics GA4, Google Tag Manager, AdSense, Cloudflare Turnstile, React/Next.js, Vue/Nuxt, Tailwind CSS, Stripe, etc.)
+   - PublicWWW dark code cards with line numbers, context lines, and keyword highlight marks
+   - Source code inspector modal with complete raw HTML and copy-to-clipboard functionality
+   - High-speed query execution (<20ms response time on 220,000+ indexed pages)
+
+2. **🔍 Live Scanner & High-Throughput Catalog Crawler**
+   - On-demand URL inspector: immediately fetch any website, extract technology signatures, and index into the intelligence database
+   - Asynchronous crawler with configurable worker concurrency (50–1,000 workers) and batch limits
+   - Live streaming activity feed showing real-time crawled pages, HTTP status, and detected technology
+   - Safe process lifecycle management with zombie PID detection
+
+3. **🛡️ Systemd Resource Governor & Cgroups Throttling**
    - Hardware-governed crawler profiles: **Eco** (150 workers), **Balanced** (350 workers), **High Speed** (600 workers), **Turbo** (1,000 workers)
    - Real-time Linux `/proc/{pid}/statm` RSS telemetry and CPU quota monitoring (caps crawler to 1.8 cores, leaving >2.2 cores reserved for OS/CNC)
    - Dynamic profile hot-switching with instant crawler reload without killing long-running jobs
+
+4. **🌐 High-Speed Ingestion & 12.25M .org Domain Catalog**
+   - High-throughput batched ingestion with SQLite WAL mode, `PRAGMA synchronous = NORMAL`, and `executemany` chunking (15x–30x speedup)
+   - Zero-copy streaming zone importer (`org_zone.py`) directly from `.gz` without intermediate disk files
+   - Hostname search and WordPress evidence filtering with responsive pagination across 498,000+ pages
 
 ## Rapid Development Workflow
 
@@ -34,25 +54,6 @@ Open http://127.0.0.1:3501. When running with `make dev` (or `python3 run.py --d
 - `make test`: Run complete pytest suite (`test_api`, `test_catalog`, `test_intel`, `test_scanner`, `test_cli`)
 - `make seed`: Seed development catalog with realistic domains & PublicWWW intelligence
 - `make clean`: Clean temporary caches and build artifacts
-
-## Core Features
-
-1. **⚡ PublicWWW Source Code Intelligence Engine**
-   - Full-text search across raw HTML source code with FTS5 trigram indexing
-   - Technology signature detection for 25+ frameworks (WordPress, WooCommerce, Shopify, Google Analytics GA4, Google Tag Manager, AdSense, Cloudflare Turnstile, React/Next.js, Vue/Nuxt, Tailwind CSS, Stripe, etc.)
-   - Source code inspector modal with line numbers and syntax highlighting
-   - Export matching search results as plain text or JSON
-
-2. **🔍 Live Scanner & High-Throughput Catalog Crawler**
-   - On-demand URL inspector: immediately fetch any website, extract technology signatures, and index into the intelligence database
-   - Asynchronous crawler with configurable worker concurrency (50–200 workers) and batch limits
-   - Live streaming activity feed showing real-time crawled pages, HTTP status, and detected technology
-   - Safe process lifecycle management with zombie PID detection
-
-3. **🌐 High-Speed Ingestion & 12.25M .org Domain Catalog**
-   - High-throughput batched ingestion with SQLite WAL mode, `PRAGMA synchronous = NORMAL`, and `executemany` chunking (15x–30x speedup)
-   - Zero-copy streaming zone importer (`org_zone.py`) directly from `.gz` without intermediate disk files
-   - Hostname search and WordPress evidence filtering with responsive pagination
 
 ## Run the application in production
 
