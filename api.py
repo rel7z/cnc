@@ -457,44 +457,61 @@ def handler(database, key):
                     self.reply(200, {"success": True, "already_running": True, "state": curr})
                     return
 
-                limit = int(data.get("limit", 0))
-                concurrency = int(data.get("concurrency", 500))
-                scanner_script = Path(__file__).resolve().parent / "scanner.py"
-                cmd = [
-                    sys.executable,
-                    str(scanner_script),
-                    "--database",
-                    str(database),
-                    "--concurrency",
-                    str(concurrency),
-                ]
-                if limit > 0:
-                    cmd.extend(["--limit", str(limit)])
+                concurrency = int(data.get("concurrency", 0))
+                if concurrency > 0:
+                    config_path = database.parent / "scanner-config.json"
+                    cfg = get_scanner_config(config_path)
+                    cfg["concurrency"] = concurrency
+                    save_scanner_config(config_path, cfg)
 
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-                new_state = {
-                    "running": True,
-                    "pid": proc.pid,
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                    "scanned": curr.get("scanned", 0),
-                    "wordpress_found": curr.get("wordpress_found", 0),
-                    "speed": 0.0,
-                    "last_url": curr.get("last_url", ""),
-                }
+                started_via_systemd = False
+                try:
+                    res = subprocess.run(["systemctl", "start", "internet-map-crawler"], timeout=5, capture_output=True)
+                    if res.returncode == 0:
+                        started_via_systemd = True
+                except Exception:
+                    pass
+
+                if not started_via_systemd:
+                    limit = int(data.get("limit", 0))
+                    scanner_script = Path(__file__).resolve().parent / "scanner.py"
+                    cmd = [
+                        sys.executable,
+                        str(scanner_script),
+                        "--database",
+                        str(database),
+                    ]
+                    if concurrency > 0:
+                        cmd.extend(["--concurrency", str(concurrency)])
+                    if limit > 0:
+                        cmd.extend(["--limit", str(limit)])
+
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                    curr["pid"] = proc.pid
+
+                time.sleep(0.5)
+                new_state = get_scanner_state(state_path)
+                new_state["running"] = True
                 update_scanner_state(state_path, new_state)
-                # Invalidate stats cache so UI sees new status immediately
                 _stats_cache.clear()
-                self.reply(200, {"success": True, "pid": proc.pid, "message": "Scanner started"})
+                self.reply(200, {"success": True, "message": "Scanner started", "state": new_state})
                 return
 
-            if parsed.path in ("/api/v1/scanner/stop", "/api/v1/scanner") and (
+            if parsed.path in ("/api/v1/scanner/stop", "/api/v1/scanner", "/api/v1/scanner/status") and (
                 parsed.path == "/api/v1/scanner/stop" or data.get("action") == "stop"
             ):
+                # 1. Stop systemd service cleanly so it does NOT restart automatically
+                try:
+                    subprocess.run(["systemctl", "stop", "internet-map-crawler"], timeout=5, capture_output=True)
+                except Exception:
+                    pass
+
+                # 2. Terminate any direct process if running
                 curr = get_scanner_state(state_path)
                 pid = curr.get("pid")
                 if pid:
@@ -502,11 +519,12 @@ def handler(database, key):
                         os.kill(pid, signal.SIGTERM)
                     except OSError:
                         pass
+
                 curr["running"] = False
                 curr["speed"] = 0.0
                 update_scanner_state(state_path, curr)
                 _stats_cache.clear()
-                self.reply(200, {"success": True, "message": "Scanner stopped"})
+                self.reply(200, {"success": True, "message": "Scanner stopped successfully"})
                 return
 
             if parsed.path == "/api/v1/intel/scan":

@@ -433,7 +433,7 @@ def search_intel(db, query="", signature="", page=1, limit=25):
                     FROM html_intel_fts f
                     JOIN page_contents p ON p.url = f.url
                     WHERE html_intel_fts MATCH ?
-                    ORDER BY p.scanned_at DESC
+                    ORDER BY f.rowid DESC
                     LIMIT ? OFFSET ?
                 """, (escaped_query, limit, offset)).fetchall()
                 used_fts = True
