@@ -154,6 +154,8 @@ def main():
     parser.add_argument('--key', type=Path, default=Path('/opt/cnc/data/internet-map-recovery.key'))
     parser.add_argument('--install', action='store_true', help='Install authenticated recovered application, keeping scanning paused')
     args = parser.parse_args()
+    if args.install and args.destination != Path('/opt/internet-map'):
+        parser.error('Service installation requires /opt/internet-map; use an alternate destination only for data verification')
     with args.key.with_suffix('.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
