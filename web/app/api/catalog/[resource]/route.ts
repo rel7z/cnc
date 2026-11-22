@@ -17,6 +17,8 @@ const ALLOWED = [
   "scanner-recent",
   "scanner-start",
   "scanner-stop",
+  "scanner-resources",
+  "scanner-resource",
   "export",
 ];
 

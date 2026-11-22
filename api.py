@@ -72,6 +72,41 @@ def update_scanner_state(state_path: Path, state: dict):
     tmp.replace(state_path)
 
 
+def get_scanner_config(config_path: Path) -> dict:
+    if config_path.exists():
+        try:
+            return json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {
+        "concurrency": 600,
+        "profile": "high",
+        "cpu_quota": "180%",
+        "memory_max_mb": 1200,
+        "memory_high_mb": 900,
+        "cgroups_managed": True,
+    }
+
+
+def save_scanner_config(config_path: Path, config: dict):
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = config_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    tmp.replace(config_path)
+
+
+def get_process_memory_mb(pid: int) -> float:
+    if not pid or pid <= 0:
+        return 0.0
+    statm = Path(f"/proc/{pid}/statm")
+    if statm.exists():
+        try:
+            return round(int(statm.read_text().split()[1]) * 4096 / (1024 * 1024), 1)
+        except Exception:
+            pass
+    return 0.0
+
+
 def handler(database, key):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -114,6 +149,34 @@ def handler(database, key):
 
             if parsed.path in ("/api/v1/scanner/status", "/api/v1/scanner"):
                 self.reply(200, get_scanner_state(state_path))
+                return
+
+            if parsed.path in ("/api/v1/scanner/resources", "/api/v1/scanner/resource"):
+                config_path = database.parent / "scanner-config.json"
+                st = get_scanner_state(state_path)
+                pid = st.get("pid", 0)
+                mem_mb = get_process_memory_mb(pid) if st.get("running") else 0.0
+                cfg = get_scanner_config(config_path)
+                result = {
+                    "cgroups": {
+                        "cpu_quota": cfg.get("cpu_quota", "180%"),
+                        "cpu_quota_cores": 1.8,
+                        "memory_max_mb": cfg.get("memory_max_mb", 1200),
+                        "memory_high_mb": cfg.get("memory_high_mb", 900),
+                        "tasks_max": 1500,
+                        "cpu_weight": 50,
+                        "nice": 5,
+                        "active": True,
+                    },
+                    "telemetry": {
+                        "running": st.get("running", False),
+                        "pid": pid,
+                        "memory_mb": mem_mb,
+                        "speed": st.get("speed", 0.0),
+                    },
+                    "config": cfg,
+                }
+                self.reply(200, result)
                 return
 
             if parsed.path == "/api/v1/intel/status":
@@ -356,7 +419,37 @@ def handler(database, key):
 
             state_path = database.parent / "scanner-state.json"
 
-            if parsed.path in ("/api/v1/scanner/start", "/api/v1/scanner") and (
+            if parsed.path in ("/api/v1/scanner/resources", "/api/v1/scanner/resource"):
+                config_path = database.parent / "scanner-config.json"
+                cfg = get_scanner_config(config_path)
+
+                req_concurrency = int(data.get("concurrency", cfg.get("concurrency", 600)))
+                req_concurrency = max(25, min(1000, req_concurrency))
+                req_profile = str(data.get("profile", ""))
+                if not req_profile:
+                    if req_concurrency <= 150:
+                        req_profile = "eco"
+                    elif req_concurrency <= 400:
+                        req_profile = "balanced"
+                    elif req_concurrency <= 750:
+                        req_profile = "high"
+                    else:
+                        req_profile = "turbo"
+
+                cfg["concurrency"] = req_concurrency
+                cfg["profile"] = req_profile
+                save_scanner_config(config_path, cfg)
+
+                try:
+                    subprocess.run(["systemctl", "restart", "internet-map-crawler"], timeout=5)
+                except Exception:
+                    pass
+
+                _stats_cache.clear()
+                self.reply(200, {"success": True, "config": cfg, "message": "Resource profile updated & applied"})
+                return
+
+            if parsed.path in ("/api/v1/scanner/start", "/api/v1/scanner", "/api/v1/scanner/status") and (
                 parsed.path == "/api/v1/scanner/start" or data.get("action") == "start"
             ):
                 curr = get_scanner_state(state_path)

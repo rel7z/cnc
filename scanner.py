@@ -514,7 +514,7 @@ def main():
     asyncio.run(
         scan_worker(
             args.database,
-            concurrency=args.concurrency,
+            concurrency=concurrency,
             limit=args.limit,
             state_path=state_path,
         )

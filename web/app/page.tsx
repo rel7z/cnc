@@ -51,6 +51,31 @@ type CrawlerStatus = {
   last_url?: string;
 };
 
+type ResourceInfo = {
+  cgroups: {
+    cpu_quota: string;
+    cpu_quota_cores: number;
+    memory_max_mb: number;
+    memory_high_mb: number;
+    tasks_max: number;
+    cpu_weight: number;
+    nice: number;
+    active: boolean;
+  };
+  telemetry: {
+    running: boolean;
+    pid: number;
+    memory_mb: number;
+    speed: number;
+  };
+  config: {
+    concurrency: number;
+    profile: string;
+    cpu_quota?: string;
+    memory_max_mb?: number;
+  };
+};
+
 export default function Page() {
   const [activeTab, setActiveTab] = useState<"intel" | "scanner" | "catalog">("intel");
 
@@ -96,11 +121,14 @@ export default function Page() {
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState("");
 
-  // Crawler Controls State
-  const [crawlerConcurrency, setCrawlerConcurrency] = useState(500);
+  // Crawler Controls & Resource State
+  const [crawlerConcurrency, setCrawlerConcurrency] = useState(600);
   const [crawlerLimit, setCrawlerLimit] = useState(0);
   const [crawlerActionBusy, setCrawlerActionBusy] = useState(false);
   const [recentFeed, setRecentFeed] = useState<CrawlerRecentItem[]>([]);
+  const [resourceInfo, setResourceInfo] = useState<ResourceInfo | null>(null);
+  const [resourceBusy, setResourceBusy] = useState(false);
+  const [selectedProfile, setSelectedProfile] = useState<string>("high");
 
   // Tab 3: Catalog State
   const [sites, setSites] = useState<Site[]>([]);
@@ -135,9 +163,45 @@ export default function Page() {
     } catch {}
   }, []);
 
+  // Load Hardware Resources & Cgroups State
+  const loadResources = useCallback(async () => {
+    try {
+      const res = await fetch("/api/catalog/scanner-resources");
+      if (res.ok) {
+        const data: ResourceInfo = await res.json();
+        setResourceInfo(data);
+        if (data.config) {
+          if (data.config.concurrency) setCrawlerConcurrency(data.config.concurrency);
+          if (data.config.profile) setSelectedProfile(data.config.profile);
+        }
+      }
+    } catch {}
+  }, []);
+
   useEffect(() => {
     void loadGeneralStats();
-  }, [loadGeneralStats, catalogRefresh]);
+    void loadResources();
+  }, [loadGeneralStats, loadResources, catalogRefresh]);
+
+  const handleApplyProfile = async (profile: string, workers: number) => {
+    setResourceBusy(true);
+    setSelectedProfile(profile);
+    setCrawlerConcurrency(workers);
+    try {
+      const res = await fetch("/api/catalog/scanner-resources", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ concurrency: workers, profile }),
+      });
+      if (res.ok) {
+        await loadResources();
+        await loadGeneralStats();
+      }
+    } catch {}
+    finally {
+      setResourceBusy(false);
+    }
+  };
 
   // Load Signatures List
   useEffect(() => {
@@ -746,6 +810,94 @@ export default function Page() {
                       {crawlerActionBusy ? "Starting..." : "▶ Start Crawler"}
                     </button>
                   )}
+                </div>
+              </div>
+
+              {/* Server Resource Controller & Isolation Panel (systemd cgroups v2) */}
+              <div style={{ background: "#0c1520", border: "1px solid #1f354a", borderRadius: 8, padding: "16px 18px", margin: "16px 0" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
+                  <div>
+                    <h4 style={{ margin: "0 0 4px", fontSize: 15, display: "flex", alignItems: "center", gap: 8, color: "#6ce0c7" }}>
+                      🛡️ Droplet Resource Controller & Isolation
+                    </h4>
+                    <p style={{ margin: 0, fontSize: 13, color: "#8ab4cc" }}>
+                      Hardware isolation enforced at the Linux kernel level (systemd cgroups v2). The background crawler cannot starve other services or exceed resource quotas.
+                    </p>
+                  </div>
+                  <span style={{ fontSize: 11, background: "rgba(108,224,199,0.12)", color: "#6ce0c7", padding: "4px 10px", borderRadius: 12, border: "1px solid #2e695d", fontWeight: 600 }}>
+                    Mode: {selectedProfile.toUpperCase()} ({crawlerConcurrency} Workers)
+                  </span>
+                </div>
+
+                {/* Telemetry Grid */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 14 }}>
+                  <div style={{ background: "#080e16", padding: "10px 12px", borderRadius: 6, border: "1px solid #182837" }}>
+                    <span style={{ fontSize: 12, color: "#728fa5", display: "block" }}>CPU Quota Cap</span>
+                    <strong style={{ fontSize: 14, color: "#e4edf5" }}>180% (1.8 cores max)</strong>
+                    <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>&gt;2.2 cores reserved for OS/CNC</span>
+                  </div>
+                  <div style={{ background: "#080e16", padding: "10px 12px", borderRadius: 6, border: "1px solid #182837" }}>
+                    <span style={{ fontSize: 12, color: "#728fa5", display: "block" }}>RAM Memory Cap</span>
+                    <strong style={{ fontSize: 14, color: "#e4edf5" }}>1,200 MB max</strong>
+                    <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>Protects droplet from OOM</span>
+                  </div>
+                  <div style={{ background: "#080e16", padding: "10px 12px", borderRadius: 6, border: "1px solid #182837" }}>
+                    <span style={{ fontSize: 12, color: "#728fa5", display: "block" }}>Live Memory (RSS)</span>
+                    <strong style={{ fontSize: 14, color: "#55efc4" }}>
+                      {resourceInfo?.telemetry.memory_mb ? `${resourceInfo.telemetry.memory_mb} MB` : "—"}
+                    </strong>
+                    <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>Real-time process footprint</span>
+                  </div>
+                  <div style={{ background: "#080e16", padding: "10px 12px", borderRadius: 6, border: "1px solid #182837" }}>
+                    <span style={{ fontSize: 12, color: "#728fa5", display: "block" }}>Service Priority</span>
+                    <strong style={{ fontSize: 14, color: "#e4edf5" }}>Nice 5 / Weight 50</strong>
+                    <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>Yields CPU to web queries</span>
+                  </div>
+                </div>
+
+                {/* Profile Selector Buttons */}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ fontSize: 12, color: "#8fa8be", fontWeight: 500 }}>Select Resource Profile:</span>
+                  <button
+                    type="button"
+                    className={selectedProfile === "eco" ? "primary" : ""}
+                    onClick={() => handleApplyProfile("eco", 150)}
+                    disabled={resourceBusy}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                    title="Gentle scanning, uses ~0.4 CPU core"
+                  >
+                    🍃 Eco (150 Workers)
+                  </button>
+                  <button
+                    type="button"
+                    className={selectedProfile === "balanced" ? "primary" : ""}
+                    onClick={() => handleApplyProfile("balanced", 350)}
+                    disabled={resourceBusy}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                    title="Steady scanning, uses ~0.9 CPU core"
+                  >
+                    ⚖️ Balanced (350 Workers)
+                  </button>
+                  <button
+                    type="button"
+                    className={selectedProfile === "high" ? "primary" : ""}
+                    onClick={() => handleApplyProfile("high", 600)}
+                    disabled={resourceBusy}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                    title="Fast scanning, uses ~1.4 CPU cores"
+                  >
+                    🚀 High Speed (600 Workers)
+                  </button>
+                  <button
+                    type="button"
+                    className={selectedProfile === "turbo" ? "primary" : ""}
+                    onClick={() => handleApplyProfile("turbo", 1000)}
+                    disabled={resourceBusy}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                    title="Turbo, capped at 1.8 cores by cgroups"
+                  >
+                    ⚡ Turbo (1,000 Workers)
+                  </button>
                 </div>
               </div>
 

@@ -41,12 +41,18 @@ class APITests(unittest.TestCase):
         finally:
             db.close()
 
-    def request(self, path, key='test-key'):
-        request = f'GET {path} HTTP/1.0\r\nAuthorization: Bearer {key}\r\n\r\n'.encode()
+    def request(self, path, key='test-key', method='GET', body=None):
+        payload = b''
+        headers_str = f'{method} {path} HTTP/1.0\r\nAuthorization: Bearer {key}\r\n'
+        if body is not None:
+            payload = json.dumps(body).encode()
+            headers_str += f'Content-Type: application/json\r\nContent-Length: {len(payload)}\r\n'
+        headers_str += '\r\n'
+        request = headers_str.encode() + payload
         connection = Connection(request)
         handler(self.database, 'test-key')(connection, ('127.0.0.1', 1234), None)
-        headers, body = connection.output.getvalue().split(b'\r\n\r\n', 1)
-        return int(headers.split()[1]), json.loads(body)
+        headers, resp_body = connection.output.getvalue().split(b'\r\n\r\n', 1)
+        return int(headers.split()[1]), json.loads(resp_body)
 
     def test_authentication(self):
         self.assertEqual(self.request('/api/v1/stats', 'wrong')[0], 401)
@@ -107,3 +113,15 @@ class APITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(exp['total'], 1)
         self.assertEqual(exp['urls'], ['https://example.org/'])
+
+        # Scanner resources telemetry & update
+        status, res = self.request('/api/v1/scanner/resources')
+        self.assertEqual(status, 200)
+        self.assertIn('cgroups', res)
+        self.assertIn('telemetry', res)
+        self.assertIn('config', res)
+
+        status, updated = self.request('/api/v1/scanner/resources', method='POST', body={'profile': 'eco', 'concurrency': 150})
+        self.assertEqual(status, 200)
+        self.assertTrue(updated.get('success'))
+        self.assertEqual(updated['config']['concurrency'], 150)
