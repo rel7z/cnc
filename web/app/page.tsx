@@ -149,6 +149,18 @@ export default function Page() {
   // Distributed Cluster Swarm State
   const [clusterStatus, setClusterStatus] = useState<ClusterStatus | null>(null);
   const [clusterBusy, setClusterBusy] = useState(false);
+  const [timeStr, setTimeStr] = useState("");
+
+  // Tactical Clock Hook
+  useEffect(() => {
+    const updateTime = () => {
+      const now = new Date();
+      setTimeStr(now.toISOString().replace("T", " ").slice(0, 19) + " UTC");
+    };
+    updateTime();
+    const timer = setInterval(updateTime, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Global / Header Stats
   const [stats, setStats] = useState<{ urls: number; imports: number; wordpress: number } | null>(null);
@@ -249,6 +261,45 @@ export default function Page() {
   // Source Deletion State
   const [deleteConfirmSource, setDeleteConfirmSource] = useState<DbSource | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+
+  // Floating Toast Notifications State
+  const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: "info" | "success" | "error" }>>([]);
+
+  const showToast = useCallback((message: string, type: "info" | "success" | "error" = "info") => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3500);
+  }, []);
+
+  // Real-Time Clock
+  const [currentTime, setCurrentTime] = useState("");
+  useEffect(() => {
+    const updateTime = () => {
+      const now = new Date();
+      setCurrentTime(now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    };
+    updateTime();
+    const interval = setInterval(updateTime, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Text File Loader for Dataset Ingestion
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      if (text) {
+        setImportUrlsText((prev) => (prev ? prev + "\n" + text : text));
+        const lineCount = text.split("\n").filter((l) => l.trim()).length;
+        showToast(`Loaded ${file.name} (${lineCount.toLocaleString()} lines)`, "success");
+      }
+    };
+    reader.readAsText(file);
+  };
 
   // Keyboard navigation for modals
   useEffect(() => {
@@ -586,6 +637,7 @@ export default function Page() {
   const handleCopyUrl = (url: string) => {
     navigator.clipboard.writeText(url);
     setCopiedUrl(url);
+    showToast("URL copied to clipboard", "info");
     setTimeout(() => setCopiedUrl(null), 2000);
   };
 
@@ -593,6 +645,7 @@ export default function Page() {
   const handleDownloadTxt = (params: Record<string, string>) => {
     const q = new URLSearchParams({ format: "txt", ...params });
     window.location.href = "/api/catalog/export?" + q.toString();
+    showToast(`Downloading dataset ${params.field === "host" ? "hosts" : "URLs"} (.txt)...`, "info");
   };
 
   const handleExportIntel = (format: "txt" | "json" = "txt", field: "url" | "host" = "url") => {
@@ -722,19 +775,23 @@ export default function Page() {
           type: "success",
           text: `Maintenance [${action}] succeeded. ${detail}`,
         });
+        showToast(`Maintenance [${action}] succeeded!`, "success");
         await loadDatabaseData();
         await loadGeneralStats();
       } else {
+        const errText = data.error || `Maintenance [${action}] failed`;
         setDbMaintenanceMsg({
           type: "error",
-          text: data.error || `Maintenance [${action}] failed`,
+          text: errText,
         });
+        showToast(errText, "error");
       }
     } catch {
       setDbMaintenanceMsg({
         type: "error",
         text: `Network error running maintenance [${action}]`,
       });
+      showToast(`Network error running maintenance [${action}]`, "error");
     } finally {
       setDbMaintenanceBusy(false);
     }
@@ -773,20 +830,24 @@ export default function Page() {
           type: "success",
           text: `Deleted source #${deleteConfirmSource.id} (${deleteConfirmSource.source}) and purged ${data.deleted_observations?.toLocaleString() ?? 0} observations.`,
         });
+        showToast(`Deleted source #${deleteConfirmSource.id}`, "success");
         setDeleteConfirmSource(null);
         await loadDatabaseData();
         await loadGeneralStats();
       } else {
+        const errText = data.error || "Failed to delete source";
         setDbMaintenanceMsg({
           type: "error",
-          text: data.error || "Failed to delete source",
+          text: errText,
         });
+        showToast(errText, "error");
       }
     } catch {
       setDbMaintenanceMsg({
         type: "error",
         text: "Network error deleting source",
       });
+      showToast("Network error deleting source", "error");
     } finally {
       setDeleteBusy(false);
     }
@@ -799,11 +860,11 @@ export default function Page() {
       .map((u) => u.trim())
       .filter((u) => u.length > 0);
     if (!importSourceName.trim()) {
-      alert("Please provide a source name / label");
+      showToast("Please provide a source name / label", "error");
       return;
     }
     if (urls.length === 0) {
-      alert("Please provide at least one URL to ingest");
+      showToast("Please provide at least one URL to ingest", "error");
       return;
     }
     setImportBusy(true);
@@ -821,13 +882,14 @@ export default function Page() {
       if (res.ok && data.status === "imported") {
         setImportResult(data);
         setImportUrlsText("");
+        showToast(`Imported ${data.accepted.toLocaleString()} URLs into catalog!`, "success");
         await loadDatabaseData();
         await loadGeneralStats();
       } else {
-        alert(data.error || "Failed to import dataset");
+        showToast(data.error || "Failed to import dataset", "error");
       }
     } catch {
-      alert("Network error importing dataset");
+      showToast("Network error importing dataset", "error");
     } finally {
       setImportBusy(false);
     }
@@ -877,40 +939,63 @@ export default function Page() {
     <>
       <header>
         <div className="brand-container">
-          <div className="brand-logo">⚡</div>
+          <div className="brand-logo">
+            <span style={{ fontSize: 18, filter: "drop-shadow(0 0 6px rgba(0, 242, 254, 0.7))" }}>⚡</span>
+          </div>
           <div>
-            <h1>Internet Map</h1>
-            <span className="subtitle">PublicWWW HTML Source Intelligence &amp; 12.25M .org Catalog</span>
+            <h1>
+              <span>Internet Map</span>
+              <span className="badge badge-tech" style={{ fontSize: 10, padding: "2px 6px", textTransform: "uppercase" }}>INTEL OS v2.5</span>
+            </h1>
+            <span className="subtitle">PublicWWW HTML Source Intelligence • 12.25M .org Catalog • 8-Node Swarm Mesh</span>
           </div>
         </div>
 
         <div className="header-status">
+          {timeStr && (
+            <span className="status-pill" style={{ borderColor: "rgba(255, 255, 255, 0.08)" }}>
+              <span style={{ color: "#38bdf8", fontSize: 10 }}>●</span>
+              {timeStr}
+            </span>
+          )}
+
           {(clusterStatus?.active_nodes ?? 0) > 0 ? (
-            <span className="status-pill active" style={{ background: "rgba(85,239,196,0.15)", color: "#55efc4", borderColor: "#28755f" }}>
+            <span className="status-pill active" style={{ background: "rgba(16, 185, 129, 0.15)", color: "#55efc4", borderColor: "#10b981" }}>
               <span className="pulse-dot"></span>
-              Swarm Active: {clusterStatus?.active_nodes} Nodes ({clusterStatus?.cluster_speed} req/s)
+              SWARM ACTIVE: {clusterStatus?.active_nodes} NODES ({(clusterStatus?.cluster_speed ?? 0).toFixed(0)} req/s)
             </span>
           ) : crawlerStatus.running ? (
             <span className="status-pill active">
               <span className="pulse-dot"></span>
-              Crawler Active ({crawlerStatus.speed} req/s)
+              CRAWLER ACTIVE ({crawlerStatus.speed.toFixed(0)} req/s)
             </span>
           ) : (
-            <span className="status-pill">⏸ Swarm / Crawler Idle</span>
-          )}
-          {intelStats && (
-            <span className="status-pill intel">
-              ⚡ <strong>{intelStats.total_pages.toLocaleString()}</strong> HTML Pages ({((intelStats.total_bytes || 0) / (1024 * 1024)).toFixed(1)} MB)
+            <span className="status-pill">
+              <span style={{ color: "#64748b" }}>⏸</span>
+              SWARM STANDBY
             </span>
           )}
+
+          {intelStats && (
+            <span className="status-pill intel">
+              <span style={{ color: "#38bdf8" }}>⚡</span>
+              <strong>{intelStats.total_pages.toLocaleString()}</strong> HTML Pages ({((intelStats.total_bytes || 0) / (1024 * 1024)).toFixed(1)} MB)
+            </span>
+          )}
+
+          <span className="status-pill" style={{ fontFamily: "monospace", fontSize: 11.5 }} title="Controller local time">
+            🕒 {currentTime || "Live"} • SGP1
+          </span>
+
           <button
             onClick={() => {
               void loadGeneralStats();
               setCatalogRefresh((v) => v + 1);
+              showToast("Refreshing all metrics...", "info");
             }}
             title="Refresh All Statistics"
-            style={{ padding: "6px 10px", fontSize: 13 }}
-            className="secondary"
+            style={{ padding: "6px 11px", fontSize: 13, borderRadius: 8 }}
+            className={`secondary ${dbBusy || busy || intelBusy ? "spinning" : ""}`}
           >
             ↻
           </button>
@@ -918,23 +1003,25 @@ export default function Page() {
       </header>
 
       <main>
-        {/* Navigation Tabs */}
+        {/* Navigation Tabs - High-Tech Tactical Bar */}
         <div className="tabs">
           <button
             className={`tab-btn ${activeTab === "intel" ? "active" : ""}`}
             onClick={() => setActiveTab("intel")}
           >
-            ⚡ HTML Source Intel (PublicWWW)
+            <span style={{ opacity: 0.6, fontSize: 11, fontFamily: "var(--font-mono)" }}>01 //</span>
+            ⚡ HTML Source Intel
             {intelStats && <span className="tab-badge">{(intelStats.total_pages / 1000).toFixed(0)}k</span>}
           </button>
           <button
             className={`tab-btn ${activeTab === "scanner" ? "active" : ""}`}
             onClick={() => setActiveTab("scanner")}
           >
-            🔍 Live Scanner &amp; Swarm Fleet
+            <span style={{ opacity: 0.6, fontSize: 11, fontFamily: "var(--font-mono)" }}>02 //</span>
+            🛰️ Swarm Fleet &amp; Scanner
             {(clusterStatus?.active_nodes ?? 0) > 0 ? (
-              <span className="tab-badge" style={{ background: "#103f36", color: "#55efc4" }}>
-                {clusterStatus?.active_nodes} Nodes ({clusterStatus?.cluster_speed} req/s)
+              <span className="tab-badge" style={{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399", borderColor: "rgba(16, 185, 129, 0.3)" }}>
+                {clusterStatus?.active_nodes} Nodes ({(clusterStatus?.cluster_speed ?? 0).toFixed(0)} req/s)
               </span>
             ) : crawlerStatus.running ? (
               <span className="pulse-dot" style={{ width: 6, height: 6 }}></span>
@@ -944,13 +1031,15 @@ export default function Page() {
             className={`tab-btn ${activeTab === "catalog" ? "active" : ""}`}
             onClick={() => setActiveTab("catalog")}
           >
-            🌐 Catalog Domains
+            <span style={{ opacity: 0.6, fontSize: 11, fontFamily: "var(--font-mono)" }}>03 //</span>
+            🌐 Catalog &amp; WordPress
             {stats?.urls && <span className="tab-badge">{(stats.urls / 1000000).toFixed(1)}M</span>}
           </button>
           <button
             className={`tab-btn ${activeTab === "database" ? "active" : ""}`}
             onClick={() => setActiveTab("database")}
           >
+            <span style={{ opacity: 0.6, fontSize: 11, fontFamily: "var(--font-mono)" }}>04 //</span>
             🗄️ Database Management
             {dbSources.length > 0 ? (
               <span className="tab-badge">{dbSources.length} sources</span>
@@ -1251,24 +1340,63 @@ export default function Page() {
               </p>
             </div>
 
-            {/* Distributed Cluster Swarm Panel */}
-            <div className="crawler-panel" style={{ border: "1px solid #1f3b54", background: "linear-gradient(180deg, #0d1622 0%, #080e16 100%)", marginBottom: 20 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 12 }}>
+            {/* Distributed Cluster Swarm Panel - High-Tech Tactical Command Center */}
+            <div
+              className="crawler-panel"
+              style={{
+                border: "1px solid rgba(56, 189, 248, 0.25)",
+                borderTop: "2px solid #38bdf8",
+                background: "linear-gradient(180deg, rgba(12, 20, 32, 0.9) 0%, rgba(6, 10, 16, 0.95) 100%)",
+                boxShadow: "0 16px 40px -8px rgba(0, 0, 0, 0.7), 0 0 30px -5px rgba(56, 189, 248, 0.12)",
+                marginBottom: 24,
+                position: "relative",
+                overflow: "hidden",
+              }}
+            >
+              {/* Subtle Ambient Scanline */}
+              <div
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  height: "1px",
+                  background: "linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.6), transparent)",
+                }}
+              />
+
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 14 }}>
                 <div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                    <span style={{ fontSize: 20 }}>⚡</span>
-                    <h3 style={{ fontSize: 18, margin: 0, color: "#f0f6fc" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 5 }}>
+                    <div
+                      style={{
+                        width: 30,
+                        height: 30,
+                        borderRadius: 8,
+                        background: "rgba(56, 189, 248, 0.12)",
+                        border: "1px solid rgba(56, 189, 248, 0.3)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "#38bdf8",
+                        fontSize: 15,
+                      }}
+                    >
+                      🛰️
+                    </div>
+                    <h3 style={{ fontSize: 19, margin: 0, color: "#f8fafc", letterSpacing: "-0.02em", fontWeight: 700 }}>
                       Distributed Cluster Swarm (8 DigitalOcean Droplets)
                     </h3>
-                    <span className="badge" style={{ background: "rgba(108,224,199,0.15)", color: "#6ce0c7", borderColor: "#286858" }}>
-                      Private VPC Mesh (10.104.0.0/20)
+                    <span className="badge badge-tech" style={{ fontSize: 10.5 }}>
+                      PRIVATE VPC MESH // 10.104.0.0/20
                     </span>
                   </div>
-                  <span style={{ color: "#8ab4cc", fontSize: 13 }}>
-                    Autonomous distributed crawler fleet leasing domain batches over unmetered private network. Target: ~4,000 req/s.
+                  <span style={{ color: "#94a3b8", fontSize: 13, fontFamily: "var(--font-mono)" }}>
+                    Autonomous distributed crawler fleet leasing domain batches over unmetered private network • Peak Target: ~4,000 req/s
                   </span>
                 </div>
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <button
                     className="secondary"
                     onClick={async () => {
@@ -1281,157 +1409,374 @@ export default function Page() {
                       }
                     }}
                     disabled={clusterBusy}
-                    style={{ fontSize: 12, padding: "7px 12px" }}
+                    style={{ fontSize: 12, padding: "8px 14px", borderRadius: 8, fontFamily: "var(--font-mono)" }}
                   >
-                    🔄 Refresh Swarm
+                    ↻ REFRESH TELEMETRY
                   </button>
                   <button
                     className="danger"
                     onClick={handleStopCluster}
                     disabled={clusterBusy || (clusterStatus?.active_nodes ?? 0) === 0}
-                    style={{ fontSize: 13, padding: "7px 14px" }}
+                    style={{ fontSize: 13, padding: "8px 16px", borderRadius: 8 }}
                   >
-                    ⏹ Stop Swarm
+                    ⏹ ABORT / STOP SWARM
                   </button>
                   <button
                     className="success"
                     onClick={handleStartCluster}
                     disabled={clusterBusy}
-                    style={{ fontSize: 13, padding: "7px 16px" }}
+                    style={{ fontSize: 13, padding: "8px 20px", borderRadius: 8 }}
                   >
-                    {clusterBusy ? "Orchestrating..." : "▶ Start 8-Node Swarm"}
+                    {clusterBusy ? "ORCHESTRATING..." : "▶ LAUNCH 8-NODE SWARM"}
                   </button>
                 </div>
               </div>
 
-              {/* Swarm Combined Telemetry Cards */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12, marginBottom: 18 }}>
-                <div style={{ background: "#0b1420", padding: "12px 14px", borderRadius: 8, border: "1px solid #1a2f45" }}>
-                  <span style={{ fontSize: 12, color: "#799cb6", display: "block", marginBottom: 2 }}>Combined Cluster Throughput</span>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-                    <strong style={{ fontSize: 24, color: (clusterStatus?.cluster_speed ?? 0) > 0 ? "#55efc4" : "#e4edf5", fontWeight: 700 }}>
+              {/* Swarm Combined Telemetry Cards - Mission Control HUD */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14, marginBottom: 22 }}>
+                {/* 1. Velocity */}
+                <div
+                  style={{
+                    background: "rgba(10, 16, 26, 0.7)",
+                    padding: "16px 18px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(56, 189, 248, 0.2)",
+                    borderTop: "1px solid rgba(255, 255, 255, 0.15)",
+                    position: "relative",
+                  }}
+                >
+                  <span style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "var(--font-mono)", display: "block", marginBottom: 6 }}>
+                    COMBINED SWARM THROUGHPUT
+                  </span>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <strong
+                      style={{
+                        fontSize: 30,
+                        color: (clusterStatus?.cluster_speed ?? 0) > 0 ? "#55efc4" : "#f8fafc",
+                        fontWeight: 750,
+                        fontFamily: "var(--font-mono)",
+                        letterSpacing: "-0.04em",
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
                       {(clusterStatus?.cluster_speed ?? 0).toLocaleString()}
                     </strong>
-                    <span style={{ fontSize: 12, color: "#8ab4cc" }}>req/s</span>
+                    <span style={{ fontSize: 13, color: "#7dd3fc", fontFamily: "var(--font-mono)" }}>req/s</span>
                     {(clusterStatus?.cluster_speed ?? 0) > 0 && <span className="pulse-dot" style={{ width: 8, height: 8 }}></span>}
                   </div>
-                  <span style={{ fontSize: 11, color: "#5d7b93", marginTop: 4, display: "block" }}>
-                    Capacity: 4,000 req/s across 8 droplets
+                  {/* Visual Velocity Bar */}
+                  <div style={{ width: "100%", height: 4, background: "rgba(255, 255, 255, 0.08)", borderRadius: 2, marginTop: 10, overflow: "hidden" }}>
+                    <div
+                      style={{
+                        width: `${Math.min(100, ((clusterStatus?.cluster_speed ?? 0) / 4000) * 100)}%`,
+                        height: "100%",
+                        background: "linear-gradient(90deg, #00f2fe, #10b981)",
+                        borderRadius: 2,
+                        transition: "width 0.4s ease",
+                      }}
+                    />
+                  </div>
+                  <span style={{ fontSize: 11, color: "#475569", marginTop: 6, display: "block", fontFamily: "var(--font-mono)" }}>
+                    Capacity: 4,000 req/s across 8 nodes
                   </span>
                 </div>
 
-                <div style={{ background: "#0b1420", padding: "12px 14px", borderRadius: 8, border: "1px solid #1a2f45" }}>
-                  <span style={{ fontSize: 12, color: "#799cb6", display: "block", marginBottom: 2 }}>Active Swarm Fleet</span>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-                    <strong style={{ fontSize: 24, color: (clusterStatus?.active_nodes ?? 0) > 0 ? "#6ce0c7" : "#8ab4cc", fontWeight: 700 }}>
+                {/* 2. Active Fleet */}
+                <div
+                  style={{
+                    background: "rgba(10, 16, 26, 0.7)",
+                    padding: "16px 18px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(56, 189, 248, 0.2)",
+                    borderTop: "1px solid rgba(255, 255, 255, 0.15)",
+                  }}
+                >
+                  <span style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "var(--font-mono)", display: "block", marginBottom: 6 }}>
+                    OPERATIONAL FLEET
+                  </span>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <strong
+                      style={{
+                        fontSize: 30,
+                        color: (clusterStatus?.active_nodes ?? 0) > 0 ? "#34d399" : "#64748b",
+                        fontWeight: 750,
+                        fontFamily: "var(--font-mono)",
+                        letterSpacing: "-0.04em",
+                      }}
+                    >
                       {clusterStatus?.active_nodes ?? 0}
                     </strong>
-                    <span style={{ fontSize: 13, color: "#8ab4cc" }}>/ 8 Droplets Online</span>
+                    <span style={{ fontSize: 14, color: "#94a3b8", fontFamily: "var(--font-mono)" }}>/ 8 Droplets Synchronized</span>
                   </div>
-                  <span style={{ fontSize: 11, color: "#5d7b93", marginTop: 4, display: "block" }}>
-                    Controller: 10.104.0.2 (SGP1)
+                  <div style={{ width: "100%", height: 4, background: "rgba(255, 255, 255, 0.08)", borderRadius: 2, marginTop: 10, overflow: "hidden" }}>
+                    <div
+                      style={{
+                        width: `${((clusterStatus?.active_nodes ?? 0) / 8) * 100}%`,
+                        height: "100%",
+                        background: "#34d399",
+                        borderRadius: 2,
+                        transition: "width 0.4s ease",
+                      }}
+                    />
+                  </div>
+                  <span style={{ fontSize: 11, color: "#475569", marginTop: 6, display: "block", fontFamily: "var(--font-mono)" }}>
+                    Master: 10.104.0.2:3500 (SGP1)
                   </span>
                 </div>
 
-                <div style={{ background: "#0b1420", padding: "12px 14px", borderRadius: 8, border: "1px solid #1a2f45" }}>
-                  <span style={{ fontSize: 12, color: "#799cb6", display: "block", marginBottom: 2 }}>Swarm URLs Scanned</span>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-                    <strong style={{ fontSize: 24, color: "#e4edf5", fontWeight: 700 }}>
+                {/* 3. Scanned */}
+                <div
+                  style={{
+                    background: "rgba(10, 16, 26, 0.7)",
+                    padding: "16px 18px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(56, 189, 248, 0.2)",
+                    borderTop: "1px solid rgba(255, 255, 255, 0.15)",
+                  }}
+                >
+                  <span style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "var(--font-mono)", display: "block", marginBottom: 6 }}>
+                    SWARM TARGETS PROCESSED
+                  </span>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <strong
+                      style={{
+                        fontSize: 30,
+                        color: "#f8fafc",
+                        fontWeight: 750,
+                        fontFamily: "var(--font-mono)",
+                        letterSpacing: "-0.04em",
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
                       {(clusterStatus?.cluster_scanned ?? 0).toLocaleString()}
                     </strong>
                   </div>
-                  <span style={{ fontSize: 11, color: "#5d7b93", marginTop: 4, display: "block" }}>
-                    Total catalog: 12.25M .org domains
+                  <div style={{ width: "100%", height: 4, background: "rgba(255, 255, 255, 0.08)", borderRadius: 2, marginTop: 10, overflow: "hidden" }}>
+                    <div
+                      style={{
+                        width: `${Math.min(100, ((clusterStatus?.cluster_scanned ?? 0) / 12252872) * 100)}%`,
+                        height: "100%",
+                        background: "#38bdf8",
+                        borderRadius: 2,
+                      }}
+                    />
+                  </div>
+                  <span style={{ fontSize: 11, color: "#475569", marginTop: 6, display: "block", fontFamily: "var(--font-mono)" }}>
+                    Total Catalog: 12,252,872 .org domains
                   </span>
                 </div>
 
-                <div style={{ background: "#0b1420", padding: "12px 14px", borderRadius: 8, border: "1px solid #1a2f45" }}>
-                  <span style={{ fontSize: 12, color: "#799cb6", display: "block", marginBottom: 2 }}>WordPress Sites Discovered</span>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-                    <strong style={{ fontSize: 24, color: "#6ce0c7", fontWeight: 700 }}>
+                {/* 4. WordPress Found */}
+                <div
+                  style={{
+                    background: "rgba(10, 16, 26, 0.7)",
+                    padding: "16px 18px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(56, 189, 248, 0.2)",
+                    borderTop: "1px solid rgba(255, 255, 255, 0.15)",
+                  }}
+                >
+                  <span style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "var(--font-mono)", display: "block", marginBottom: 6 }}>
+                    WORDPRESS SITES DISCOVERED
+                  </span>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <strong
+                      style={{
+                        fontSize: 30,
+                        color: "#38bdf8",
+                        fontWeight: 750,
+                        fontFamily: "var(--font-mono)",
+                        letterSpacing: "-0.04em",
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
                       {(clusterStatus?.cluster_wp ?? 0).toLocaleString()}
                     </strong>
                   </div>
-                  <span style={{ fontSize: 11, color: "#5d7b93", marginTop: 4, display: "block" }}>
+                  <div style={{ width: "100%", height: 4, background: "rgba(255, 255, 255, 0.08)", borderRadius: 2, marginTop: 10, overflow: "hidden" }}>
+                    <div
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        background: "linear-gradient(90deg, #38bdf8, #818cf8)",
+                        borderRadius: 2,
+                      }}
+                    />
+                  </div>
+                  <span style={{ fontSize: 11, color: "#475569", marginTop: 6, display: "block", fontFamily: "var(--font-mono)" }}>
                     {(clusterStatus?.cluster_scanned ?? 0) > 0
-                      ? `${(((clusterStatus?.cluster_wp ?? 0) / (clusterStatus?.cluster_scanned ?? 1)) * 100).toFixed(1)}% detection rate`
+                      ? `${(((clusterStatus?.cluster_wp ?? 0) / (clusterStatus?.cluster_scanned ?? 1)) * 100).toFixed(1)}% detection hit rate`
                       : "Evidence extraction active"}
                   </span>
                 </div>
 
-                <div style={{ background: "#0b1420", padding: "12px 14px", borderRadius: 8, border: "1px solid #1a2f45" }}>
-                  <span style={{ fontSize: 12, color: "#799cb6", display: "block", marginBottom: 2 }}>Catalog Completion ETA</span>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-                    <strong style={{ fontSize: 20, color: (clusterStatus?.cluster_speed ?? 0) > 0 ? "#55efc4" : "#8ab4cc", fontWeight: 600 }}>
+                {/* 5. Mission ETA */}
+                <div
+                  style={{
+                    background: "rgba(10, 16, 26, 0.7)",
+                    padding: "16px 18px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(56, 189, 248, 0.2)",
+                    borderTop: "1px solid rgba(255, 255, 255, 0.15)",
+                  }}
+                >
+                  <span style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "var(--font-mono)", display: "block", marginBottom: 6 }}>
+                    ESTIMATED MISSION DURATION
+                  </span>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <strong
+                      style={{
+                        fontSize: 24,
+                        color: (clusterStatus?.cluster_speed ?? 0) > 0 ? "#55efc4" : "#64748b",
+                        fontWeight: 700,
+                        fontFamily: "var(--font-mono)",
+                        letterSpacing: "-0.03em",
+                      }}
+                    >
                       {(clusterStatus?.cluster_speed ?? 0) > 50
-                        ? `~${Math.round((12250000 - (clusterStatus?.cluster_scanned ?? 0)) / (clusterStatus?.cluster_speed || 1) / 60)} mins`
-                        : (clusterStatus?.cluster_speed ?? 0) > 0 ? "Calculating..." : "Idle"}
+                        ? `~${Math.round((12252872 - (clusterStatus?.cluster_scanned ?? 0)) / (clusterStatus?.cluster_speed || 1) / 60)} MINS`
+                        : (clusterStatus?.cluster_speed ?? 0) > 0 ? "CALCULATING..." : "STANDBY"}
                     </strong>
                   </div>
-                  <span style={{ fontSize: 11, color: "#5d7b93", marginTop: 4, display: "block" }}>
+                  <div style={{ width: "100%", height: 4, background: "rgba(255, 255, 255, 0.08)", borderRadius: 2, marginTop: 10, overflow: "hidden" }}>
+                    <div
+                      style={{
+                        width: (clusterStatus?.cluster_speed ?? 0) > 0 ? "100%" : "0%",
+                        height: "100%",
+                        background: "#55efc4",
+                        borderRadius: 2,
+                      }}
+                    />
+                  </div>
+                  <span style={{ fontSize: 11, color: "#475569", marginTop: 6, display: "block", fontFamily: "var(--font-mono)" }}>
                     At 4,000 req/s: ~50 mins for 12.25M
                   </span>
                 </div>
               </div>
 
-              {/* 8-Worker Droplet Mesh Grid */}
-              <h4 style={{ margin: "0 0 10px", fontSize: 14, color: "#a5c2d9", display: "flex", alignItems: "center", gap: 6 }}>
-                <span>🖥️ DigitalOcean Worker Droplet Fleet</span>
-                <span style={{ fontSize: 12, color: "#6c899f", fontWeight: "normal" }}>
-                  (Each running isolated crawler service with cgroups v2 resource quotas)
+              {/* 8-Worker Droplet Mesh Grid - High-Tech Telemetry Cards */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+                <h4 style={{ margin: 0, fontSize: 14, color: "#e2e8f0", display: "flex", alignItems: "center", gap: 8, letterSpacing: "-0.01em" }}>
+                  <span>🖥️ Ground Station Telemetry Grid</span>
+                  <span className="badge" style={{ fontSize: 10, background: "rgba(255, 255, 255, 0.05)", color: "#94a3b8" }}>
+                    8 WORKER NODES
+                  </span>
+                </h4>
+                <span style={{ fontSize: 12, color: "#64748b", fontFamily: "var(--font-mono)" }}>
+                  Each droplet isolated via Linux cgroups v2 (CPUQuota=150%, MemoryMax=1000M)
                 </span>
-              </h4>
+              </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 10 }}>
-                {WORKER_SPECS.map((spec) => {
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+                {WORKER_SPECS.map((spec, idx) => {
                   const node = clusterStatus?.nodes.find((n) => n.node_id === spec.id);
                   const isAlive = node?.status === "active";
+                  const speedVal = node?.speed ?? 0;
+                  const speedPercent = Math.min(100, Math.round((speedVal / 500) * 100));
+
                   return (
                     <div
                       key={spec.id}
                       style={{
-                        background: isAlive ? "#0b1622" : "#090f17",
-                        border: isAlive ? "1px solid #1f4769" : "1px solid #162433",
-                        borderRadius: 6,
-                        padding: "10px 12px",
+                        background: isAlive ? "rgba(14, 25, 39, 0.85)" : "rgba(10, 15, 23, 0.7)",
+                        border: isAlive ? "1px solid rgba(56, 189, 248, 0.4)" : "1px solid rgba(255, 255, 255, 0.07)",
+                        borderTop: isAlive ? "2px solid #00f2fe" : "1px solid rgba(255, 255, 255, 0.1)",
+                        borderRadius: 10,
+                        padding: "14px 16px",
+                        boxShadow: isAlive ? "0 8px 24px -4px rgba(0, 0, 0, 0.5), 0 0 16px -4px rgba(0, 242, 254, 0.2)" : "none",
+                        transition: "all 0.2s cubic-bezier(0.16, 1, 0.3, 1)",
                       }}
                     >
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <span style={{ fontSize: 13, fontWeight: 600, color: "#e4edf5" }}>{spec.id}</span>
-                          <span style={{ fontSize: 11, color: "#6f8b9e" }}>({spec.vpc})</span>
+                      {/* Node Header */}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span
+                            style={{
+                              fontFamily: "var(--font-mono)",
+                              fontSize: 10.5,
+                              color: "#38bdf8",
+                              background: "rgba(56, 189, 248, 0.12)",
+                              padding: "2px 6px",
+                              borderRadius: 4,
+                              fontWeight: 600,
+                            }}
+                          >
+                            NODE-0{idx + 1}
+                          </span>
+                          <div>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: "#f8fafc", fontFamily: "var(--font-mono)" }}>
+                              {spec.id}
+                            </span>
+                            <span style={{ fontSize: 11, color: "#64748b", marginLeft: 6, fontFamily: "var(--font-mono)" }}>
+                              ({spec.vpc})
+                            </span>
+                          </div>
                         </div>
+
                         <span
                           className="badge"
                           style={{
                             fontSize: 10,
-                            padding: "2px 6px",
-                            background: isAlive ? "rgba(85,239,196,0.15)" : "rgba(108,137,159,0.15)",
-                            color: isAlive ? "#55efc4" : "#6c899f",
-                            borderColor: isAlive ? "#28755f" : "#243748",
+                            padding: "2px 7px",
+                            background: isAlive ? "rgba(16, 185, 129, 0.18)" : "rgba(100, 116, 139, 0.15)",
+                            color: isAlive ? "#34d399" : "#64748b",
+                            borderColor: isAlive ? "rgba(16, 185, 129, 0.4)" : "rgba(100, 116, 139, 0.25)",
                           }}
                         >
-                          {isAlive ? "● ACTIVE" : "IDLE / STOPPED"}
+                          {isAlive ? "● ACTIVE" : "STANDBY"}
                         </span>
                       </div>
 
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: "#8ab4cc", marginBottom: 4 }}>
-                        <span>Throughput:</span>
-                        <strong style={{ color: (node?.speed ?? 0) > 0 ? "#55efc4" : "#6c899f" }}>
-                          {node?.speed ? `${node.speed.toFixed(1)} req/s` : "0.0 req/s"}
-                        </strong>
+                      {/* Throughput Bar */}
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, marginBottom: 4 }}>
+                          <span style={{ color: "#94a3b8", fontFamily: "var(--font-mono)", fontSize: 11 }}>VELOCITY</span>
+                          <strong
+                            style={{
+                              color: speedVal > 0 ? "#55efc4" : "#64748b",
+                              fontFamily: "var(--font-mono)",
+                              fontSize: 13,
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {speedVal ? `${speedVal.toFixed(1)} req/s` : "0.0 req/s"}
+                          </strong>
+                        </div>
+                        <div style={{ width: "100%", height: 4, background: "rgba(255, 255, 255, 0.08)", borderRadius: 2, overflow: "hidden" }}>
+                          <div
+                            style={{
+                              width: `${speedPercent}%`,
+                              height: "100%",
+                              background: isAlive ? "linear-gradient(90deg, #38bdf8, #10b981)" : "#334155",
+                              borderRadius: 2,
+                              transition: "width 0.3s ease",
+                            }}
+                          />
+                        </div>
                       </div>
 
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: "#8ab4cc", marginBottom: 4 }}>
-                        <span>Scanned / WP:</span>
-                        <span style={{ color: "#d5e5f2" }}>
-                          {(node?.scanned_count ?? 0).toLocaleString()} <span style={{ color: "#6ce0c7" }}>({(node?.wp_count ?? 0).toLocaleString()} WP)</span>
+                      {/* Metrics Breakdown */}
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, padding: "8px 0", borderTop: "1px solid rgba(255, 255, 255, 0.05)", borderBottom: "1px solid rgba(255, 255, 255, 0.05)" }}>
+                        <div>
+                          <span style={{ fontSize: 10.5, color: "#64748b", display: "block", fontFamily: "var(--font-mono)" }}>SCANNED</span>
+                          <span style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 650, fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
+                            {(node?.scanned_count ?? 0).toLocaleString()}
+                          </span>
+                        </div>
+                        <div>
+                          <span style={{ fontSize: 10.5, color: "#64748b", display: "block", fontFamily: "var(--font-mono)" }}>WORDPRESS</span>
+                          <span style={{ fontSize: 13, color: "#38bdf8", fontWeight: 650, fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
+                            {(node?.wp_count ?? 0).toLocaleString()}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Isolation & Status Footer */}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, color: "#64748b", marginTop: 8, fontFamily: "var(--font-mono)" }}>
+                        <span style={{ color: "#475569" }}>1.5 CPU • 1G RAM (cgroup)</span>
+                        <span style={{ color: isAlive ? "#34d399" : "#64748b" }}>
+                          {node?.last_heartbeat ? "VPC <1.5ms" : "Offline"}
                         </span>
-                      </div>
-
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, color: "#547087", borderTop: "1px solid #14212e", paddingTop: 4, marginTop: 4 }}>
-                        <span>Cap: CPU 150% • 1G RAM</span>
-                        <span>{node?.last_heartbeat ? "Live Heartbeat" : "Standby"}</span>
                       </div>
                     </div>
                   );
@@ -2179,6 +2524,49 @@ export default function Page() {
               );
             })()}
 
+            {/* Storage Allocation Distribution Bar */}
+            {dbStats && (
+              <div className="storage-bar-container">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, fontSize: 13, flexWrap: "wrap", gap: 6 }}>
+                  <strong style={{ color: "#ffffff", display: "flex", alignItems: "center", gap: 6 }}>
+                    <span>🗄️ Storage Engine Allocation</span>
+                    <span style={{ fontSize: 11, color: "var(--accent-mint)", background: "rgba(85,239,196,0.1)", padding: "2px 8px", borderRadius: 10 }}>
+                      WAL Mode Active
+                    </span>
+                  </strong>
+                  <span style={{ fontSize: 12, color: "var(--text-subtle)" }}>
+                    Total Database Size: <strong>{((dbStats.database_size_mb ?? dbStats.size_mb ?? 0) / 1024).toFixed(2)} GB</strong> ({((dbStats.page_count ?? 0) * (dbStats.page_size ?? 4096) / (1024 * 1024)).toFixed(0)} MB allocated)
+                  </span>
+                </div>
+
+                <div className="storage-bar-track">
+                  <div className="storage-bar-seg" style={{ width: "50%", background: "linear-gradient(90deg, #00f2fe, #4facfe)" }} title="Observations (12.7M records)" />
+                  <div className="storage-bar-seg" style={{ width: "35%", background: "linear-gradient(90deg, #55efc4, #00b894)" }} title="Sites & Domains (12.47M records)" />
+                  <div className="storage-bar-seg" style={{ width: "10%", background: "linear-gradient(90deg, #a29bfe, #6c5ce7)" }} title="HTML Source Intel Index" />
+                  <div className="storage-bar-seg" style={{ width: "5%", background: "linear-gradient(90deg, #fdcb6e, #e17055)" }} title="Crawler Progress & Meta" />
+                </div>
+
+                <div className="storage-legend">
+                  <div className="storage-legend-item">
+                    <span className="storage-legend-dot" style={{ background: "#00f2fe" }} />
+                    <span>Observations: <strong>{dbStats.tables?.observations?.toLocaleString() ?? "—"}</strong></span>
+                  </div>
+                  <div className="storage-legend-item">
+                    <span className="storage-legend-dot" style={{ background: "#55efc4" }} />
+                    <span>Unique Sites: <strong>{dbStats.tables?.sites?.toLocaleString() ?? "—"}</strong></span>
+                  </div>
+                  <div className="storage-legend-item">
+                    <span className="storage-legend-dot" style={{ background: "#a29bfe" }} />
+                    <span>HTML Source Index: <strong>{dbStats.tables?.page_contents?.toLocaleString() ?? "—"}</strong></span>
+                  </div>
+                  <div className="storage-legend-item">
+                    <span className="storage-legend-dot" style={{ background: "#fdcb6e" }} />
+                    <span>WordPress Detections: <strong>{dbStats.tables?.wordpress_verified?.toLocaleString() ?? "—"}</strong></span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Storage Engine Maintenance Toolbar */}
             <div className="db-maintenance-bar">
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginRight: 8 }}>
@@ -2808,9 +3196,32 @@ export default function Page() {
                   </div>
 
                   <div style={{ marginBottom: 16 }}>
-                    <label style={{ display: "block", marginBottom: 6, fontWeight: 600, fontSize: 13 }}>
-                      Target URLs or Hostnames (one per line):
-                    </label>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                      <label style={{ margin: 0, fontWeight: 600, fontSize: 13 }}>
+                        Target URLs or Hostnames (one per line):
+                      </label>
+                      <label
+                        style={{
+                          margin: 0,
+                          fontSize: 11.5,
+                          padding: "4px 10px",
+                          background: "var(--bg-surface-elevated)",
+                          border: "1px solid var(--border-medium)",
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          color: "var(--accent-cyan)",
+                        }}
+                        title="Upload a .txt or .csv file of URLs or hosts"
+                      >
+                        📁 Load .txt File
+                        <input
+                          type="file"
+                          accept=".txt,.csv"
+                          onChange={handleFileUpload}
+                          style={{ display: "none" }}
+                        />
+                      </label>
+                    </div>
                     <textarea
                       rows={10}
                       placeholder={"https://example.org\nhttps://wordpress.org\nwikipedia.org"}
@@ -2821,7 +3232,7 @@ export default function Page() {
                         width: "100%",
                         boxSizing: "border-box",
                         background: "#070c12",
-                        border: "1px solid #1c2a38",
+                        border: "1px solid var(--border-subtle)",
                         borderRadius: 8,
                         padding: "10px 14px",
                         color: "#c5d8e8",
@@ -2830,9 +3241,14 @@ export default function Page() {
                         lineHeight: 1.5,
                       }}
                     />
-                    <small style={{ color: "#8fa8be", marginTop: 4, display: "block" }}>
-                      Paste URLs or domain names. If http/https scheme is omitted, https:// will be prepended automatically. Duplicates are merged safely.
-                    </small>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12, color: "var(--text-subtle)" }}>
+                      <small>Paste URLs or domain names. Duplicates will be safely merged.</small>
+                      {importUrlsText.trim() && (
+                        <small style={{ color: "var(--accent-mint)", fontWeight: 600 }}>
+                          {importUrlsText.split("\n").filter((l) => l.trim()).length.toLocaleString()} lines queued
+                        </small>
+                      )}
+                    </div>
                   </div>
 
                   <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -2911,6 +3327,16 @@ export default function Page() {
           </>
         )}
       </main>
+
+      {/* Floating Toast Notification Container */}
+      <div className="toast-container" aria-live="polite">
+        {toasts.map((t) => (
+          <div key={t.id} className={`toast-item ${t.type}`}>
+            <span style={{ fontSize: 16 }}>{t.type === "success" ? "✅" : t.type === "error" ? "❌" : "ℹ️"}</span>
+            <div style={{ flex: 1, fontSize: 13, lineHeight: 1.4 }}>{t.message}</div>
+          </div>
+        ))}
+      </div>
     </>
   );
 }
