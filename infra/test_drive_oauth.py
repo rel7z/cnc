@@ -155,6 +155,25 @@ class DriveTests(unittest.TestCase):
                 drive.sync_controller(self.config,self.profile)
         transfer.assert_not_called()
 
+    def test_database_recovery_requires_saved_key_enabled_drive_and_authorization(self):
+        key=self.profile.with_name('internet-map-recovery.key')
+        key.write_bytes(b'k'*32)
+        self.state['authorized']=True
+        self.state['config']['enabled']=True
+        with patch.object(drive,'controller_session',return_value={}), patch.object(drive,'sync_database_recovery',return_value={'status':'recovering'}) as restore:
+            result=drive.sync_controller(self.config,self.profile)
+            restore.assert_called_once_with(self.config,key)
+            self.assertEqual(result['database_recovery']['status'],'recovering')
+        self.state['config']['enabled']=False
+        with patch.object(drive,'controller_session',return_value={}), patch.object(drive,'sync_database_recovery') as restore:
+            drive.sync_controller(self.config,self.profile)
+            restore.assert_not_called()
+        self.state['config']['enabled']=True
+        self.state['authorized']=False
+        with patch.object(drive,'sync_database_recovery') as restore:
+            drive.sync_controller(self.config,self.profile)
+            restore.assert_not_called()
+
     def test_session_transfer_atomic_private_and_safe_to_retry(self):
         config=self.root/'controller.json'
         config.write_text(json.dumps({'data_dir':str(self.root/'data'),'gdrive':{}}))

@@ -14,8 +14,13 @@ import (
 )
 
 var immutableEnumFilename = regexp.MustCompile(`^enum-versions-[a-z0-9][a-z0-9_-]{0,63}-[a-z0-9][a-z0-9_-]{0,63}\.jsonl$`)
+var internetMapBundleFilename = regexp.MustCompile(`^internet-map-backup-[0-9]{10,}-[a-f0-9]{32}\.tar\.gz$`)
 
 func isImmutableEnumResult(filename string) bool { return immutableEnumFilename.MatchString(filename) }
+
+func isInternetMapBundle(filename string) bool {
+	return internetMapBundleFilename.MatchString(filename)
+}
 
 // Enum publications are complete immutable bytes, not appendable text streams.
 // Never deduplicate, normalize, or merge their JSONL records. Streaming avoids
@@ -41,6 +46,9 @@ func (u *GDriveUploader) syncImmutableEnumResult(path, filename string) error {
 	}
 	if len(remoteFiles) == 0 {
 		metadata := &drive.File{Name: filename, MimeType: "application/x-ndjson", Description: "SHA256: " + digest}
+		if isInternetMapBundle(filename) {
+			metadata.MimeType = "application/gzip"
+		}
 		if u.config.ParentFolderID != "" {
 			metadata.Parents = []string{u.config.ParentFolderID}
 		}

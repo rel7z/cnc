@@ -22,6 +22,8 @@ for name in ['index.js','stream-run.js','package.json','package-lock.json']:shut
 restock=OUT/'tools/wordpress-restock';restock.mkdir(parents=True,exist_ok=True)
 for name in ('wordpress_restock.py','wordpress_bulk.py','wordpress_reverse.py','wordpress_sources.py'):shutil.copy2(ROOT/'infra'/name,restock/name)
 for name in ['worker_tools_package.py','worker_tools_manifest.py']:shutil.copy2(ROOT/'cnc-api'/name,OUT/name)
+(OUT/'recovery').mkdir(exist_ok=True)
+shutil.copy2(ROOT/'infra/internet_map_recovery.py',OUT/'recovery/internet_map_recovery.py')
 with tarfile.open(OUT/'artifacts.tar.gz','w:gz') as tar:
  for folder in ['bin','tools']:
   for p in sorted((OUT/folder).rglob('*')):
@@ -29,12 +31,13 @@ with tarfile.open(OUT/'artifacts.tar.gz','w:gz') as tar:
    if p.is_file():tar.add(p,arcname=str(p.relative_to(OUT)),recursive=False)
  for name in ['ui-source.tar.gz','worker_tools_package.py','worker_tools_manifest.py']:tar.add(OUT/name,arcname=name,recursive=False)
  infra=ROOT/'infra'
+ tar.add(infra/'internet_map_recovery.py',arcname='recovery/internet_map_recovery.py',recursive=False)
  tar.add(infra/'worker_rebuild_queue.py',arcname='worker-rebuild/worker_rebuild_queue.py',recursive=False)
  for name in ('wordpress_generator.py','wordpress_ct.py','wordpress_bulk.py','wordpress_output.py','wordpress_restock.py','wordpress_reverse.py','wordpress_sources.py','wordpress_index.py','install-wordpress-index.py'):
   tar.add(infra/name,arcname='wordpress-generator/'+name,recursive=False)
  for name in ('install-wordpress-generator.py','cnc-wordpress-generator.service',
               'cnc-wordpress-generator-refresh.service','cnc-wordpress-generator-refresh.timer'):
   tar.add(infra/'digitalocean'/name,arcname='wordpress-generator/'+name,recursive=False)
-files=['artifacts.tar.gz','ui-source.tar.gz']+[target for target,_,_ in modules]
+files=['artifacts.tar.gz','ui-source.tar.gz','recovery/internet_map_recovery.py']+[target for target,_,_ in modules]
 manifest={'release':'cnc-digitalocean-20261101','private_processor_tools_included':False,'sha256':{name:hashlib.sha256((OUT/name).read_bytes()).hexdigest() for name in files}}
 (OUT/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');print('Release artifacts prepared.',flush=True)

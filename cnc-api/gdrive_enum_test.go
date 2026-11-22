@@ -43,7 +43,14 @@ func TestDriveSkipsInternalEnumArtifacts(t *testing.T) {
 }
 
 func TestDriveEnumUploadsExactLargeRecordBytesAndRetriesOutage(t *testing.T) {
-	name := "enum-versions-job-shard.jsonl"
+	testDriveImmutableStreamingRoundtrip(t, "enum-versions-job-shard.jsonl")
+}
+
+func TestDriveDatabaseBundleUploadsExactBytesAndRetriesOutage(t *testing.T) {
+	testDriveImmutableStreamingRoundtrip(t, "internet-map-backup-1795359982-0123456789abcdef0123456789abcdef.tar.gz")
+}
+
+func testDriveImmutableStreamingRoundtrip(t *testing.T, name string) {
 	data := []byte(`{"schema_version":1,"matched_rules":[{"id":"large","name":"` + strings.Repeat("x", 128*1024) + `"}]}` + " \r\n")
 	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -76,7 +83,13 @@ func TestDriveEnumUploadsExactLargeRecordBytesAndRetriesOutage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			io.Copy(io.Discard, metadata)
+			meta, readErr := io.ReadAll(metadata)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if isInternetMapBundle(name) && !bytes.Contains(meta, []byte("application/gzip")) {
+				t.Fatal("backup archive MIME type missing")
+			}
 			part, err := reader.NextPart()
 			if err != nil {
 				t.Fatal(err)

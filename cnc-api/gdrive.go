@@ -733,7 +733,7 @@ func (u *GDriveUploader) syncFile(path, filename, initialStateKey string) error 
 	if u.service == nil {
 		return fmt.Errorf("Google Drive is disconnected")
 	}
-	if isImmutableEnumResult(filename) {
+	if isImmutableEnumResult(filename) || isInternetMapBundle(filename) {
 		if err := u.syncImmutableEnumResult(path, filename); err != nil {
 			return err
 		}

@@ -18,6 +18,58 @@ import urllib.request
 CALLBACK_URL = 'http://localhost:8080/api/config/gdrive/callback'
 PROTOCOL = 'cnc-drive-callback-v1'
 
+# The key stays in the owner's private Manager directory, outside Drive/Git.
+# A release-installed verifier authenticates cloud bytes before restoring them.
+RECOVERY_SCRIPT = r'''
+import base64,json,os,subprocess,sys,tempfile
+from pathlib import Path
+request=json.load(sys.stdin)
+helper=Path('/opt/cnc/recovery/internet_map_recovery.py')
+if not helper.is_file():
+ print(json.dumps({'status':'installer-upgrade-required'}));sys.exit(0)
+key=base64.b64decode(request['key'],validate=True)
+if len(key)<32:raise RuntimeError('Invalid recovery key')
+target=Path('/opt/cnc/data/internet-map-recovery.key')
+if target.is_symlink():raise RuntimeError('Unsafe recovery key path')
+target.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+if target.exists():
+ if target.read_bytes()!=key:raise RuntimeError('Recovery key mismatch; saved key retained')
+else:
+ fd,name=tempfile.mkstemp(prefix='.recovery-key-',dir=target.parent)
+ try:
+  with os.fdopen(fd,'wb') as f:f.write(key)
+  os.replace(name,target)
+ finally:
+  if os.path.exists(name):os.unlink(name)
+target.chmod(0o600)
+app=Path('/opt/internet-map')
+if app.exists() and (not (app/'data/drive-recovery.json').is_file() or (app/'data/recovery-installed.json').is_file()):
+ print(json.dumps({'status':'existing'}));sys.exit(0)
+active=subprocess.run(['systemctl','is-active','--quiet','internet-map-recovery.service']).returncode==0
+if not active:
+ subprocess.run(['systemctl','start','--no-block','internet-map-recovery.service'],check=True,capture_output=True)
+print(json.dumps({'status':'recovering'}))
+'''
+
+
+def sync_database_recovery(config_path, key_path):
+    import base64
+    cfg = json.loads(Path(config_path).read_text())
+    if cfg.get('provider') not in ('linode', 'digitalocean') or not Path(key_path).is_file():
+        return dict(status='not-configured')
+    alias = cfg.get('ssh_alias', 'cnc-linode-server')
+    if not alias or alias.startswith('-') or any(c.isspace() for c in alias):
+        raise RuntimeError('Invalid controller SSH alias')
+    auth, env = ssh_auth(cfg)
+    command = ['ssh', '-F', str(Path(cfg['ssh_config']).expanduser()), *auth,
+               '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=8', alias,
+               'python3 -c ' + shlex.quote(RECOVERY_SCRIPT)]
+    payload = dict(key=base64.b64encode(Path(key_path).read_bytes()).decode())
+    result = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, timeout=20, env=env)
+    if result.returncode:
+        raise RuntimeError('Database recovery setup failed over controller SSH; private key retained')
+    return json.loads(result.stdout)
+
 # Invoked only over the owner's existing, host-verified controller SSH connection.
 # Tokens travel in captured stdin/stdout, never shell arguments or logs.
 SESSION_SCRIPT = r'''
@@ -67,6 +119,18 @@ def private_profile(path, profile):
             os.unlink(name)
 
 
+def ssh_auth(cfg):
+    env = dict(os.environ)
+    askpass = cfg.get('ssh_askpass')
+    if not askpass:
+        return ['-o', 'BatchMode=yes'], env
+    helper = Path(askpass).expanduser()
+    if not helper.is_absolute() or not os.access(helper, os.X_OK):
+        raise RuntimeError('Configured SSH password helper is unavailable')
+    env.update(SSH_ASKPASS=str(helper), SSH_ASKPASS_REQUIRE='force')
+    return ['-o', 'BatchMode=no', '-o', 'StrictHostKeyChecking=yes'], env
+
+
 def controller_session(config_path, client_id, token=None):
     cfg = json.loads(Path(config_path).read_text())
     if cfg.get('provider') not in ('linode', 'digitalocean'):
@@ -74,13 +138,14 @@ def controller_session(config_path, client_id, token=None):
     alias = cfg.get('ssh_alias', 'cnc-linode-server')
     if not alias or alias.startswith('-') or any(c.isspace() for c in alias):
         raise RuntimeError('Invalid controller SSH alias')
-    command = ['ssh', '-F', str(Path(cfg['ssh_config']).expanduser()), '-o', 'BatchMode=yes',
+    auth, env = ssh_auth(cfg)
+    command = ['ssh', '-F', str(Path(cfg['ssh_config']).expanduser()), *auth,
                '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=8', alias,
                'python3 -c ' + shlex.quote(SESSION_SCRIPT)]
     payload = dict(action='restore' if token else 'backup', client_id=client_id)
     if token:
         payload['token'] = token
-    result = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, timeout=20)
+    result = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, timeout=20, env=env)
     if result.returncode:
         raise RuntimeError('Drive session transfer failed over controller SSH; saved backup retained')
     return json.loads(result.stdout)
@@ -290,7 +355,11 @@ def sync_controller(config_path, profile_path, enable=False):
             profile.update(oauth_token=token, enabled=cfg.get('enabled', False),
                            parent_folder_id=cfg.get('parent_folder_id', ''))
             private_profile(profile_path, profile)
-    return dict(callback_url=CALLBACK_URL, configured=True, updated=changed)
+    recovery = dict(status='not-configured')
+    key_path = Path(profile_path).with_name('internet-map-recovery.key')
+    if status.get('authorized') and cfg.get('enabled') and key_path.is_file():
+        recovery = sync_database_recovery(config_path, key_path)
+    return dict(callback_url=CALLBACK_URL, configured=True, updated=changed, database_recovery=recovery)
 
 
 def begin_authorization(config_path, profile_path):

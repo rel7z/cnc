@@ -13,6 +13,9 @@ with tarfile.open(STAGE/'artifacts.tar.gz') as tar:
   if not item.isfile() or Path(item.name).is_absolute() or '..' in Path(item.name).parts:raise RuntimeError('Unsafe artifact archive')
  tar.extractall(STAGE/'release',filter='data')
 release=STAGE/'release'
+(APP/'recovery').mkdir(mode=0o700,exist_ok=True)
+if hashlib.sha256((release/'recovery/internet_map_recovery.py').read_bytes()).hexdigest()!=manifest['sha256']['recovery/internet_map_recovery.py']:raise RuntimeError('Recovery helper checksum mismatch')
+shutil.copy2(release/'recovery/internet_map_recovery.py',APP/'recovery/internet_map_recovery.py')
 for name,target in [('cnc-server',APP/'cnc-server'),('cnc-worker',APP/'cnc-worker-linux'),('cnc-processor',PROC/'cnc-processor')]:
  source=release/'bin'/name
  if hashlib.sha256(source.read_bytes()).hexdigest()!=manifest['sha256']['bin/'+name]:raise RuntimeError('Binary checksum mismatch')
@@ -50,6 +53,7 @@ if settings.get('worker_password'):
  for name in settings['worker_names']:(store/name).write_text(settings['worker_password']);(store/name).chmod(0o600)
 (APP/'RELEASE').write_text(manifest['release']+'\n')
 units=Path('/etc/systemd/system')
+(units/'internet-map-recovery.service').write_text('[Unit]\nAfter=network-online.target cnc-server.service\nWants=network-online.target\n[Service]\nType=oneshot\nUser=root\nUMask=0077\nExecStart=/usr/bin/python3 /opt/cnc/recovery/internet_map_recovery.py --install\nTimeoutStartSec=1h\n')
 common='[Unit]\nAfter=network-online.target\nWants=network-online.target\n[Service]\nUser=root\nRestart=always\nRestartSec=5\nOOMPolicy=stop\nUMask=0077\n'
 (units/'cnc-server.service').write_text(common+'WorkingDirectory=/opt/cnc\nEnvironmentFile=/opt/cnc/processor.env\nEnvironmentFile=/opt/cnc/dashboard-audit.env\nExecStart=/opt/cnc/cnc-server -config=/opt/cnc/config.json\n[Install]\nWantedBy=multi-user.target\n')
 (units/'cnc-processor.service').write_text(common+'WorkingDirectory=/opt/cnc-processor\nEnvironmentFile=/opt/cnc/processor.env\nExecStart=/opt/cnc-processor/cnc-processor\nTimeoutStopSec=60\n[Install]\nWantedBy=multi-user.target\n')
