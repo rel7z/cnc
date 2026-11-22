@@ -57,7 +57,7 @@ def publish_snapshot(database, output, chunk_size=32 << 20):
         with source.open('rb') as stream:
             while block := stream.read(chunk_size):
                 filename = name + '.part%06d.gz' % len(parts)
-                block = gzip.compress(block, mtime=0)
+                block = gzip.compress(block, compresslevel=3, mtime=0)
                 staged = Path(work) / filename
                 staged.write_bytes(block)
                 staged.chmod(0o600)

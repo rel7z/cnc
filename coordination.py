@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -47,7 +48,7 @@ class DiscoveryControl:
             status = json.loads(path.read_text())
         state = self.root / 'generator-state.db'
         if state.exists():
-            with sqlite3.connect(state.as_uri() + '?mode=ro', uri=True, timeout=10) as db:
+            with closing(sqlite3.connect(state.as_uri() + '?mode=ro', uri=True, timeout=10)) as db:
                 row = db.execute('SELECT available,target,refilling FROM pool_policy WHERE slot=1').fetchone()
                 if row:
                     status.update(pool_available=row[0], pool_target=row[1], pool_refilling=bool(row[2]))

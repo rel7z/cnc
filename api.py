@@ -679,6 +679,22 @@ def handler(database, key):
                     self.reply(409, {'error': str(error)})
                 return
 
+            # Old worker processes may finish submissions, but cannot compete
+            # with the migrated CNC executor for new work.
+            if (database.parent / 'discovery/cutover.json').exists():
+                if parsed.path == '/api/v1/cluster/lease':
+                    self.reply(200, {'lease_id': 0, 'urls': [], 'owner': 'internet-map', 'executor': 'cnc', 'legacy_draining': True})
+                    return
+                start = parsed.path in ('/api/v1/cluster/start', '/api/v1/scanner/start') or (parsed.path in ('/api/v1/scanner', '/api/v1/scanner/status') and data.get('action') == 'start')
+                stop = parsed.path in ('/api/v1/cluster/stop', '/api/v1/scanner/stop') or (parsed.path in ('/api/v1/scanner', '/api/v1/scanner/status') and data.get('action') == 'stop')
+                if start or stop:
+                    try:
+                        result = discovery_service(database).control('resume' if start else 'pause')
+                        self.reply(200, {'success': True, 'owner': 'internet-map', 'executor': 'cnc', 'state': dict(result, running=result['enabled'])})
+                    except ValueError as error:
+                        self.reply(409, {'error': str(error)})
+                    return
+
             state_path = database.parent / "scanner-state.json"
 
             if parsed.path in ("/api/v1/scanner/resources", "/api/v1/scanner/resource"):

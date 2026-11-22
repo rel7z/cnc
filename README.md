@@ -171,3 +171,50 @@ Upload and ingest any local list or dataset directly into the production SQLite 
 ```bash
 python3 feed_server.py /path/to/my_domains.txt --source "custom-feed-20261122"
 ```
+
+
+## CNC discovery ownership and API coordination
+
+Internet Map owns the discovery code in `discovery/`, its persistent state in
+`/opt/internet-map/data/discovery/`, and the main catalog in `data/catalog.db`.
+CNC remains the worker executor: the migrated algorithm submits signed jobs to
+its private API and reconciles their results. The old CNC generator service is
+disabled. Its original directory is a compatibility symlink to the migrated
+state, preserving pool history and checkpoints rather than resetting them.
+
+Authenticated endpoints (same Bearer key as the catalog API):
+
+- `GET /api/v1/discovery/status`: ownership, pause state, pool and source metrics.
+- `GET /api/v1/discovery/workers`: CNC worker availability, excluding SSH secrets.
+- `POST /api/v1/discovery/control`: `{"action":"pause"}` or `{"action":"resume"}`;
+  also accepts the CNC dashboard's `enabled`, `sources`, and `commoncrawl_mode` settings.
+
+`infra/install-discovery.py` performs a same-volume state migration only while
+scanning is paused and CNC jobs are drained. It installs one discovery service,
+a catalog reconciliation timer (30 seconds), and a backup timer (six hours).
+Activation failures restore the original state path. Legacy worker lease requests
+return no fresh work after cutover; in-flight result submissions remain accepted.
+CNC's authenticated dashboard forwards generator controls to this API over loopback.
+Keep `service.env`, CNC audit keys, credentials, runtime state and datasets out of Git.
+
+`maintenance.py sync` imports generator classifications with provenance and deduplicates
+repeated imports. It does not invent HTML or generator-tag evidence.
+
+`maintenance.py backup` uses SQLite's online backup API with a pinned read transaction,
+checks integrity, and publishes immutable compressed parts plus a SHA-256 manifest
+into CNC's Drive watch directory. Catalog, candidate pool and discovery state are
+snapshotted separately; catalog reconciliation is idempotent after recovery.
+The live SQLite/WAL files are never uploaded directly. Historical backup versions
+are retained; monitor Drive quota as the catalog grows.
+
+To restore, download a manifest and all its named parts from Drive into one folder.
+From the Internet Map source directory, call:
+
+```python
+from backup import restore_snapshot
+restore_snapshot("/path/to/backup.manifest.json", "/path/to/restored-catalog.db")
+```
+
+Restore requires a missing destination and verifies every part, the assembled
+checksum and SQLite integrity. Stop the relevant service before deliberately
+replacing a live database with a verified restored copy.

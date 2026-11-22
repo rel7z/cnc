@@ -84,3 +84,18 @@ class CoordinationTests(unittest.TestCase):
             self.assertTrue(old.is_dir());self.assertFalse(old.is_symlink())
             self.assertEqual((old/'checkpoint').read_text(),'preserve')
             self.assertFalse(state.exists())
+
+    def test_migrated_legacy_lease_api_does_not_assign_fresh_work(self):
+        import io
+        from api import handler
+        class Connection:
+            def __init__(self,raw):self.input=io.BytesIO(raw);self.output=io.BytesIO()
+            def makefile(self,*args):return self.input
+            def sendall(self,data):self.output.write(data)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'discovery').mkdir();(root/'discovery/cutover.json').write_text('{}')
+            raw=b'POST /api/v1/cluster/lease HTTP/1.0\r\nAuthorization: Bearer test-key\r\nContent-Length: 2\r\n\r\n{}'
+            connection=Connection(raw);handler(root/'catalog.db','test-key')(connection,('127.0.0.1',1234),None)
+            header,body=connection.output.getvalue().split(b'\r\n\r\n',1)
+            self.assertIn(b'200',header.splitlines()[0]);reply=json.loads(body)
+            self.assertEqual(reply['urls'],[]);self.assertTrue(reply['legacy_draining'])
