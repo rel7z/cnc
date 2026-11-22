@@ -41,7 +41,7 @@ class APITests(unittest.TestCase):
         finally:
             db.close()
 
-    def request(self, path, key='test-key', method='GET', body=None):
+    def request(self, path, key='test-key', method='GET', body=None, raw=False):
         payload = b''
         headers_str = f'{method} {path} HTTP/1.0\r\nAuthorization: Bearer {key}\r\n'
         if body is not None:
@@ -51,8 +51,12 @@ class APITests(unittest.TestCase):
         request = headers_str.encode() + payload
         connection = Connection(request)
         handler(self.database, 'test-key')(connection, ('127.0.0.1', 1234), None)
-        headers, resp_body = connection.output.getvalue().split(b'\r\n\r\n', 1)
-        return int(headers.split()[1]), json.loads(resp_body)
+        header_bytes, resp_body = connection.output.getvalue().split(b'\r\n\r\n', 1)
+        headers_text = header_bytes.decode('utf-8', errors='replace')
+        status = int(headers_text.split()[1])
+        if raw or 'text/plain' in headers_text:
+            return status, resp_body.decode('utf-8', errors='replace'), headers_text
+        return status, json.loads(resp_body)
 
     def test_authentication(self):
         self.assertEqual(self.request('/api/v1/stats', 'wrong')[0], 401)
@@ -125,3 +129,31 @@ class APITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(updated.get('success'))
         self.assertEqual(updated['config']['concurrency'], 150)
+
+    def test_download_txt_endpoints(self):
+        # 1. Download verified WordPress as .txt
+        status, body, headers = self.request('/api/v1/export?format=txt&wordpress=1')
+        self.assertEqual(status, 200)
+        self.assertIn('Content-Type: text/plain; charset=utf-8', headers)
+        self.assertIn('Content-Disposition: attachment; filename="wordpress-sites-', headers)
+        self.assertEqual(body.strip(), 'https://example.org/')
+
+        # 2. Download all domains as hostnames (field=host)
+        status, body, headers = self.request('/api/v1/download?field=host')
+        self.assertEqual(status, 200)
+        self.assertIn('Content-Type: text/plain; charset=utf-8', headers)
+        lines = [line.strip() for line in body.splitlines() if line.strip()]
+        self.assertIn('example.org', lines)
+        self.assertIn('other.org', lines)
+
+        # 3. Download by intelligence signature
+        status, body, headers = self.request('/api/v1/export.txt?signature=Google+Analytics')
+        self.assertEqual(status, 200)
+        self.assertIn('Content-Type: text/plain; charset=utf-8', headers)
+        self.assertIn('filename="intel-google_analytics-', headers)
+        self.assertEqual(body.strip(), 'https://example.org/')
+
+        # 4. Custom filename
+        status, body, headers = self.request('/api/v1/download?filename=my-custom-list.txt')
+        self.assertEqual(status, 200)
+        self.assertIn('Content-Disposition: attachment; filename="my-custom-list.txt"', headers)

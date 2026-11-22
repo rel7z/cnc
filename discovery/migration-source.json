@@ -1,0 +1,14 @@
+{
+  "source": "cnc/infra",
+  "sha256_before_path_migration": {
+    "wordpress_generator.py": "a4db7e1a699cfecb7f1154b2f73eb22e228968972cb2da8d83f1f843d76d686d",
+    "wordpress_bulk.py": "32ec8c0f7583f5a234d003a227902b33ee393c02e261f8d2e35c4ef6e0c8b655",
+    "wordpress_ct.py": "00034b88e725a5c8e686b964711dd1693462266a321001e37e2d6a1da76bbcd0",
+    "wordpress_output.py": "9bb64b3d533a527287604adc1a64deb76bdaf3643180dcf7fe7b72f31c7a6911",
+    "wordpress_restock.py": "73242012f9bbd60acfe3240975717be8caa257b8921de958b71028abb883154f",
+    "wordpress_reverse.py": "00065e013c3ce51c5d7197d1ba9e146102a198c5219b17e9b9edacfc8e680211",
+    "wordpress_sources.py": "b8ce3e637a3129e525891e0dcb8379bc734ce04bc11ccc187fa11e7d391aaabc",
+    "wordpress_index.py": "1bedf863d6c5fe6b3aa82a4cb5c7eec0ed0801c43643fe242c6186138bbc9532",
+    "install-wordpress-index.py": "c7aca1f429328983e6d8173d06e2c7205c044ada051541bad9b87ae55f3c88e8"
+  }
+}

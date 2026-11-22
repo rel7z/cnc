@@ -336,7 +336,11 @@ def main():
     intel_scan = commands.add_parser("intel-scan", parents=[db_parent])
     intel_scan.add_argument("url")
     export = commands.add_parser("export", parents=[db_parent])
-    export.add_argument("--wordpress", action="store_true")
+    export.add_argument("--wordpress", action="store_true", help="Export only verified WordPress sites")
+    export.add_argument("--host", default="", help="Filter by host substring")
+    export.add_argument("--signature", default="", help="Filter by technology signature (e.g. Shopify, WooCommerce)")
+    export.add_argument("--field", choices=["url", "host"], default="url", help="Output full URL or hostname only")
+    export.add_argument("--output", "-o", type=Path, default=None, help="Save to .txt file instead of stdout")
     inspect = commands.add_parser("observations", parents=[db_parent])
     inspect.add_argument("url")
     seed_cmd = commands.add_parser("seed", parents=[db_parent])
@@ -362,11 +366,37 @@ def main():
                 print(json.dumps({"url": url, "source": source, "imported_at": observed,
                                   "wordpress_evidence": json.loads(evidence)}))
         elif args.command == "export":
-            query = "SELECT s.url FROM sites s"
-            if args.wordpress:
-                query += " WHERE EXISTS(SELECT 1 FROM observations o WHERE o.url=s.url AND o.evidence!='[]')"
-            for url, in db.execute(query + " ORDER BY s.url"):
-                sys.stdout.write(url + "\n")
+            field_col = "s.url" if args.field == "url" else "s.host"
+            conditions = []
+            params = []
+            if args.signature:
+                sql = f"SELECT {field_col} FROM page_contents p JOIN sites s ON s.url = p.url WHERE p.signatures_json LIKE ?"
+                params.append(f'%"{args.signature}"%')
+                if args.host:
+                    sql += " AND instr(s.host, ?) > 0"
+                    params.append(args.host.lower())
+                if args.wordpress:
+                    sql += " AND EXISTS(SELECT 1 FROM observations o WHERE o.url=s.url AND o.evidence!='[]')"
+                sql += f" ORDER BY {field_col}"
+            else:
+                sql = f"SELECT {field_col} FROM sites s"
+                if args.host:
+                    conditions.append("instr(s.host, ?) > 0")
+                    params.append(args.host.lower())
+                if args.wordpress:
+                    conditions.append("EXISTS(SELECT 1 FROM observations o WHERE o.url=s.url AND o.evidence!='[]')")
+                if conditions:
+                    sql += " WHERE " + " AND ".join(conditions)
+                sql += f" ORDER BY {field_col}"
+
+            out_stream = open(args.output, "w", encoding="utf-8") if args.output else sys.stdout
+            try:
+                for row in db.execute(sql, params):
+                    out_stream.write((row[0] or "") + "\n")
+            finally:
+                if args.output:
+                    out_stream.close()
+                    print(f"[+] Exported to {args.output}")
         elif args.command == "intel-search":
             from intel import search_intel
             res = search_intel(db, args.query, limit=args.limit)

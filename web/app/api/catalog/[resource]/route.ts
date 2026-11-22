@@ -19,7 +19,16 @@ const ALLOWED = [
   "scanner-stop",
   "scanner-resources",
   "scanner-resource",
+  "cluster",
+  "cluster-nodes",
+  "cluster-start",
+  "cluster-stop",
+  "cluster-lease",
+  "cluster-submit",
   "export",
+  "download",
+  "export.txt",
+  "download.txt",
 ];
 
 function getBackendUrl(resource: string): URL {
@@ -34,8 +43,12 @@ function getBackendUrl(resource: string): URL {
     path = "/api/v1/intel/" + resource.slice(6);
   } else if (resource.startsWith("scanner-")) {
     path = "/api/v1/scanner/" + resource.slice(8);
+  } else if (resource.startsWith("cluster-")) {
+    path = "/api/v1/cluster/" + resource.slice(8);
   } else if (resource === "scanner") {
     path = "/api/v1/scanner/status";
+  } else if (resource === "cluster") {
+    path = "/api/v1/cluster/nodes";
   }
   return new URL(path, base);
 }
@@ -57,10 +70,15 @@ export async function GET(request: NextRequest, context: { params: Promise<{ res
       "host",
       "page",
       "wordpress",
+      "type",
       "url",
       "limit",
       "q",
       "signature",
+      "field",
+      "filename",
+      "status_code",
+      "scanned",
       "with_evidence",
       "extended",
       "scanner",
@@ -73,11 +91,20 @@ export async function GET(request: NextRequest, context: { params: Promise<{ res
       headers: { Authorization: "Bearer " + key },
       redirect: "error",
       cache: "no-store",
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(60000)]),
     });
+    const upstreamContentType = response.headers.get("content-type") || "application/json";
+    const contentDisposition = response.headers.get("content-disposition");
+    const headers: Record<string, string> = {
+      "Content-Type": upstreamContentType,
+      "Cache-Control": "no-store",
+    };
+    if (contentDisposition) {
+      headers["Content-Disposition"] = contentDisposition;
+    }
     return new Response(response.body, {
       status: response.status,
-      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+      headers,
     });
   } catch {
     return Response.json({ error: "Catalog service is unavailable." }, { status: 503 });

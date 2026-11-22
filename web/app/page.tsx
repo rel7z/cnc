@@ -1,7 +1,7 @@
 "use client";
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 
-type Site = { url: string; host: string };
+type Site = { url: string; host: string; evidence?: string[] };
 type Observation = { source: string; imported_at: string; evidence: string[] };
 
 type IntelSnippetLine = { line_number: number; content: string; is_match: boolean };
@@ -101,12 +101,16 @@ export default function Page() {
   const [intelHasMore, setIntelHasMore] = useState(false);
   const [intelBusy, setIntelBusy] = useState(false);
   const [intelError, setIntelError] = useState("");
+  const [expandedSnippets, setExpandedSnippets] = useState<Record<string, boolean>>({});
+  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
 
   // Full Source View Modal
   const [viewSourceUrl, setViewSourceUrl] = useState("");
   const [sourceData, setSourceData] = useState<IntelSourceData | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
   const [sourceCopied, setSourceCopied] = useState(false);
+  const [sourceSearch, setSourceSearch] = useState("");
+  const [wrapSourceLines, setWrapSourceLines] = useState(true);
 
   // Tab 2: Live Scanner & Crawler State
   const [scanTargetUrl, setScanTargetUrl] = useState("");
@@ -126,6 +130,7 @@ export default function Page() {
   const [crawlerLimit, setCrawlerLimit] = useState(0);
   const [crawlerActionBusy, setCrawlerActionBusy] = useState(false);
   const [recentFeed, setRecentFeed] = useState<CrawlerRecentItem[]>([]);
+  const [feedSearch, setFeedSearch] = useState("");
   const [resourceInfo, setResourceInfo] = useState<ResourceInfo | null>(null);
   const [resourceBusy, setResourceBusy] = useState(false);
   const [selectedProfile, setSelectedProfile] = useState<string>("high");
@@ -144,6 +149,17 @@ export default function Page() {
   const [catalogRefresh, setCatalogRefresh] = useState(0);
   const [selectedObsUrl, setSelectedObsUrl] = useState("");
   const [observations, setObservations] = useState<Observation[]>([]);
+
+  // Keyboard navigation for modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && viewSourceUrl) {
+        setViewSourceUrl("");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [viewSourceUrl]);
 
   // Load General Stats & Crawler Status
   const loadGeneralStats = useCallback(async () => {
@@ -329,6 +345,7 @@ export default function Page() {
   useEffect(() => {
     if (!viewSourceUrl) {
       setSourceData(null);
+      setSourceSearch("");
       return;
     }
     const abort = new AbortController();
@@ -364,6 +381,7 @@ export default function Page() {
           page: String(page),
           limit: String(pageSize),
           wordpress: wordpress ? "1" : "0",
+          with_evidence: "1",
         });
         const res = await fetch("/api/catalog/sites?" + q, { signal: abort.signal });
         const val = await res.json();
@@ -402,9 +420,11 @@ export default function Page() {
   }, [selectedObsUrl]);
 
   // Handle On-Demand Live Scan
-  const handleLiveScan = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!scanTargetUrl) return;
+  const handleLiveScan = async (e?: React.FormEvent, customUrl?: string) => {
+    if (e) e.preventDefault();
+    const target = customUrl || scanTargetUrl;
+    if (!target) return;
+    setScanTargetUrl(target);
     setScanBusy(true);
     setScanError("");
     setScanResult(null);
@@ -412,7 +432,7 @@ export default function Page() {
       const res = await fetch("/api/catalog/intel-scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: scanTargetUrl }),
+        body: JSON.stringify({ url: target }),
       });
       const data = await res.json();
       if (!res.ok) throw Error(data.error || "Scan failed");
@@ -431,39 +451,45 @@ export default function Page() {
     setIntelPage(1);
   };
 
-  // Export search results
-  const handleExportIntel = () => {
+  const handleCopyUrl = (url: string) => {
+    navigator.clipboard.writeText(url);
+    setCopiedUrl(url);
+    setTimeout(() => setCopiedUrl(null), 2000);
+  };
+
+  // Direct API .txt and JSON download from database
+  const handleDownloadTxt = (params: Record<string, string>) => {
+    const q = new URLSearchParams({ format: "txt", ...params });
+    window.location.href = "/api/catalog/export?" + q.toString();
+  };
+
+  const handleExportIntel = (format: "txt" | "json" = "txt", field: "url" | "host" = "url") => {
+    if (format === "txt") {
+      handleDownloadTxt({
+        q: intelQuery,
+        signature: selectedSignature,
+        field,
+      });
+      return;
+    }
     if (!intelResults.length) return;
-    const urls = intelResults.map((r) => r.url).join("\n");
-    const blob = new Blob([urls], { type: "text/plain;charset=utf-8" });
+    const content = JSON.stringify(intelResults, null, 2);
+    const blob = new Blob([content], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `intel-${(intelQuery || selectedSignature || "results").replace(/[^a-zA-Z0-9]/g, "-")}.txt`;
+    a.download = `intel-${(intelQuery || selectedSignature || "results").replace(/[^a-zA-Z0-9]/g, "-")}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  // Export catalog
-  const handleExportCatalog = async () => {
-    try {
-      const q = new URLSearchParams({
-        host: filter,
-        wordpress: wordpress ? "1" : "0",
-      });
-      const res = await fetch("/api/catalog/export?" + q);
-      if (res.ok) {
-        const data = await res.json();
-        const urls = (data.urls || []).join("\n");
-        const blob = new Blob([urls], { type: "text/plain;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `catalog-export-${new Date().toISOString().slice(0, 10)}.txt`;
-        a.click();
-        URL.revokeObjectURL(url);
-      }
-    } catch {}
+  // Export catalog directly from database
+  const handleExportCatalog = (field: "url" | "host" = "url") => {
+    handleDownloadTxt({
+      host: filter,
+      wordpress: wordpress ? "1" : "0",
+      field,
+    });
   };
 
   const highlightMatches = (text: string, query: string) => {
@@ -493,28 +519,58 @@ export default function Page() {
 
   const catalogTotalPages = stats?.urls && !filter && !wordpress ? Math.ceil(stats.urls / pageSize) : null;
 
+  // Filtered recent activity feed
+  const filteredFeed = useMemo(() => {
+    if (!feedSearch.trim()) return recentFeed;
+    const s = feedSearch.toLowerCase();
+    return recentFeed.filter(
+      (item) => item.url.toLowerCase().includes(s) || item.title?.toLowerCase().includes(s) || item.signatures.some((sig) => sig.toLowerCase().includes(s))
+    );
+  }, [recentFeed, feedSearch]);
+
+  // Matching lines count in modal viewer
+  const modalMatchesCount = useMemo(() => {
+    const q = (sourceSearch || intelQuery).trim().toLowerCase();
+    if (!sourceData || !q) return 0;
+    return sourceData.html.toLowerCase().split(q).length - 1;
+  }, [sourceData, sourceSearch, intelQuery]);
+
   return (
     <>
       <header>
-        <div>
-          <h1>Internet Map</h1>
-          <span>PublicWWW HTML Source Intelligence & 12.25M .org Catalog</span>
+        <div className="brand-container">
+          <div className="brand-logo">⚡</div>
+          <div>
+            <h1>Internet Map</h1>
+            <span className="subtitle">PublicWWW HTML Source Intelligence &amp; 12.25M .org Catalog</span>
+          </div>
         </div>
-        <div style={{ display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
+
+        <div className="header-status">
           {crawlerStatus.running ? (
-            <span className="pulse-indicator">
+            <span className="status-pill active">
               <span className="pulse-dot"></span>
               Crawler Active ({crawlerStatus.speed} req/s)
             </span>
           ) : (
-            <span style={{ color: "#70899e", fontSize: 13 }}>⏸ Crawler Idle</span>
+            <span className="status-pill">⏸ Crawler Idle</span>
           )}
           {intelStats && (
-            <span style={{ color: "#78dccc", fontSize: 13 }}>
-              ⚡ <strong>{intelStats.total_pages.toLocaleString()}</strong> HTML Pages Indexed (
-              {(intelStats.total_bytes / (1024 * 1024)).toFixed(1)} MB)
+            <span className="status-pill intel">
+              ⚡ <strong>{intelStats.total_pages.toLocaleString()}</strong> HTML Pages ({((intelStats.total_bytes || 0) / (1024 * 1024)).toFixed(1)} MB)
             </span>
           )}
+          <button
+            onClick={() => {
+              void loadGeneralStats();
+              setCatalogRefresh((v) => v + 1);
+            }}
+            title="Refresh All Statistics"
+            style={{ padding: "6px 10px", fontSize: 13 }}
+            className="secondary"
+          >
+            ↻
+          </button>
         </div>
       </header>
 
@@ -526,18 +582,21 @@ export default function Page() {
             onClick={() => setActiveTab("intel")}
           >
             ⚡ HTML Source Intel (PublicWWW)
+            {intelStats && <span className="tab-badge">{(intelStats.total_pages / 1000).toFixed(0)}k</span>}
           </button>
           <button
             className={`tab-btn ${activeTab === "scanner" ? "active" : ""}`}
             onClick={() => setActiveTab("scanner")}
           >
-            🔍 Live Scanner & Crawler Control
+            🔍 Live Scanner &amp; Crawler Control
+            {crawlerStatus.running && <span className="pulse-dot" style={{ width: 6, height: 6 }}></span>}
           </button>
           <button
             className={`tab-btn ${activeTab === "catalog" ? "active" : ""}`}
             onClick={() => setActiveTab("catalog")}
           >
-            🌐 Catalog Domains ({stats?.urls ? stats.urls.toLocaleString() : "12.2M"})
+            🌐 Catalog Domains
+            {stats?.urls && <span className="tab-badge">{(stats.urls / 1000000).toFixed(1)}M</span>}
           </button>
         </div>
 
@@ -545,8 +604,8 @@ export default function Page() {
         {activeTab === "intel" && (
           <section>
             <div style={{ marginBottom: 18 }}>
-              <h2 style={{ fontSize: 20, marginBottom: 6 }}>Source Code Intelligence Engine</h2>
-              <p style={{ color: "#93a8b9", margin: 0, fontSize: 14 }}>
+              <h2>Source Code Intelligence Engine</h2>
+              <p style={{ color: "#8fa8be", margin: 0, fontSize: 14 }}>
                 Search through indexed HTML source code for tracking codes, JavaScript snippets, AdSense, CMS tags, or specific text phrases.
               </p>
             </div>
@@ -560,13 +619,38 @@ export default function Page() {
               }}
               style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}
             >
-              <input
-                type="search"
-                value={intelInput}
-                onChange={(e) => setIntelInput(e.target.value)}
-                placeholder="Search HTML source (e.g. gtag, adsbygoogle, wp-content, UA-1234, turnstile, meta generator)..."
-                style={{ fontSize: 15, padding: "12px 16px", flex: "1 1 300px" }}
-              />
+              <div style={{ flex: "1 1 340px", display: "flex", position: "relative", alignItems: "center" }}>
+                <input
+                  type="search"
+                  value={intelInput}
+                  onChange={(e) => setIntelInput(e.target.value)}
+                  placeholder="Search HTML source (e.g. gtag, adsbygoogle, wp-content, UA-1234, turnstile, meta generator)..."
+                  style={{ fontSize: 15, padding: "12px 38px 12px 16px", width: "100%" }}
+                />
+                {intelInput && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIntelInput("");
+                      setIntelQuery("");
+                      setIntelPage(1);
+                    }}
+                    style={{
+                      position: "absolute",
+                      right: 10,
+                      background: "none",
+                      border: "none",
+                      color: "#6b8296",
+                      padding: 4,
+                      fontSize: 16,
+                    }}
+                    title="Clear input"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
               <select
                 value={selectedSignature}
                 onChange={(e) => {
@@ -582,14 +666,32 @@ export default function Page() {
                   </option>
                 ))}
               </select>
+
               <button className="primary" style={{ padding: "12px 24px" }} disabled={intelBusy}>
                 {intelBusy ? "Searching..." : "Search Code"}
               </button>
+
+              {(intelQuery || selectedSignature) && (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => {
+                    setIntelInput("");
+                    setIntelQuery("");
+                    setSelectedSignature("");
+                    setIntelPage(1);
+                  }}
+                  style={{ padding: "12px 16px" }}
+                  title="Reset all filters"
+                >
+                  Reset
+                </button>
+              )}
             </form>
 
             {/* PublicWWW Preset Chips */}
             <div className="chips-container">
-              <span style={{ fontSize: 12, color: "#70899e", marginRight: 4 }}>Example queries:</span>
+              <span style={{ fontSize: 12, color: "#6b8296", marginRight: 4 }}>Example queries:</span>
               {[
                 "gtag('config'",
                 "adsbygoogle",
@@ -602,7 +704,12 @@ export default function Page() {
                 "tailwindcss",
                 "js.stripe.com",
               ].map((chip) => (
-                <button key={chip} type="button" className="chip" onClick={() => handleIntelPreset(chip)}>
+                <button
+                  key={chip}
+                  type="button"
+                  className={`chip ${intelQuery === chip ? "active" : ""}`}
+                  onClick={() => handleIntelPreset(chip)}
+                >
                   {chip}
                 </button>
               ))}
@@ -618,82 +725,136 @@ export default function Page() {
                   {intelQuery ? <> containing code matching &ldquo;<strong>{intelQuery}</strong>&rdquo;</> : ""}
                   {selectedSignature ? <> with technology &ldquo;<strong>{selectedSignature}</strong>&rdquo;</> : ""}
                 </p>
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   {intelResults.length > 0 && (
-                    <button onClick={handleExportIntel} style={{ fontSize: 12, padding: "5px 12px" }}>
-                      ⬇ Export URLs
-                    </button>
+                    <>
+                      <button onClick={() => handleExportIntel("txt", "url")} style={{ fontSize: 12, padding: "5px 12px" }} title="Download all matching URLs as a plain text file">
+                        ⬇ Download URLs (.txt)
+                      </button>
+                      <button onClick={() => handleExportIntel("txt", "host")} style={{ fontSize: 12, padding: "5px 12px" }} title="Download all matching hostnames as a plain text file">
+                        ⬇ Download Hosts (.txt)
+                      </button>
+                      <button onClick={() => handleExportIntel("json")} style={{ fontSize: 12, padding: "5px 12px" }} title="Export loaded page items as JSON">
+                        ⬇ Export JSON
+                      </button>
+                    </>
                   )}
-                  <span style={{ fontSize: 13, color: "#6a8296" }}>Page {intelPage}</span>
+                  <span style={{ fontSize: 13, color: "#6a8296", marginLeft: 4 }}>Page {intelPage}</span>
                 </div>
               </div>
             )}
 
-            {intelBusy && <p style={{ color: "#78dccc", padding: "20px 0" }}>Searching HTML source database…</p>}
+            {intelBusy && (
+              <div style={{ padding: "40px 20px", textAlign: "center", background: "#0f1620", borderRadius: 10, border: "1px solid #1c2b3a" }}>
+                <span className="pulse-indicator" style={{ fontSize: 15 }}>
+                  <span className="pulse-dot"></span> Searching HTML source database…
+                </span>
+              </div>
+            )}
 
             {/* Results Cards (PublicWWW Style) */}
             <div style={{ marginTop: 12 }}>
-              {intelResults.map((item) => (
-                <div key={item.url} className="intel-card">
-                  <div className="intel-card-header">
-                    <div>
-                      <h3 className="intel-title">{item.title || item.host}</h3>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="intel-url">
-                          {item.url} ↗
-                        </a>
-                        <span className="badge badge-status">HTTP {item.status_code}</span>
-                        <span style={{ fontSize: 12, color: "#70899e" }}>
-                          {(item.content_length / 1024).toFixed(1)} KB · Scanned {new Date(item.scanned_at).toLocaleDateString()}
-                        </span>
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      <span className="badge badge-count">{item.match_count} match{item.match_count === 1 ? "" : "es"}</span>
-                      <button
-                        onClick={() => setViewSourceUrl(item.url)}
-                        style={{ padding: "6px 12px", fontSize: 12 }}
-                      >
-                        View Source
-                      </button>
-                    </div>
-                  </div>
+              {intelResults.map((item) => {
+                const isExpanded = expandedSnippets[item.url] || false;
+                const visibleSnippets = isExpanded ? item.snippets : item.snippets.slice(0, 2);
 
-                  {/* Technology Badges */}
-                  {item.signatures.length > 0 && (
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "8px 0" }}>
-                      {item.signatures.map((sig) => (
-                        <span key={sig} className="badge badge-tech">
-                          {sig}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* PublicWWW Code Snippet Box */}
-                  {item.snippets.map((snip, sIdx) => (
-                    <div key={sIdx} className="code-box">
-                      {snip.context.map((line, lIdx) => (
-                        <div
-                          key={lIdx}
-                          className={`code-line ${line.is_match ? "match-line" : ""}`}
-                        >
-                          <span className="line-no">{line.line_number}</span>
-                          <span className="line-content">
-                            {line.is_match && intelQuery ? highlightMatches(line.content, intelQuery) : line.content}
+                return (
+                  <div key={item.url} className="intel-card">
+                    <div className="intel-card-header">
+                      <div>
+                        <h3 className="intel-title">{item.title || item.host}</h3>
+                        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                          <a href={item.url} target="_blank" rel="noopener noreferrer" className="intel-url">
+                            {item.url} ↗
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyUrl(item.url)}
+                            style={{ padding: "2px 7px", fontSize: 11, background: "#162330", border: "1px solid #283e54", borderRadius: 4 }}
+                            title="Copy URL"
+                          >
+                            {copiedUrl === item.url ? "✓ Copied" : "Copy"}
+                          </button>
+                          <span className="badge badge-status">HTTP {item.status_code}</span>
+                          <span style={{ fontSize: 12, color: "#70899e" }}>
+                            {(item.content_length / 1024).toFixed(1)} KB · Scanned {new Date(item.scanned_at).toLocaleDateString()}
                           </span>
                         </div>
-                      ))}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span className="badge badge-count">{item.match_count} match{item.match_count === 1 ? "" : "es"}</span>
+                        <button
+                          onClick={() => setViewSourceUrl(item.url)}
+                          style={{ padding: "6px 12px", fontSize: 12 }}
+                          className="secondary"
+                        >
+                          View Source
+                        </button>
+                      </div>
                     </div>
-                  ))}
-                </div>
-              ))}
+
+                    {/* Technology Badges */}
+                    {item.signatures.length > 0 && (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "8px 0" }}>
+                        {item.signatures.map((sig) => (
+                          <span key={sig} className="badge badge-tech">
+                            {sig}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* PublicWWW Code Snippet Box */}
+                    {visibleSnippets.map((snip, sIdx) => (
+                      <div key={sIdx} className="code-box">
+                        {snip.context.map((line, lIdx) => (
+                          <div
+                            key={lIdx}
+                            className={`code-line ${line.is_match ? "match-line" : ""}`}
+                          >
+                            <span className="line-no">{line.line_number}</span>
+                            <span className="line-content">
+                              {line.is_match && intelQuery ? highlightMatches(line.content, intelQuery) : line.content}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+
+                    {/* Expand/Collapse extra snippets */}
+                    {item.snippets.length > 2 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedSnippets((prev) => ({
+                            ...prev,
+                            [item.url]: !isExpanded,
+                          }))
+                        }
+                        style={{ marginTop: 8, fontSize: 12, padding: "4px 10px", background: "none", border: "1px dashed #243547", color: "#78dccc" }}
+                      >
+                        {isExpanded ? "▲ Show fewer snippets" : `▼ Show all ${item.snippets.length} code snippets`}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
 
               {!intelBusy && (intelQuery || selectedSignature) && intelResults.length === 0 && (
-                <div style={{ padding: 40, textAlign: "center", background: "#111a24", borderRadius: 10, border: "1px dashed #243547" }}>
+                <div style={{ padding: 40, textAlign: "center", background: "#0f1620", borderRadius: 10, border: "1px dashed #1c2b3a" }}>
                   <p style={{ color: "#8ab4cc", fontSize: 16 }}>No matching HTML source found.</p>
                   <p style={{ color: "#546e7a", fontSize: 13, marginTop: 6 }}>
-                    Tip: Use the &ldquo;Live Scanner & Crawler Control&rdquo; tab to fetch and index new domains into the intelligence database!
+                    Tip: Use the &ldquo;Live Scanner &amp; Crawler Control&rdquo; tab to fetch and index new domains into the intelligence database!
+                  </p>
+                </div>
+              )}
+
+              {!intelBusy && !intelQuery && !selectedSignature && (
+                <div style={{ padding: 50, textAlign: "center", background: "#0f1620", borderRadius: 10, border: "1px solid #1a2838" }}>
+                  <div style={{ fontSize: 32, marginBottom: 12 }}>⚡</div>
+                  <h3 style={{ fontSize: 18, color: "#f0f6fc", margin: "0 0 8px" }}>PublicWWW HTML Intelligence Search</h3>
+                  <p style={{ color: "#8fa8be", maxWidth: 560, margin: "0 auto 20px", fontSize: 14 }}>
+                    Type any keyword, tracking ID, or code snippet in the box above, or click one of the preset chips like <code>gtag(&apos;config&apos;</code> or <code>adsbygoogle</code>.
                   </p>
                 </div>
               )}
@@ -724,15 +885,17 @@ export default function Page() {
         {activeTab === "scanner" && (
           <section>
             <div style={{ marginBottom: 20 }}>
-              <h2 style={{ fontSize: 20, marginBottom: 6 }}>Live HTML Scanner & Catalog Crawler Control</h2>
-              <p style={{ color: "#93a8b9", margin: 0, fontSize: 14 }}>
+              <h2>Live HTML Scanner &amp; Catalog Crawler Control</h2>
+              <p style={{ color: "#8fa8be", margin: 0, fontSize: 14 }}>
                 Control the high-throughput asynchronous catalog crawler or inspect any URL live to extract technology forensics.
               </p>
             </div>
 
             {/* On-Demand URL Inspector */}
             <div className="crawler-panel">
-              <h3 style={{ fontSize: 16, marginTop: 0, marginBottom: 12 }}>⚡ On-Demand URL Inspector</h3>
+              <h3 style={{ fontSize: 16, marginTop: 0, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                <span>⚡ On-Demand URL Inspector</span>
+              </h3>
               <form onSubmit={handleLiveScan}>
                 <input
                   type="text"
@@ -746,19 +909,45 @@ export default function Page() {
                 </button>
               </form>
 
+              {/* Quick sample URLs */}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
+                <span style={{ fontSize: 12, color: "#6b8296" }}>Quick test:</span>
+                {[
+                  "https://wordpress.org/",
+                  "https://wikipedia.org/",
+                  "https://eff.org/",
+                  "https://news.ycombinator.com/",
+                  "https://archive.org/",
+                ].map((sample) => (
+                  <button
+                    key={sample}
+                    type="button"
+                    onClick={() => handleLiveScan(undefined, sample)}
+                    disabled={scanBusy}
+                    style={{ fontSize: 11, padding: "3px 8px", background: "#111a24", border: "1px solid #1f3042", borderRadius: 4 }}
+                  >
+                    {sample.replace("https://", "").replace("/", "")}
+                  </button>
+                ))}
+              </div>
+
               {scanError && <p role="alert" style={{ color: "#e74c3c", marginTop: 12 }}>{scanError}</p>}
 
               {scanResult && (
-                <div style={{ marginTop: 20, padding: 16, background: "#0c1219", borderRadius: 8, border: "1px solid #1c2b3a" }}>
+                <div style={{ marginTop: 20, padding: 18, background: "#0a1017", borderRadius: 8, border: "1px solid #1c2b3a" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <h4 style={{ margin: 0, color: "#6ce0c7" }}>✓ Successfully Indexed into Intel</h4>
+                    <h4 style={{ margin: 0, color: "#6ce0c7", fontSize: 15 }}>✓ Successfully Indexed into Intel</h4>
                     <span className="badge badge-status">HTTP {scanResult.status_code}</span>
                   </div>
                   <table style={{ marginTop: 12 }}>
                     <tbody>
                       <tr>
                         <td style={{ width: 140, color: "#70899e" }}>URL</td>
-                        <td><a href={scanResult.url} target="_blank" rel="noopener noreferrer" style={{ color: "#78dccc" }}>{scanResult.url} ↗</a></td>
+                        <td>
+                          <a href={scanResult.url} target="_blank" rel="noopener noreferrer" style={{ color: "#78dccc" }}>
+                            {scanResult.url} ↗
+                          </a>
+                        </td>
                       </tr>
                       <tr>
                         <td style={{ color: "#70899e" }}>Page Title</td>
@@ -782,9 +971,20 @@ export default function Page() {
                       </tr>
                     </tbody>
                   </table>
-                  <div style={{ marginTop: 14 }}>
-                    <button onClick={() => setViewSourceUrl(scanResult.url)} style={{ fontSize: 13 }}>
+                  <div style={{ marginTop: 14, display: "flex", gap: 10 }}>
+                    <button onClick={() => setViewSourceUrl(scanResult.url)} style={{ fontSize: 13 }} className="secondary">
                       Inspect Full HTML Source
+                    </button>
+                    <button
+                      onClick={() => {
+                        setIntelInput(scanResult.host);
+                        setIntelQuery(scanResult.host);
+                        setActiveTab("intel");
+                      }}
+                      style={{ fontSize: 13 }}
+                      className="secondary"
+                    >
+                      Search in Intel
                     </button>
                   </div>
                 </div>
@@ -814,14 +1014,14 @@ export default function Page() {
               </div>
 
               {/* Server Resource Controller & Isolation Panel (systemd cgroups v2) */}
-              <div style={{ background: "#0c1520", border: "1px solid #1f354a", borderRadius: 8, padding: "16px 18px", margin: "16px 0" }}>
+              <div style={{ background: "#0a111a", border: "1px solid #1a2c3d", borderRadius: 8, padding: "16px 18px", margin: "16px 0" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
                   <div>
                     <h4 style={{ margin: "0 0 4px", fontSize: 15, display: "flex", alignItems: "center", gap: 8, color: "#6ce0c7" }}>
-                      🛡️ Droplet Resource Controller & Isolation
+                      🛡️ Droplet Resource Controller &amp; Isolation
                     </h4>
                     <p style={{ margin: 0, fontSize: 13, color: "#8ab4cc" }}>
-                      Hardware isolation enforced at the Linux kernel level (systemd cgroups v2). The background crawler cannot starve other services or exceed resource quotas.
+                      Hardware isolation enforced at Linux kernel level (cgroups v2). Leaves &gt;2.2 CPU cores for OS/CNC.
                     </p>
                   </div>
                   <span style={{ fontSize: 11, background: "rgba(108,224,199,0.12)", color: "#6ce0c7", padding: "4px 10px", borderRadius: 12, border: "1px solid #2e695d", fontWeight: 600 }}>
@@ -831,78 +1031,55 @@ export default function Page() {
 
                 {/* Telemetry Grid */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 14 }}>
-                  <div style={{ background: "#080e16", padding: "10px 12px", borderRadius: 6, border: "1px solid #182837" }}>
+                  <div style={{ background: "#070c12", padding: "10px 12px", borderRadius: 6, border: "1px solid #14212e" }}>
                     <span style={{ fontSize: 12, color: "#728fa5", display: "block" }}>CPU Quota Cap</span>
                     <strong style={{ fontSize: 14, color: "#e4edf5" }}>180% (1.8 cores max)</strong>
-                    <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>&gt;2.2 cores reserved for OS/CNC</span>
+                    <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>&gt;2.2 cores reserved</span>
                   </div>
-                  <div style={{ background: "#080e16", padding: "10px 12px", borderRadius: 6, border: "1px solid #182837" }}>
+                  <div style={{ background: "#070c12", padding: "10px 12px", borderRadius: 6, border: "1px solid #14212e" }}>
                     <span style={{ fontSize: 12, color: "#728fa5", display: "block" }}>RAM Memory Cap</span>
                     <strong style={{ fontSize: 14, color: "#e4edf5" }}>1,200 MB max</strong>
-                    <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>Protects droplet from OOM</span>
+                    <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>Protects from OOM</span>
                   </div>
-                  <div style={{ background: "#080e16", padding: "10px 12px", borderRadius: 6, border: "1px solid #182837" }}>
+                  <div style={{ background: "#070c12", padding: "10px 12px", borderRadius: 6, border: "1px solid #14212e" }}>
                     <span style={{ fontSize: 12, color: "#728fa5", display: "block" }}>Live Memory (RSS)</span>
                     <strong style={{ fontSize: 14, color: "#55efc4" }}>
                       {resourceInfo?.telemetry.memory_mb ? `${resourceInfo.telemetry.memory_mb} MB` : "—"}
                     </strong>
                     <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>Real-time process footprint</span>
                   </div>
-                  <div style={{ background: "#080e16", padding: "10px 12px", borderRadius: 6, border: "1px solid #182837" }}>
+                  <div style={{ background: "#070c12", padding: "10px 12px", borderRadius: 6, border: "1px solid #14212e" }}>
                     <span style={{ fontSize: 12, color: "#728fa5", display: "block" }}>Service Priority</span>
                     <strong style={{ fontSize: 14, color: "#e4edf5" }}>Nice 5 / Weight 50</strong>
-                    <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>Yields CPU to web queries</span>
+                    <span style={{ fontSize: 11, color: "#546d81", display: "block" }}>Yields CPU to queries</span>
                   </div>
                 </div>
 
                 {/* Profile Selector Buttons */}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                   <span style={{ fontSize: 12, color: "#8fa8be", fontWeight: 500 }}>Select Resource Profile:</span>
-                  <button
-                    type="button"
-                    className={selectedProfile === "eco" ? "primary" : ""}
-                    onClick={() => handleApplyProfile("eco", 150)}
-                    disabled={resourceBusy}
-                    style={{ fontSize: 12, padding: "6px 12px" }}
-                    title="Gentle scanning, uses ~0.4 CPU core"
-                  >
-                    🍃 Eco (150 Workers)
-                  </button>
-                  <button
-                    type="button"
-                    className={selectedProfile === "balanced" ? "primary" : ""}
-                    onClick={() => handleApplyProfile("balanced", 350)}
-                    disabled={resourceBusy}
-                    style={{ fontSize: 12, padding: "6px 12px" }}
-                    title="Steady scanning, uses ~0.9 CPU core"
-                  >
-                    ⚖️ Balanced (350 Workers)
-                  </button>
-                  <button
-                    type="button"
-                    className={selectedProfile === "high" ? "primary" : ""}
-                    onClick={() => handleApplyProfile("high", 600)}
-                    disabled={resourceBusy}
-                    style={{ fontSize: 12, padding: "6px 12px" }}
-                    title="Fast scanning, uses ~1.4 CPU cores"
-                  >
-                    🚀 High Speed (600 Workers)
-                  </button>
-                  <button
-                    type="button"
-                    className={selectedProfile === "turbo" ? "primary" : ""}
-                    onClick={() => handleApplyProfile("turbo", 1000)}
-                    disabled={resourceBusy}
-                    style={{ fontSize: 12, padding: "6px 12px" }}
-                    title="Turbo, capped at 1.8 cores by cgroups"
-                  >
-                    ⚡ Turbo (1,000 Workers)
-                  </button>
+                  {[
+                    { id: "eco", name: "🍃 Eco (150 Workers)", workers: 150 },
+                    { id: "balanced", name: "⚖️ Balanced (350 Workers)", workers: 350 },
+                    { id: "high", name: "🚀 High Speed (600 Workers)", workers: 600 },
+                    { id: "turbo", name: "⚡ Turbo (1,000 Workers)", workers: 1000 },
+                  ].map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={selectedProfile === p.id ? "primary" : "secondary"}
+                      onClick={() => handleApplyProfile(p.id, p.workers)}
+                      disabled={resourceBusy}
+                      style={{ fontSize: 12, padding: "6px 12px" }}
+                    >
+                      {p.name}
+                    </button>
+                  ))}
                 </div>
               </div>
 
               {/* Live Crawler Configuration & Status */}
-              <div style={{ display: "flex", gap: 20, alignItems: "center", margin: "16px 0", flexWrap: "wrap", background: "#0c131a", padding: "12px 16px", borderRadius: 8 }}>
+              <div style={{ display: "flex", gap: 20, alignItems: "center", margin: "16px 0", flexWrap: "wrap", background: "#090f17", padding: "12px 16px", borderRadius: 8, border: "1px solid #182635" }}>
                 <label style={{ fontSize: 13, color: "#93a8b9" }}>
                   Concurrency:
                   <select
@@ -913,13 +1090,14 @@ export default function Page() {
                   >
                     <option value={100}>100 Workers</option>
                     <option value={200}>200 Workers</option>
-                    <option value={500}>500 Workers (High Speed Recommended)</option>
+                    <option value={350}>350 Workers (Balanced)</option>
+                    <option value={600}>600 Workers (High Speed)</option>
                     <option value={1000}>1,000 Workers (Turbo)</option>
                   </select>
                 </label>
 
                 <label style={{ fontSize: 13, color: "#93a8b9" }}>
-                  Limit:
+                  Batch Limit:
                   <select
                     value={crawlerLimit}
                     onChange={(e) => setCrawlerLimit(Number(e.target.value))}
@@ -942,30 +1120,57 @@ export default function Page() {
 
               {/* Crawler Metrics */}
               <div id="metrics" style={{ margin: "20px 0" }}>
-                <div>
+                <div className="metric-card">
                   <strong>{crawlerStatus.scanned.toLocaleString()}</strong>
-                  URLs Scanned in Session
+                  <span>URLs Scanned in Session</span>
                 </div>
-                <div>
+                <div className="metric-card">
                   <strong>{intelStats ? intelStats.total_pages.toLocaleString() : "—"}</strong>
-                  Active Pages Indexed into Intel
+                  <span>Active Pages Indexed into Intel</span>
                 </div>
-                <div>
+                <div className="metric-card">
                   <strong>{crawlerStatus.wordpress_found.toLocaleString()}</strong>
-                  WordPress Detections
+                  <span>WordPress Detections</span>
                 </div>
-                <div>
+                <div className="metric-card">
                   <strong>{crawlerStatus.running ? `${crawlerStatus.speed} req/s` : "Idle"}</strong>
-                  Scanning Speed
+                  <span>Scanning Speed</span>
                 </div>
               </div>
 
               {/* Live Streaming Activity Feed */}
               <div style={{ marginTop: 24 }}>
-                <h4 style={{ fontSize: 14, color: "#8ab4cc", marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
-                  <span>Live Streaming Activity (Latest Crawled Pages)</span>
-                  {crawlerStatus.running && <span className="pulse-indicator"><span className="pulse-dot"></span> Live Feed</span>}
-                </h4>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
+                  <h4 style={{ fontSize: 14, color: "#8ab4cc", margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span>Live Streaming Activity (Latest Crawled Pages)</span>
+                    {crawlerStatus.running && <span className="pulse-indicator"><span className="pulse-dot"></span> Live</span>}
+                  </h4>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadTxt({ scanned: "1" })}
+                      style={{ fontSize: 11, padding: "5px 10px" }}
+                      title="Download all scanned URLs from database as .txt"
+                    >
+                      ⬇ Download Scanned (.txt)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadTxt({ scanned: "1", wordpress: "1" })}
+                      style={{ fontSize: 11, padding: "5px 10px" }}
+                      title="Download all discovered WordPress URLs from database as .txt"
+                    >
+                      ⬇ Download WordPress (.txt)
+                    </button>
+                    <input
+                      type="search"
+                      placeholder="Filter feed by URL, title, or tech..."
+                      value={feedSearch}
+                      onChange={(e) => setFeedSearch(e.target.value)}
+                      style={{ padding: "6px 12px", fontSize: 12, width: 200 }}
+                    />
+                  </div>
+                </div>
 
                 <table className="feed-table">
                   <thead>
@@ -973,11 +1178,12 @@ export default function Page() {
                       <th style={{ width: 80 }}>Status</th>
                       <th>URL / Title</th>
                       <th>Detected Tech</th>
-                      <th style={{ width: 120 }}>Size / Time</th>
+                      <th style={{ width: 140 }}>Size / Time</th>
+                      <th style={{ width: 90, textAlign: "center" }}>Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {recentFeed.map((item, idx) => (
+                    {filteredFeed.map((item, idx) => (
                       <tr key={idx}>
                         <td>
                           <span className={`badge ${item.status_code === 200 ? "badge-status" : "badge-tech"}`}>
@@ -1005,12 +1211,21 @@ export default function Page() {
                           {(item.content_length / 1024).toFixed(1)} KB<br />
                           {new Date(item.scanned_at).toLocaleTimeString()}
                         </td>
+                        <td style={{ textAlign: "center" }}>
+                          <button
+                            onClick={() => setViewSourceUrl(item.url)}
+                            style={{ padding: "3px 8px", fontSize: 11 }}
+                            className="secondary"
+                          >
+                            Source
+                          </button>
+                        </td>
                       </tr>
                     ))}
-                    {!recentFeed.length && (
+                    {!filteredFeed.length && (
                       <tr>
-                        <td colSpan={4} style={{ textAlign: "center", color: "#6a8296", padding: 24 }}>
-                          No crawl activity recorded yet. Click &ldquo;Start Crawler&rdquo; or &ldquo;Scan & Index&rdquo; above!
+                        <td colSpan={5} style={{ textAlign: "center", color: "#6a8296", padding: 24 }}>
+                          {feedSearch ? "No activity matching filter." : "No crawl activity recorded yet. Click «Start Crawler» or «Scan & Index» above!"}
                         </td>
                       </tr>
                     )}
@@ -1026,29 +1241,44 @@ export default function Page() {
           <section>
             <div className="controls">
               <h2 style={{ flex: 1 }}>Catalog Delegations (.org)</h2>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={handleExportCatalog} title="Export filtered domains to text file">
-                  ⬇ Export Domains
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={() => handleExportCatalog("url")}
+                  title="Download matching URLs as plain text (.txt)"
+                  className="secondary"
+                >
+                  ⬇ Download URLs (.txt)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExportCatalog("host")}
+                  title="Download matching hostnames as plain text (.txt)"
+                  className="secondary"
+                >
+                  ⬇ Download Hosts (.txt)
                 </button>
                 <button disabled={busy} onClick={() => setCatalogRefresh((v) => v + 1)}>
-                  Refresh
+                  ↻ Refresh
                 </button>
               </div>
             </div>
 
-            {catalogError && <p role="alert">{catalogError}</p>}
+            {catalogError && <p role="alert" style={{ color: "#e74c3c" }}>{catalogError}</p>}
 
             <div id="metrics">
-              {[
-                ["URLs", stats?.urls],
-                ["Dataset imports", stats?.imports],
-                ["WordPress evidence", stats?.wordpress],
-              ].map(([label, value]) => (
-                <div key={String(label)}>
-                  <strong>{typeof value === "number" ? value.toLocaleString() : "—"}</strong>
-                  {label}
-                </div>
-              ))}
+              <div className="metric-card">
+                <strong>{stats?.urls ? stats.urls.toLocaleString() : "—"}</strong>
+                <span>Total .org URLs in Catalog</span>
+              </div>
+              <div className="metric-card">
+                <strong>{stats?.imports ? stats.imports.toLocaleString() : "—"}</strong>
+                <span>Dataset Imports</span>
+              </div>
+              <div className="metric-card">
+                <strong>{stats?.wordpress ? stats.wordpress.toLocaleString() : "—"}</strong>
+                <span>WordPress Evidence Records</span>
+              </div>
             </div>
 
             <form
@@ -1057,6 +1287,7 @@ export default function Page() {
                 setPage(1);
                 setFilter(host);
               }}
+              style={{ margin: "20px 0" }}
             >
               <input
                 type="search"
@@ -1066,7 +1297,7 @@ export default function Page() {
                 placeholder="Search hostname (e.g. wikipedia, archive, eff, mozilla)"
               />
               {host && (
-                <button type="button" onClick={() => { setHost(""); setFilter(""); setPage(1); }} title="Clear search">
+                <button type="button" onClick={() => { setHost(""); setFilter(""); setPage(1); }} title="Clear search" className="secondary">
                   ✕
                 </button>
               )}
@@ -1079,7 +1310,7 @@ export default function Page() {
                     setPage(1);
                   }}
                 />
-                WordPress evidence
+                WordPress evidence only
               </label>
               <button className="primary" disabled={busy}>
                 Search
@@ -1087,7 +1318,7 @@ export default function Page() {
             </form>
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
-              <p role="status" aria-live="polite" style={{ margin: 0 }}>
+              <p role="status" aria-live="polite" style={{ margin: 0, fontSize: 13, color: "#8fa8be" }}>
                 {busy ? "Loading catalog…" : !catalogError ? `${sites.length} URLs shown (page ${page})` : ""}
               </p>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1099,12 +1330,12 @@ export default function Page() {
                     setPage(1);
                   }}
                   style={{
-                    background: "#131e29",
+                    background: "#111a24",
                     color: "#e4edf5",
-                    border: "1px solid #354655",
+                    border: "1px solid #273747",
                     borderRadius: 7,
-                    padding: "6px 10px",
-                    font: "inherit",
+                    padding: "5px 10px",
+                    fontSize: 13,
                   }}
                 >
                   <option value={25}>25</option>
@@ -1119,7 +1350,8 @@ export default function Page() {
                 <tr>
                   <th>URL</th>
                   <th>Hostname</th>
-                  <th style={{ width: 140, textAlign: "center" }}>Actions</th>
+                  <th>Evidence</th>
+                  <th style={{ width: 180, textAlign: "center" }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1130,24 +1362,50 @@ export default function Page() {
                         {site.url}
                       </button>
                     </td>
-                    <td>{site.host}</td>
+                    <td style={{ color: "#c5d8e8", fontSize: 13 }}>{site.host}</td>
+                    <td>
+                      {site.evidence && site.evidence.length > 0 ? (
+                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                          {site.evidence.map((ev, i) => (
+                            <span key={i} className="badge badge-tech" style={{ fontSize: 10 }}>
+                              {ev.replace("meta:", "").replace("resource:", "")}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span style={{ color: "#546e7a", fontSize: 11 }}>—</span>
+                      )}
+                    </td>
                     <td style={{ textAlign: "center" }}>
-                      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                      <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
                         <button
                           onClick={() => {
                             setScanTargetUrl(site.url);
                             setActiveTab("scanner");
                           }}
-                          style={{ padding: "3px 8px", fontSize: 12, border: "1px solid #283e52", borderRadius: 4 }}
+                          style={{ padding: "3px 8px", fontSize: 11 }}
+                          className="secondary"
                           title="Scan this site live"
                         >
                           Scan Live
+                        </button>
+                        <button
+                          onClick={() => {
+                            setIntelInput(site.host);
+                            setIntelQuery(site.host);
+                            setActiveTab("intel");
+                          }}
+                          style={{ padding: "3px 8px", fontSize: 11 }}
+                          className="secondary"
+                          title="Search in HTML Intel"
+                        >
+                          Intel
                         </button>
                         <a
                           href={site.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          style={{ color: "#81acb9", textDecoration: "none", fontSize: 14 }}
+                          style={{ color: "#81acb9", textDecoration: "none", fontSize: 13, padding: "3px 6px" }}
                           title="Open in new tab"
                         >
                           ↗
@@ -1158,7 +1416,9 @@ export default function Page() {
                 ))}
                 {!busy && !catalogError && !sites.length && (
                   <tr>
-                    <td colSpan={3}>No matching URLs found.</td>
+                    <td colSpan={4} style={{ textAlign: "center", padding: 30, color: "#6a8296" }}>
+                      No matching URLs found.
+                    </td>
                   </tr>
                 )}
               </tbody>
@@ -1176,7 +1436,7 @@ export default function Page() {
                   -10
                 </button>
               )}
-              <span>
+              <span style={{ fontSize: 13, color: "#8fa8be" }}>
                 Page {page}
                 {catalogTotalPages ? ` of ${catalogTotalPages.toLocaleString()}` : ""}
               </span>
@@ -1217,8 +1477,8 @@ export default function Page() {
             {/* Observations Drawer */}
             {selectedObsUrl && (
               <aside aria-label="Source observations">
-                <button onClick={() => setSelectedObsUrl("")} style={{ float: "right" }}>
-                  Close
+                <button onClick={() => setSelectedObsUrl("")} style={{ float: "right" }} className="secondary">
+                  ✕ Close
                 </button>
                 <h2>{selectedObsUrl}</h2>
                 {observations.map((o, i) => (
@@ -1232,16 +1492,8 @@ export default function Page() {
                         o.evidence.map((ev, ei) => (
                           <span
                             key={ei}
-                            style={{
-                              display: "inline-block",
-                              background: "#1e3040",
-                              color: "#78dccc",
-                              padding: "2px 8px",
-                              borderRadius: 4,
-                              fontSize: 12,
-                              marginRight: 6,
-                              marginBottom: 4,
-                            }}
+                            className="badge badge-tech"
+                            style={{ marginRight: 6, marginBottom: 4 }}
                           >
                             {ev}
                           </span>
@@ -1258,82 +1510,132 @@ export default function Page() {
           </section>
         )}
 
-        {/* FULL SOURCE CODE VIEWER MODAL */}
+        {/* FULL SOURCE CODE VIEWER MODAL WITH IN-PAGE SEARCH */}
         {viewSourceUrl && (
-          <dialog
-            open
-            style={{
-              position: "fixed",
-              top: "50%",
-              left: "50%",
-              transform: "translate(-50%, -50%)",
-              zIndex: 1000,
-              boxShadow: "0 20px 40px rgba(0,0,0,0.7)",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <div>
-                <h3 style={{ margin: 0, fontSize: 18, color: "#6ce0c7" }}>Source Code Inspector</h3>
-                <small style={{ color: "#8ab4cc" }}>{viewSourceUrl}</small>
-              </div>
-              <div style={{ display: "flex", gap: 10 }}>
-                {sourceData && (
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(sourceData.html);
-                      setSourceCopied(true);
-                      setTimeout(() => setSourceCopied(false), 2000);
-                    }}
-                    style={{ fontSize: 13 }}
-                  >
-                    {sourceCopied ? "✓ Copied!" : "Copy HTML"}
+          <>
+            <div className="modal-backdrop" onClick={() => setViewSourceUrl("")} />
+            <div className="source-modal">
+              <div className="source-modal-header">
+                <div>
+                  <h3 style={{ margin: 0, fontSize: 17, color: "#6ce0c7", display: "flex", alignItems: "center", gap: 8 }}>
+                    <span>Source Code Inspector</span>
+                  </h3>
+                  <small style={{ color: "#8ab4cc", fontFamily: "monospace" }}>{viewSourceUrl}</small>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  {sourceData && (
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(sourceData.html);
+                        setSourceCopied(true);
+                        setTimeout(() => setSourceCopied(false), 2000);
+                      }}
+                      style={{ fontSize: 12, padding: "6px 12px" }}
+                      className="secondary"
+                    >
+                      {sourceCopied ? "✓ Copied!" : "Copy HTML"}
+                    </button>
+                  )}
+                  <button onClick={() => setViewSourceUrl("")} style={{ fontSize: 13, padding: "6px 12px" }}>
+                    ✕ Close
                   </button>
-                )}
-                <button onClick={() => setViewSourceUrl("")} style={{ fontSize: 13 }}>
-                  ✕ Close
-                </button>
+                </div>
               </div>
-            </div>
 
-            {sourceLoading && <p style={{ color: "#78dccc" }}>Loading HTML source...</p>}
-
-            {sourceData && (
-              <>
-                <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12, flexWrap: "wrap", fontSize: 13, color: "#8ab4cc" }}>
-                  <span>Lines: <strong>{sourceData.line_count.toLocaleString()}</strong></span>
-                  <span>Title: <strong>{sourceData.title || "—"}</strong></span>
-                  <span>Status: <strong>HTTP {sourceData.status_code}</strong></span>
-                  {sourceData.signatures.map((sig) => (
-                    <span key={sig} className="badge badge-tech">{sig}</span>
-                  ))}
+              {sourceLoading && (
+                <div style={{ padding: 40, textAlign: "center" }}>
+                  <span className="pulse-indicator">
+                    <span className="pulse-dot"></span> Loading HTML source...
+                  </span>
                 </div>
-                <div
-                  style={{
-                    maxHeight: "60vh",
-                    overflowY: "auto",
-                    background: "#080c10",
-                    border: "1px solid #1c2733",
-                    borderRadius: 7,
-                    padding: 12,
-                    fontFamily: "ui-monospace,SFMono-Regular,Consolas,monospace",
-                    fontSize: 12,
-                    lineHeight: 1.5,
-                  }}
-                >
-                  {sourceData.html.split("\n").map((line, idx) => (
-                    <div key={idx} style={{ display: "flex", gap: 12 }}>
-                      <span style={{ color: "#495c6e", minWidth: 40, textAlign: "right", userSelect: "none" }}>
-                        {idx + 1}
-                      </span>
-                      <span style={{ color: "#c5d8e8", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
-                        {intelQuery ? highlightMatches(line, intelQuery) : line}
-                      </span>
+              )}
+
+              {sourceData && (
+                <div className="source-modal-body">
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", fontSize: 12, color: "#8ab4cc" }}>
+                      <span>Lines: <strong>{sourceData.line_count.toLocaleString()}</strong></span>
+                      <span>Title: <strong>{sourceData.title || "—"}</strong></span>
+                      <span className="badge badge-status">HTTP {sourceData.status_code}</span>
+                      {sourceData.signatures.map((sig) => (
+                        <span key={sig} className="badge badge-tech">{sig}</span>
+                      ))}
                     </div>
-                  ))}
+
+                    {/* In-Modal Search and Line Wrap Controls */}
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <input
+                        type="search"
+                        placeholder="Search in HTML source..."
+                        value={sourceSearch}
+                        onChange={(e) => setSourceSearch(e.target.value)}
+                        style={{ padding: "4px 10px", fontSize: 12, width: 180 }}
+                      />
+                      {modalMatchesCount > 0 && (
+                        <span style={{ fontSize: 11, color: "#f39c12", fontWeight: 600 }}>
+                          {modalMatchesCount} match{modalMatchesCount === 1 ? "" : "es"}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setWrapSourceLines((v) => !v)}
+                        style={{ fontSize: 11, padding: "4px 8px" }}
+                        className="secondary"
+                        title="Toggle line wrapping"
+                      >
+                        {wrapSourceLines ? "No Wrap" : "Wrap"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      maxHeight: "58vh",
+                      overflowY: "auto",
+                      background: "#070c12",
+                      border: "1px solid #162433",
+                      borderRadius: 8,
+                      padding: "10px 14px",
+                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                      fontSize: 12,
+                      lineHeight: 1.55,
+                    }}
+                  >
+                    {sourceData.html.split("\n").map((line, idx) => {
+                      const activeFilter = (sourceSearch || intelQuery).trim();
+                      const isMatch = activeFilter && line.toLowerCase().includes(activeFilter.toLowerCase());
+
+                      return (
+                        <div
+                          key={idx}
+                          style={{
+                            display: "flex",
+                            gap: 14,
+                            background: isMatch ? "rgba(243, 156, 18, 0.15)" : undefined,
+                            borderLeft: isMatch ? "2px solid #f39c12" : "2px solid transparent",
+                            padding: "1px 4px",
+                          }}
+                        >
+                          <span style={{ color: "#495c6e", minWidth: 42, textAlign: "right", userSelect: "none" }}>
+                            {idx + 1}
+                          </span>
+                          <span
+                            style={{
+                              color: "#c5d8e8",
+                              whiteSpace: wrapSourceLines ? "pre-wrap" : "pre",
+                              wordBreak: wrapSourceLines ? "break-all" : "normal",
+                            }}
+                          >
+                            {activeFilter ? highlightMatches(line, activeFilter) : line}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              </>
-            )}
-          </dialog>
+              )}
+            </div>
+          </>
         )}
       </main>
     </>
