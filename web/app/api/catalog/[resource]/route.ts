@@ -3,6 +3,9 @@ import { NextRequest } from "next/server";
 export const dynamic = "force-dynamic";
 
 const ALLOWED = [
+  "discovery-status",
+  "discovery-workers",
+  "discovery-control",
   "stats",
   "sites",
   "observations",
@@ -39,7 +42,9 @@ function getBackendUrl(resource: string): URL {
   if (base.username || base.password) throw new Error("Invalid API origin");
 
   let path = "/api/v1/" + resource;
-  if (resource.startsWith("intel-")) {
+  if (resource.startsWith("discovery-")) {
+    path = "/api/v1/discovery/" + resource.slice(10);
+  } else if (resource.startsWith("intel-")) {
     path = "/api/v1/intel/" + resource.slice(6);
   } else if (resource.startsWith("scanner-")) {
     path = "/api/v1/scanner/" + resource.slice(8);
