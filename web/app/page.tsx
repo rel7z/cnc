@@ -267,10 +267,10 @@ export default function Page() {
     void loadSignatures();
   }, [activeTab]);
 
-  // Polling for Crawler Updates and Recent Feed
+  // Polling for Crawler & Cluster Updates and Recent Feed
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
-    const fetchCrawlerData = async () => {
+    const fetchData = async () => {
       try {
         const stRes = await fetch("/api/catalog/scanner");
         if (stRes.ok) {
@@ -282,23 +282,52 @@ export default function Page() {
           const rec = await recRes.json();
           setRecentFeed(rec.recent || []);
         }
-        // Also refresh intel stats
         const iRes = await fetch("/api/catalog/intel-stats");
         if (iRes.ok) {
           setIntelStats(await iRes.json());
         }
+        const cRes = await fetch("/api/catalog/cluster-nodes");
+        if (cRes.ok) {
+          const cData: ClusterStatus = await cRes.json();
+          setClusterStatus(cData);
+        }
       } catch {}
     };
 
-    if (crawlerStatus.running || activeTab === "scanner") {
-      void fetchCrawlerData();
-      interval = setInterval(fetchCrawlerData, 2000);
+    if (crawlerStatus.running || (clusterStatus?.active_nodes ?? 0) > 0 || activeTab === "scanner") {
+      void fetchData();
+      interval = setInterval(fetchData, 2000);
     }
 
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [crawlerStatus.running, activeTab]);
+  }, [crawlerStatus.running, clusterStatus?.active_nodes, activeTab]);
+
+  // Cluster Swarm Handlers
+  const handleStartCluster = async () => {
+    setClusterBusy(true);
+    try {
+      await fetch("/api/catalog/cluster-start", { method: "POST" });
+      const cRes = await fetch("/api/catalog/cluster-nodes");
+      if (cRes.ok) setClusterStatus(await cRes.json());
+      void loadGeneralStats();
+    } catch {} finally {
+      setClusterBusy(false);
+    }
+  };
+
+  const handleStopCluster = async () => {
+    setClusterBusy(true);
+    try {
+      await fetch("/api/catalog/cluster-stop", { method: "POST" });
+      const cRes = await fetch("/api/catalog/cluster-nodes");
+      if (cRes.ok) setClusterStatus(await cRes.json());
+      void loadGeneralStats();
+    } catch {} finally {
+      setClusterBusy(false);
+    }
+  };
 
   // Crawler Start / Stop handlers
   const handleStartCrawler = async () => {
