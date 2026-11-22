@@ -2,6 +2,7 @@
 """Internet Map dataset catalog."""
 import argparse
 import csv
+from html.parser import HTMLParser
 import json
 import sys
 from pathlib import Path
@@ -44,14 +45,35 @@ def records(path, kind):
                     yield {"url": line.strip()}
 
 
+class WordPressHTML(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.evidence = set()
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "meta" and (attributes.get("name") or "").lower() == "generator":
+            generator = (attributes.get("content") or "").strip().lower()
+            if generator == "wordpress" or generator.startswith("wordpress "):
+                self.evidence.add("WordPress generator tag")
+        for attribute in ("src", "href"):
+            value = attributes.get(attribute) or ""
+            try:
+                path = urlsplit(value).path.lower()
+            except ValueError:
+                continue
+            for marker in ("wp-content", "wp-includes"):
+                if "/" + marker + "/" in path:
+                    self.evidence.add(marker + " resource reference")
+
+    handle_startendtag = handle_starttag
+
+
 def wordpress_evidence(html):
-    text = html.lower()
-    evidence = []
-    if "/wp-content/" in text:
-        evidence.append("wp-content reference")
-    if "/wp-includes/" in text:
-        evidence.append("wp-includes reference")
-    return evidence
+    parser = WordPressHTML()
+    parser.feed(html)
+    parser.close()
+    return sorted(parser.evidence)
 
 
 def connect(path):
