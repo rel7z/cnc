@@ -4,6 +4,11 @@ Internet Map is a high-performance web catalog and PublicWWW-style HTML source c
 
 Python 3.10 or later and Node.js 20.9 or later are required. Runtime data is excluded from Git.
 
+4. **🛡️ Systemd Resource Governor & Cgroups Throttling**
+   - Hardware-governed crawler profiles: **Eco** (150 workers), **Balanced** (350 workers), **High Speed** (600 workers), **Turbo** (1,000 workers)
+   - Real-time Linux `/proc/{pid}/statm` RSS telemetry and CPU quota monitoring (caps crawler to 1.8 cores, leaving >2.2 cores reserved for OS/CNC)
+   - Dynamic profile hot-switching with instant crawler reload without killing long-running jobs
+
 ## Rapid Development Workflow
 
 Speed up development with preconfigured Makefile targets:
@@ -144,3 +149,24 @@ python3 org_zone.py /opt/internet-map/datasets/org.zone.gz --source czds-org --d
 ```
 
 Refresh the application after import to read the updated local catalog.
+
+## Remote Production Access & Direct Ingestion
+
+### SSH Port Forwarding Tunnel
+To access the DigitalOcean production UI and API from your local workstation:
+
+```bash
+./tunnel.sh
+```
+
+This maps:
+- `http://127.0.0.1:3501` -> Internet Map Production UI
+- `http://127.0.0.1:3500` -> Internet Map Production REST API
+- `http://127.0.0.1:8119` -> CNC Cluster Dashboard
+
+### Feeding Local Datasets to Server
+Upload and ingest any local list or dataset directly into the production SQLite database:
+
+```bash
+python3 feed_server.py /path/to/my_domains.txt --source "custom-feed-20261122"
+```
