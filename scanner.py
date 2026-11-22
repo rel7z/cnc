@@ -21,6 +21,30 @@ from main import DEFAULT_DATABASE, connect
 from intel import init_intel_tables, index_page
 
 STATE_FILE = Path(__file__).resolve().parent / "data/scanner-state.json"
+CONFIG_FILE = Path(__file__).resolve().parent / "data/scanner-config.json"
+
+
+def get_scanner_config(config_path: Path = CONFIG_FILE) -> dict:
+    if config_path.exists():
+        try:
+            return json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {
+        "concurrency": 600,
+        "profile": "high",
+        "cpu_quota": "180%",
+        "memory_max_mb": 1200,
+        "memory_high_mb": 900,
+        "cgroups_managed": True,
+    }
+
+
+def save_scanner_config(config: dict, config_path: Path = CONFIG_FILE):
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = config_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    tmp.replace(config_path)
 
 # Optimize OS file descriptor limits
 try:
@@ -282,29 +306,34 @@ async def scan_worker(database_path: Path, concurrency: int = 500, limit: int = 
     t_start = time.time()
     last_update = t_start
 
-    # Producer coroutine: fills URL queue from DB cursor
+    # Producer coroutine: fills URL queue from DB cursor with priority domains first
     async def producer():
         nonlocal current_cursor
         batch_fetch = max(500, concurrency * 2)
+        pfx_index = 0
         while not stop_event.is_set():
             if url_queue.qsize() < concurrency:
-                # Fetch next batch from SQLite
-                rows = db.execute(
-                    "SELECT url FROM sites WHERE url > ? ORDER BY url LIMIT ?",
-                    (current_cursor, batch_fetch),
-                ).fetchall()
+                # 1. Fetch prioritized domains that have not been scanned yet
+                urls_batch, pfx_index = fetch_next_urls_batch(db, batch_size=batch_fetch, prefix_index=pfx_index)
 
-                if not rows:
-                    if current_cursor != "":
-                        current_cursor = ""
-                        continue
-                    break
+                # 2. If priority prefixes exhausted, fallback to sequential cursor scan
+                if not urls_batch:
+                    rows = db.execute(
+                        "SELECT url FROM sites WHERE url > ? ORDER BY url LIMIT ?",
+                        (current_cursor, batch_fetch),
+                    ).fetchall()
+                    if not rows:
+                        if current_cursor != "":
+                            current_cursor = ""
+                            continue
+                        break
+                    urls_batch = [r[0] for r in rows]
 
-                for r in rows:
+                for u in urls_batch:
                     if stop_event.is_set():
                         break
-                    await url_queue.put(r[0])
-                    current_cursor = r[0]
+                    await url_queue.put(u)
+                    current_cursor = u
 
             await asyncio.sleep(0.05)
 
@@ -346,32 +375,44 @@ async def scan_worker(database_path: Path, concurrency: int = 500, limit: int = 
                 now_str = datetime.now(timezone.utc).isoformat()
 
                 with db:
+                    progress_batch = []
+                    obs_batch = []
+                    pages_to_index = []
+
                     for url, status_code, hdrs, html_str in batch_to_write:
                         evidence = extract_wordpress_evidence(html_str, hdrs)
                         has_wp = 1 if len(evidence) > 0 else 0
-
-                        db.execute(
-                            """
-                            INSERT OR REPLACE INTO scan_progress(url, status_code, has_wordpress, evidence, scanned_at)
-                            VALUES (?, ?, ?, ?, ?)
-                            """,
-                            (url, status_code, has_wp, json.dumps(evidence), now_str),
-                        )
+                        progress_batch.append((url, status_code, has_wp, json.dumps(evidence), now_str))
 
                         if has_wp:
                             wp_total += 1
-                            db.execute(
-                                """
-                                INSERT OR REPLACE INTO observations(import_id, url, evidence)
-                                VALUES (?, ?, ?)
-                                """,
-                                (import_id, url, json.dumps(evidence)),
-                            )
-                            if html_str:
-                                try:
-                                    index_page(db, url, html_str, status_code=status_code, headers=hdrs, scanned_at=now_str)
-                                except Exception:
-                                    pass
+                            obs_batch.append((import_id, url, json.dumps(evidence)))
+
+                        if html_str and len(html_str) > 100 and status_code in (200, 301, 302, 403):
+                            pages_to_index.append((url, html_str, status_code, hdrs, now_str))
+
+                    db.executemany(
+                        """
+                        INSERT OR REPLACE INTO scan_progress(url, status_code, has_wordpress, evidence, scanned_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        progress_batch,
+                    )
+
+                    if obs_batch:
+                        db.executemany(
+                            """
+                            INSERT OR REPLACE INTO observations(import_id, url, evidence)
+                            VALUES (?, ?, ?)
+                            """,
+                            obs_batch,
+                        )
+
+                    for u, h_str, sc, hd, s_at in pages_to_index:
+                        try:
+                            index_page(db, u, h_str, status_code=sc, headers=hd, scanned_at=s_at)
+                        except Exception:
+                            pass
 
                 scanned_total += len(batch_to_write)
                 session_processed += len(batch_to_write)
@@ -431,12 +472,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", nargs="?", help="Optional single URL to scan immediately")
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
-    parser.add_argument("--concurrency", type=int, default=500)
+    parser.add_argument("--concurrency", type=int, default=0, help="Concurrent async workers (0 = use config)")
     parser.add_argument("--limit", type=int, default=0, help="Stop after scanning N URLs (0 = unlimited)")
     parser.add_argument("--status", action="store_true", help="Print current scanner status")
     args = parser.parse_args()
 
     state_path = args.database.parent / "scanner-state.json"
+    config_path = args.database.parent / "scanner-config.json"
+    config = get_scanner_config(config_path)
+
+    concurrency = args.concurrency if args.concurrency > 0 else config.get("concurrency", 600)
 
     if args.status:
         st = get_scanner_state(state_path)
