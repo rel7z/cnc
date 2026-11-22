@@ -968,7 +968,8 @@ def handler(database, key):
                     self.reply(400, {"error": "Missing url"})
                     return
                 try:
-                    with sqlite3.connect(database, timeout=15) as db_rw:
+                    with sqlite3.connect(database, timeout=30.0) as db_rw:
+                        db_rw.execute("PRAGMA busy_timeout = 30000")
                         init_intel_tables(db_rw)
                         res = fetch_and_index_url(db_rw, target_url)
                     self.reply(200, {"success": True, "item": res})
