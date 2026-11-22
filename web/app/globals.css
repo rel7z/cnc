@@ -1,4 +1,68 @@
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#0c1219;color:#e4edf5}
+*{box-sizing:border-box}body{margin:0}
+header{padding:20px 5vw;border-bottom:1px solid #273545;display:flex;align-items:center;justify-content:space-between}
+h1{font-size:22px;margin:0;font-weight:650;letter-spacing:-.7px}
+header span{color:#81acb9;font-size:13px}
+main{max-width:1150px;margin:30px auto;padding:0 24px}
+form,.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+input,button,select{font:inherit;border-radius:7px;border:1px solid #354655;padding:10px 14px;background:#131e29;color:inherit}
+input[type=password],input[type=search],input[type=text]{flex:1;min-width:180px}
+button{cursor:pointer;transition:background .15s}
+button:hover:not(:disabled){background:#1c2b3a}
+button.primary{background:#6ce0c7;color:#0d2022;border-color:#6ce0c7;font-weight:650}
+button.primary:hover:not(:disabled){background:#8bf0dc}
+button:disabled{opacity:.4;cursor:default}
+#metrics{display:flex;gap:40px;margin:28px 0;color:#93a8b9;flex-wrap:wrap}
+#metrics strong{font-size:26px;color:#eef6fc;display:block;font-weight:500}
+table{border-collapse:collapse;width:100%;margin-top:20px}
+th,td{text-align:left;padding:14px 12px;border-bottom:1px solid #253343}
+th{color:#91a7b9;font-size:12px;text-transform:uppercase;font-weight:500}
+td button{padding:0;background:none;border:none;text-align:left;color:#78dccc;overflow-wrap:anywhere}
+footer{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:24px;flex-wrap:wrap}
+dialog{background:#14202c;color:inherit;border:1px solid #456071;border-radius:12px;width:min(900px,95vw);max-height:85vh;padding:24px}
+dialog::backdrop{background:#000a}
+article{border-top:1px solid #334655;padding:16px 0;overflow-wrap:anywhere}
+small{color:#9bafbf}
+label{display:flex;align-items:center;gap:8px}
+h2{font-size:18px;margin:0}
+p{line-height:1.6}
+aside{margin:30px 0;padding:20px;background:#14202c;border-radius:10px}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #6ce0c7;outline-offset:3px}
 
-:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#0c1219;color:#e4edf5}*{box-sizing:border-box}body{margin:0}header{padding:24px 5vw;border-bottom:1px solid #273545;display:flex;align-items:center;justify-content:space-between}h1{font-size:24px;margin:0;font-weight:650;letter-spacing:-.7px}header span{color:#81acb9;font-size:13px}main{max-width:1150px;margin:40px auto;padding:0 24px}form,.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}input,button{font:inherit;border-radius:7px;border:1px solid #354655;padding:10px 14px;background:#131e29;color:inherit}input[type=password],input[type=search]{flex:1;min-width:180px}button{cursor:pointer}button.primary{background:#6ce0c7;color:#0d2022;border-color:#6ce0c7;font-weight:650}button:disabled{opacity:.4;cursor:default}#metrics{display:flex;gap:48px;margin:34px 0;color:#93a8b9}#metrics strong{font-size:28px;color:#eef6fc;display:block;font-weight:500}table{border-collapse:collapse;width:100%;margin-top:24px}th,td{text-align:left;padding:16px 12px;border-bottom:1px solid #253343}th{color:#91a7b9;font-size:12px;text-transform:uppercase;font-weight:500}td button{padding:0;background:none;border:none;text-align:left;color:#78dccc;overflow-wrap:anywhere}footer{display:flex;justify-content:flex-end;align-items:center;gap:15px;margin-top:20px}#notice{min-height:24px;color:#e9bd86;margin:18px 0}dialog{background:#14202c;color:inherit;border:1px solid #456071;border-radius:12px;width:min(750px,90vw)}dialog::backdrop{background:#0009}article{border-top:1px solid #334655;padding:18px 0;overflow-wrap:anywhere}small{color:#9bafbf}label{display:flex;align-items:center;gap:8px}h2{font-size:18px}p{line-height:1.6}@media(max-width:600px){#metrics{gap:22px}#metrics strong{font-size:23px}header span{display:none}}
+/* Tab Navigation */
+.tabs{display:flex;gap:10px;margin:10px 0 25px;border-bottom:1px solid #273545;padding-bottom:12px}
+.tab-btn{background:none;border:none;color:#93a8b9;padding:8px 16px;border-radius:6px;font-weight:550;display:flex;align-items:center;gap:8px}
+.tab-btn:hover{color:#e4edf5;background:#131e29}
+.tab-btn.active{color:#6ce0c7;background:#142633;border:1px solid #2d4f61}
 
-input[type=search]{min-width:260px}aside{margin:30px 0;padding:20px;background:#14202c;border-radius:10px}button:focus-visible,input:focus-visible{outline:2px solid #6ce0c7;outline-offset:3px}
+/* Preset Chips */
+.chips-container{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0 20px}
+.chip{background:#162433;border:1px solid #2b3d52;color:#8ab4cc;font-size:12px;padding:4px 10px;border-radius:14px;cursor:pointer;font-family:monospace}
+.chip:hover{background:#1e354c;color:#eef6fc;border-color:#486b8f}
+
+/* PublicWWW Intel Cards */
+.intel-card{background:#111a24;border:1px solid #243547;border-radius:10px;padding:18px;margin-bottom:18px;transition:border-color .15s}
+.intel-card:hover{border-color:#3a5470}
+.intel-card-header{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:12px}
+.intel-title{font-size:16px;font-weight:600;color:#eef6fc;margin:0 0 4px}
+.intel-url{color:#78dccc;text-decoration:none;font-size:14px;overflow-wrap:anywhere}
+.intel-url:hover{text-decoration:underline}
+.badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:550}
+.badge-tech{background:#193442;color:#7ed6df;border:1px solid #2e5971}
+.badge-status{background:#132a1c;color:#55efc4;border:1px solid #266b44}
+.badge-count{background:#2d2416;color:#f39c12;border:1px solid #634b22}
+
+/* Code Box */
+.code-box{background:#080c10;border:1px solid #1c2733;border-radius:7px;padding:10px 14px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.55;overflow-x:auto;margin-top:10px}
+.code-line{display:flex;gap:14px}
+.code-line.match-line{background:#231e10}
+.line-no{color:#495c6e;min-width:32px;text-align:right;user-select:none}
+.line-content{color:#c5d8e8;white-space:pre-wrap;word-break:break-all}
+.code-match-highlight{background:#ffeaa733;color:#ffeaa7;border-bottom:2px solid #fdcb6e;font-weight:600}
+
+@media(max-width:600px){
+  #metrics{gap:20px}
+  #metrics strong{font-size:22px}
+  header span{display:none}
+  .tabs{flex-wrap:wrap}
+}

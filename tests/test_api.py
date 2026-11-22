@@ -35,6 +35,9 @@ class APITests(unittest.TestCase):
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 ingest(db, argparse.Namespace(input=source, format='jsonl', source='api-test'))
+            from intel import init_intel_tables, index_page
+            init_intel_tables(db)
+            index_page(db, "https://example.org/", "<html><head><title>Example</title></head><body><script>gtag('config', 'UA-1234');</script></body></html>")
         finally:
             db.close()
 
@@ -67,3 +70,23 @@ class APITests(unittest.TestCase):
     def test_missing_database(self):
         self.database = Path(self.temp.name) / 'missing.db'
         self.assertEqual(self.request('/api/v1/stats')[0], 503)
+
+    def test_intel_endpoints(self):
+        # Stats
+        status, stats = self.request('/api/v1/intel/stats')
+        self.assertEqual(status, 200)
+        self.assertEqual(stats['total_pages'], 1)
+
+        # Search
+        status, search = self.request('/api/v1/intel/search?q=gtag')
+        self.assertEqual(status, 200)
+        self.assertEqual(search['total'], 1)
+        self.assertEqual(search['items'][0]['url'], 'https://example.org/')
+        self.assertIn('Google Analytics', search['items'][0]['signatures'])
+        self.assertTrue(len(search['items'][0]['snippets']) > 0)
+
+        # Source
+        status, source = self.request('/api/v1/intel/source?url=example.org')
+        self.assertEqual(status, 200)
+        self.assertEqual(source['title'], 'Example')
+        self.assertIn("gtag('config'", source['html'])

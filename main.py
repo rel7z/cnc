@@ -79,6 +79,7 @@ def wordpress_evidence(html):
 
 
 def connect(path):
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
     db.execute("PRAGMA foreign_keys=ON")
@@ -162,6 +163,11 @@ def main():
     search.add_argument("--host", default="")
     search.add_argument("--wordpress", action="store_true")
     search.add_argument("--limit", type=int, default=100)
+    intel_search = commands.add_parser("intel-search", parents=[db_parent])
+    intel_search.add_argument("query")
+    intel_search.add_argument("--limit", type=int, default=25)
+    intel_scan = commands.add_parser("intel-scan", parents=[db_parent])
+    intel_scan.add_argument("url")
     export = commands.add_parser("export", parents=[db_parent])
     export.add_argument("--wordpress", action="store_true")
     inspect = commands.add_parser("observations", parents=[db_parent])
@@ -190,6 +196,19 @@ def main():
                 query += " WHERE EXISTS(SELECT 1 FROM observations o WHERE o.url=s.url AND o.evidence!='[]')"
             for url, in db.execute(query + " ORDER BY s.url"):
                 sys.stdout.write(url + "\n")
+        elif args.command == "intel-search":
+            from intel import search_intel
+            res = search_intel(db, args.query, limit=args.limit)
+            print(f"Found {res['total']} results for '{args.query}':")
+            for item in res["items"]:
+                print(f"- {item['url']} ({item['title']}) [{', '.join(item['signatures'])}]")
+                for snip in item["snippets"]:
+                    print(f"  Line {snip['line_number']}: {snip['matched_line'].strip()}")
+        elif args.command == "intel-scan":
+            from intel import init_intel_tables, fetch_and_index_url
+            init_intel_tables(db)
+            meta = fetch_and_index_url(db, args.url)
+            print(f"Indexed {meta['url']} - Title: {meta['title']} - Tech: {', '.join(meta['signatures'])}")
         else:
             if not 1 <= args.limit <= 10000:
                 parser.error("Limit must be between 1 and 10000")

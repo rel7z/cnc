@@ -1,18 +1,47 @@
 #!/usr/bin/env python3
 """Serve the Internet Map catalog API and its independent browser UI."""
 import argparse
+from datetime import datetime, timezone
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import signal
 import sqlite3
+import subprocess
+import sys
 import time
 from urllib.parse import parse_qs, urlsplit
 
 from main import DEFAULT_DATABASE, normalize
+from intel import init_intel_tables, search_intel, fetch_and_index_url
 
 _stats_cache = {}
+
+
+def get_scanner_state(state_path: Path) -> dict:
+    if not state_path.exists():
+        return {"running": False, "scanned": 0, "wordpress_found": 0, "speed": 0.0, "last_url": ""}
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        pid = data.get("pid")
+        if pid:
+            try:
+                os.kill(pid, 0)
+                data["running"] = True
+            except OSError:
+                data["running"] = False
+        return data
+    except Exception:
+        return {"running": False, "scanned": 0, "wordpress_found": 0, "speed": 0.0, "last_url": ""}
+
+
+def update_scanner_state(state_path: Path, state: dict):
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = state_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp.replace(state_path)
 
 
 def handler(database, key):
@@ -29,6 +58,10 @@ def handler(database, key):
             self.end_headers()
             self.wfile.write(payload)
 
+        def check_auth(self):
+            supplied = self.headers.get("Authorization", "")
+            return hmac.compare_digest(supplied.encode(), ("Bearer " + key).encode())
+
         def do_GET(self):
             parsed = urlsplit(self.path)
             if parsed.path == "/":
@@ -36,30 +69,59 @@ def handler(database, key):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+                )
                 self.end_headers()
                 self.wfile.write(payload)
                 return
-            supplied = self.headers.get("Authorization", "")
-            if not hmac.compare_digest(supplied.encode(), ("Bearer " + key).encode()):
+
+            if not self.check_auth():
                 self.reply(401, {"error": "Enter a valid API key."})
                 return
+
             query = parse_qs(parsed.query)
+            state_path = database.parent / "scanner-state.json"
+
+            if parsed.path in ("/api/v1/scanner/status", "/api/v1/scanner"):
+                self.reply(200, get_scanner_state(state_path))
+                return
+
+            if parsed.path == "/api/v1/intel/status":
+                self.reply(200, get_scanner_state(state_path))
+                return
+
             try:
                 with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
                     db.row_factory = sqlite3.Row
+
                     if parsed.path == "/api/v1/stats":
                         now = time.monotonic()
                         cached = _stats_cache.get(str(database))
-                        if cached and (now - cached["timestamp"] < 10):
+                        if cached and (now - cached["timestamp"] < 2.0):
                             result = cached["data"]
                         else:
+                            urls_count = db.execute("SELECT count(*) FROM sites").fetchone()[0]
+                            imports_count = db.execute("SELECT count(*) FROM imports").fetchone()[0]
+                            wp_count = db.execute(
+                                "SELECT count(DISTINCT url) FROM observations WHERE evidence!='[]'"
+                            ).fetchone()[0]
+                            try:
+                                scanned_count = db.execute("SELECT count(*) FROM scan_progress").fetchone()[0]
+                            except sqlite3.OperationalError:
+                                scanned_count = 0
+
                             result = {
-                                "urls": db.execute("SELECT count(*) FROM sites").fetchone()[0],
-                                "imports": db.execute("SELECT count(*) FROM imports").fetchone()[0],
-                                "wordpress": db.execute("SELECT count(DISTINCT url) FROM observations WHERE evidence!='[]'").fetchone()[0],
+                                "urls": urls_count,
+                                "imports": imports_count,
+                                "wordpress": wp_count,
                             }
+                            if query.get("extended", ["0"])[0] == "1" or query.get("scanner", ["0"])[0] == "1":
+                                result["scanned"] = scanned_count
+                                result["scanner"] = get_scanner_state(state_path)
                             _stats_cache[str(database)] = {"timestamp": now, "data": result}
+
                     elif parsed.path == "/api/v1/sites":
                         page = int(query.get("page", ["1"])[0])
                         if not 1 <= page <= 10000000:
@@ -68,31 +130,237 @@ def handler(database, key):
                         if not 1 <= limit <= 100:
                             limit = 25
                         host = query.get("host", [""])[0].lower()
-                        conditions = []
-                        params = []
-                        if host:
-                            conditions.append("instr(s.host,?)>0")
-                            params.append(host)
-                        if query.get("wordpress", ["0"])[0] == "1":
-                            conditions.append("EXISTS(SELECT 1 FROM observations o WHERE o.url=s.url AND o.evidence!='[]')")
-                        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+                        is_wp = query.get("wordpress", ["0"])[0] == "1"
+                        with_evidence = query.get("with_evidence", ["0"])[0] == "1"
+
                         fetch_count = limit + 1
                         offset = (page - 1) * limit
-                        params.extend([fetch_count, offset])
-                        rows = db.execute("SELECT s.url,s.host FROM sites s" + where + " ORDER BY s.url LIMIT ? OFFSET ?", params).fetchall()
-                        result = {"items": [dict(r) for r in rows[:limit]], "has_more": len(rows)>limit, "page": page}
+
+                        if is_wp:
+                            # Fast indexed query on observations_wp_url
+                            conditions = ["o.evidence != '[]'"]
+                            params = []
+                            if host:
+                                conditions.append("instr(s.host, ?) > 0")
+                                params.append(host)
+                            where = " WHERE " + " AND ".join(conditions)
+                            params.extend([fetch_count, offset])
+
+                            rows = db.execute(
+                                "SELECT s.url, s.host, o.evidence FROM observations o JOIN sites s ON s.url = o.url"
+                                + where
+                                + " GROUP BY s.url ORDER BY s.url LIMIT ? OFFSET ?",
+                                params,
+                            ).fetchall()
+
+                            items = []
+                            for r in rows[:limit]:
+                                item = {"url": r["url"], "host": r["host"]}
+                                if with_evidence:
+                                    try:
+                                        item["evidence"] = json.loads(r["evidence"])
+                                    except Exception:
+                                        item["evidence"] = [r["evidence"]]
+                                items.append(item)
+                            result = {"items": items, "has_more": len(rows) > limit, "page": page}
+
+                        else:
+                            conditions = []
+                            params = []
+                            if host:
+                                conditions.append("instr(s.host, ?) > 0")
+                                params.append(host)
+                            where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+                            params.extend([fetch_count, offset])
+
+                            if with_evidence:
+                                sql = (
+                                    """
+                                    SELECT s.url, s.host,
+                                           (SELECT evidence FROM observations o WHERE o.url = s.url AND o.evidence != '[]' LIMIT 1) AS wp_evidence
+                                    FROM sites s
+                                    """
+                                    + where
+                                    + " ORDER BY s.url LIMIT ? OFFSET ?"
+                                )
+                                rows = db.execute(sql, params).fetchall()
+                                items = []
+                                for r in rows[:limit]:
+                                    item = {"url": r["url"], "host": r["host"]}
+                                    ev = r["wp_evidence"]
+                                    if ev:
+                                        try:
+                                            item["evidence"] = json.loads(ev)
+                                        except Exception:
+                                            item["evidence"] = [ev]
+                                    items.append(item)
+                            else:
+                                sql = "SELECT s.url, s.host FROM sites s" + where + " ORDER BY s.url LIMIT ? OFFSET ?"
+                                rows = db.execute(sql, params).fetchall()
+                                items = [{"url": r["url"], "host": r["host"]} for r in rows[:limit]]
+
+                            result = {"items": items, "has_more": len(rows) > limit, "page": page}
+
                     elif parsed.path == "/api/v1/observations":
                         _, url = normalize(query.get("url", [""])[0])
-                        rows = db.execute("SELECT i.source,i.imported_at,o.evidence FROM observations o JOIN imports i ON i.id=o.import_id WHERE o.url=? ORDER BY i.id DESC LIMIT 100", (url,))
-                        result = {"items": [{"source": r["source"], "imported_at": r["imported_at"], "evidence": json.loads(r["evidence"])} for r in rows]}
+                        rows = db.execute(
+                            "SELECT i.source, i.imported_at, o.evidence FROM observations o JOIN imports i ON i.id = o.import_id WHERE o.url = ? ORDER BY i.id DESC LIMIT 100",
+                            (url,),
+                        ).fetchall()
+                        result = {
+                            "items": [
+                                {
+                                    "source": r["source"],
+                                    "imported_at": r["imported_at"],
+                                    "evidence": json.loads(r["evidence"]),
+                                }
+                                for r in rows
+                            ]
+                        }
+
+                    elif parsed.path == "/api/v1/intel/search":
+                        search_q = query.get("q", [""])[0]
+                        page = int(query.get("page", ["1"])[0])
+                        limit = int(query.get("limit", ["25"])[0])
+                        if not 1 <= limit <= 100:
+                            limit = 25
+                        result = search_intel(db, search_q, page=page, limit=limit)
+
+                    elif parsed.path == "/api/v1/intel/source":
+                        _, target_url = normalize(query.get("url", [""])[0])
+                        row = db.execute(
+                            "SELECT url, host, status_code, title, html, signatures_json, scanned_at FROM page_contents WHERE url = ?",
+                            (target_url,),
+                        ).fetchone()
+                        if not row:
+                            self.reply(404, {"error": "Page source not found in intelligence database"})
+                            return
+                        result = {
+                            "url": row["url"],
+                            "host": row["host"],
+                            "status_code": row["status_code"],
+                            "title": row["title"],
+                            "signatures": json.loads(row["signatures_json"]) if row["signatures_json"] else [],
+                            "scanned_at": row["scanned_at"],
+                            "html": row["html"],
+                            "line_count": len(row["html"].splitlines()),
+                        }
+
+                    elif parsed.path == "/api/v1/intel/stats":
+                        total_pages = 0
+                        total_bytes = 0
+                        try:
+                            p_row = db.execute(
+                                "SELECT count(*), coalesce(sum(content_length), 0) FROM page_contents"
+                            ).fetchone()
+                            if p_row:
+                                total_pages = p_row[0]
+                                total_bytes = p_row[1]
+                        except sqlite3.OperationalError:
+                            pass
+                        result = {"total_pages": total_pages, "total_bytes": total_bytes}
+
                     else:
                         self.reply(404, {"error": "Endpoint not found"})
                         return
+
                 self.reply(200, result)
             except (ValueError, UnicodeError):
                 self.reply(400, {"error": "Invalid query"})
             except sqlite3.Error:
                 self.reply(503, {"error": "Catalog unavailable. Import a dataset first."})
+
+        def do_POST(self):
+            parsed = urlsplit(self.path)
+            if not self.check_auth():
+                self.reply(401, {"error": "Enter a valid API key."})
+                return
+
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8")) if body else {}
+            except Exception:
+                data = {}
+
+            state_path = database.parent / "scanner-state.json"
+
+            if parsed.path in ("/api/v1/scanner/start", "/api/v1/scanner") and (
+                parsed.path == "/api/v1/scanner/start" or data.get("action") == "start"
+            ):
+                curr = get_scanner_state(state_path)
+                if curr.get("running"):
+                    self.reply(200, {"success": True, "already_running": True, "state": curr})
+                    return
+
+                limit = int(data.get("limit", 0))
+                concurrency = int(data.get("concurrency", 100))
+                scanner_script = Path(__file__).resolve().parent / "scanner.py"
+                cmd = [
+                    sys.executable,
+                    str(scanner_script),
+                    "--database",
+                    str(database),
+                    "--concurrency",
+                    str(concurrency),
+                ]
+                if limit > 0:
+                    cmd.extend(["--limit", str(limit)])
+
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                new_state = {
+                    "running": True,
+                    "pid": proc.pid,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "scanned": curr.get("scanned", 0),
+                    "wordpress_found": curr.get("wordpress_found", 0),
+                    "speed": 0.0,
+                    "last_url": curr.get("last_url", ""),
+                }
+                update_scanner_state(state_path, new_state)
+                # Invalidate stats cache so UI sees new status immediately
+                _stats_cache.clear()
+                self.reply(200, {"success": True, "pid": proc.pid, "message": "Scanner started"})
+                return
+
+            if parsed.path in ("/api/v1/scanner/stop", "/api/v1/scanner") and (
+                parsed.path == "/api/v1/scanner/stop" or data.get("action") == "stop"
+            ):
+                curr = get_scanner_state(state_path)
+                pid = curr.get("pid")
+                if pid:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                curr["running"] = False
+                curr["speed"] = 0.0
+                update_scanner_state(state_path, curr)
+                _stats_cache.clear()
+                self.reply(200, {"success": True, "message": "Scanner stopped"})
+                return
+
+            if parsed.path == "/api/v1/intel/scan":
+                target_url = data.get("url") or parse_qs(parsed.query).get("url", [""])[0]
+                if not target_url:
+                    self.reply(400, {"error": "Missing url"})
+                    return
+                try:
+                    with sqlite3.connect(database, timeout=15) as db_rw:
+                        init_intel_tables(db_rw)
+                        res = fetch_and_index_url(db_rw, target_url)
+                    self.reply(200, {"success": True, "item": res})
+                except Exception as e:
+                    self.reply(500, {"error": str(e)})
+                return
+
+            self.reply(404, {"error": "Endpoint not found"})
+
     return Handler
 
 
@@ -104,6 +372,12 @@ def main():
     key = os.environ.get("INTERNET_MAP_API_KEY", "")
     if len(key) < 32:
         parser.error("Set INTERNET_MAP_API_KEY to a secret of at least 32 characters")
+
+    # Initialize tables
+    db_init = sqlite3.connect(args.database)
+    init_intel_tables(db_init)
+    db_init.close()
+
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(args.database, key))
     print(f"Internet Map available at http://127.0.0.1:{args.port}", flush=True)
     try:
