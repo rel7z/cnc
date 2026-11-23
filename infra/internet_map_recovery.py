@@ -179,6 +179,12 @@ def install_application(root):
     dependency = subprocess.run(['/usr/bin/python3', '-c', 'import cryptography'], capture_output=True)
     if dependency.returncode:
         subprocess.run(['apt-get', 'install', '-y', 'python3-cryptography'], check=True)
+    # Old signed bundles can contain an installer that enables a timer. Guard
+    # it before executing recovered installers; the manual service is unaffected.
+    guard = Path('/etc/systemd/system/internet-map-backup.timer.d')
+    guard.mkdir(parents=True, exist_ok=True)
+    (guard/'manual-only.conf').write_text('[Unit]\nConditionPathExists=/opt/cnc/data/enable-scheduled-map-backups\n')
+    subprocess.run(['systemctl', 'daemon-reload'], check=True)
     node = next(Path('/opt/cnc/node-runtime').glob('*/bin/node'))
     env = dict(os.environ, PATH=str(node.parent)+':'+os.environ.get('PATH','/usr/bin:/bin'), NEXT_TELEMETRY_DISABLED='1')
     subprocess.run([str(node.parent/'npm'), 'ci', '--no-audit', '--no-fund'], cwd=root/'web', env=env, check=True)
@@ -187,6 +193,7 @@ def install_application(root):
                     '--root', str(root/'data/discovery')], check=True)
     for installer in ('install-services.py', 'install-discovery.py'):
         subprocess.run(['/usr/bin/python3', str(root/'infra'/installer)], check=True)
+    subprocess.run(['systemctl', 'disable', '--now', 'internet-map-backup.timer'], check=True)
     subprocess.run(['systemctl', 'restart', 'cnc-ui.service'], check=True)
     marker.write_text(json.dumps(dict(installed_at=int(time.time()), scanning_paused=True))+'\n')
 

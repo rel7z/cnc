@@ -8,6 +8,7 @@ import { ServerTerminal } from "@/components/dashboard/ServerTerminal";
 import { FileManager } from "@/components/dashboard/FileManager";
 import { Terminal, Folder, RefreshCw } from "lucide-react";
 import { UpdateServerModal } from "@/components/dashboard/UpdateServerModal";
+import { ControllerBackup } from "@/components/dashboard/ControllerBackup";
 
 export default function ServerPage() {
   const [activeTab, setActiveTab] = useState<"terminal" | "files" | "linode" | "aws">("terminal");
@@ -18,6 +19,7 @@ export default function ServerPage() {
       <Header title="Server Management" />
       
       <div className="flex-1 flex flex-col p-6 overflow-hidden">
+        <ControllerBackup />
         {/* Toolbar: Tabs + Actions */}
         <div className="flex items-center justify-between mb-4">
           <div className="flex space-x-1 bg-gray-900 p-1 rounded-lg border border-gray-800 w-fit">

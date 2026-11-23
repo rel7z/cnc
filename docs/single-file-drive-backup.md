@@ -22,7 +22,7 @@ The saved private CNC Manager Drive profile remains renewable and enabled; the s
 
 Fresh-controller service dispatch, private-key persistence, retry behavior, mismatch refusal, and installer rollback were exercised with isolated filesystem/service fixtures. Full cloud download and SQLite recovery used the actual production release helper. No additional paid controller was provisioned for this verification.
 
-The six-hour backup timer is active again. Replaced server binaries, application files and release archives were retained for rollback. Deployment occurred with zero active CNC jobs; all eight workers reconnected. The downloadable worker artifact remained checksum-consistent and no worker binary or configuration changed for this update.
+The owner subsequently selected manual backups only. The backup timer is disabled; **Server Management → Backup sekarang** starts an on-demand backup. This policy is preserved by future installation and recovery. Replaced server binaries, application files and release archives were retained for rollback. Deployment occurred with zero active CNC jobs; all eight workers reconnected. The downloadable worker artifact remained checksum-consistent and no worker binary or configuration changed for this update.
 
 ## Production artifact checksums
 
