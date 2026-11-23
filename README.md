@@ -194,7 +194,7 @@ Authenticated endpoints (same Bearer key as the catalog API):
 
 `infra/install-discovery.py` performs a same-volume state migration only while
 scanning is paused and CNC jobs are drained. It installs one discovery service,
-a catalog reconciliation timer (30 seconds), and a backup timer (six hours).
+a catalog reconciliation timer (30 seconds), and a manual backup service. The backup timer remains disabled.
 Activation failures restore the original state path. Legacy worker lease requests
 return no fresh work after cutover; in-flight result submissions remain accepted.
 CNC's authenticated dashboard forwards generator controls to this API over loopback.
@@ -227,7 +227,7 @@ Production verification (2026-11-22): authenticated bidirectional coordination a
 
 ## Single-file recovery backups
 
-`maintenance.py backup` publishes one signed `.tar.gz` containing all three SQLite databases, non-secret discovery settings, leased input files, and application source. A new archive appears in the Drive inbox only after its construction finishes. The scheduled backup runs every six hours; upload transport chunks remain one Drive file.
+`maintenance.py backup` publishes one signed `.tar.gz` containing all three SQLite databases, non-secret discovery settings, leased input files, and application source. A new archive appears in the Drive inbox only after its construction finishes. Backups run only from the controller’s “Backup sekarang” button; the scheduler is disabled, including after installation or recovery. Upload transport chunks remain one Drive file.
 
 Keep the private recovery key in CNC Manager's application-support directory and on the controller outside the archive. Never commit it or upload it with the data. The CNC release's trusted recovery helper authenticates the archive before restoring to a missing directory, checks all file hashes and SQLite integrity, and keeps discovery paused. Existing installations are preserved.
 

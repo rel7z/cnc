@@ -28,7 +28,9 @@ class RecoveryInstallTests(unittest.TestCase):
             exec(compile(source, 'isolated-install-discovery.py', 'exec'), scope)
             opener = Mock()
             opener.open.return_value = io.BytesIO(b'[]')
+            calls = []
             def run(*args):
+                calls.append(args)
                 if fail and args[:2] == ('systemctl','is-active'):
                     raise RuntimeError('activation fixture failed')
                 return Mock(returncode=0)
@@ -45,6 +47,8 @@ class RecoveryInstallTests(unittest.TestCase):
                 self.assertFalse(old.is_symlink())
                 self.assertEqual((old/'checkpoint').read_text(),'legacy preserved')
             else:
+                self.assertIn(('systemctl','disable','--now','internet-map-backup.timer'),calls)
+                self.assertFalse(any(call[:2] == ('systemctl','enable') and 'internet-map-backup.timer' in call for call in calls))
                 self.assertTrue(old.is_symlink())
                 self.assertEqual(old.resolve(),state.resolve())
                 retired = list(cnc.glob('wordpress-generator-before-restore-*'))

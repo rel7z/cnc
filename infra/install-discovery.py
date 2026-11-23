@@ -88,7 +88,8 @@ def perform_install():
     if legacy_units:
         run('systemctl', 'disable', *legacy_units)
     run('systemctl', 'daemon-reload')
-    run('systemctl', 'enable', '--now', 'internet-map-discovery.service', 'internet-map-sync.timer', 'internet-map-backup.timer')
+    run('systemctl', 'disable', '--now', 'internet-map-backup.timer')
+    run('systemctl', 'enable', '--now', 'internet-map-discovery.service', 'internet-map-sync.timer')
     run('systemctl', 'restart', 'internet-map-api.service')
     (STATE / 'cutover.json').write_text(json.dumps({'owner': 'internet-map', 'executor': 'cnc', 'migrated_at': int(time.time()), 'legacy_alias': str(OLD)}) + '\n')
     run('systemctl', 'is-active', '--quiet', 'internet-map-discovery.service', 'internet-map-api.service')

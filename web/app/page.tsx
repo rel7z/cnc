@@ -286,7 +286,6 @@ export default function Page() {
   const [dbSources, setDbSources] = useState<DbSource[]>([]);
   const [dbStats, setDbStats] = useState<DbStats | null>(null);
   const [dbBundleStatus, setDbBundleStatus] = useState<DbBundleStatus | null>(null);
-  const [bundleActionBusy, setBundleActionBusy] = useState(false);
   const [bundleVerifyBusy, setBundleVerifyBusy] = useState(false);
   const [syncActionBusy, setSyncActionBusy] = useState(false);
   const [dbBusy, setDbBusy] = useState(false);
@@ -863,29 +862,6 @@ export default function Page() {
       showToast(`Network error running maintenance [${action}]`, "error");
     } finally {
       setDbMaintenanceBusy(false);
-    }
-  };
-
-  const handleCreateBundle = async () => {
-    setBundleActionBusy(true);
-    try {
-      const res = await fetch("/api/catalog/database-bundle-create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        showToast(data.message || "Recovery bundle backup started!", "success");
-        setDbMaintenanceMsg({ type: "success", text: data.message || "Recovery bundle creation started" });
-        void loadDatabaseData();
-      } else {
-        showToast(data.message || data.error || "Failed to create recovery bundle", "error");
-        setDbMaintenanceMsg({ type: "error", text: data.message || data.error || "Failed to create recovery bundle" });
-      }
-    } catch {
-      showToast("Error requesting recovery bundle creation", "error");
-    } finally {
-      setBundleActionBusy(false);
     }
   };
 
@@ -2779,7 +2755,7 @@ export default function Page() {
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 16 }}>📦</span>
                   <strong style={{ fontSize: 14, color: "#fff" }}>
-                    Disaster Recovery &amp; Automated Backup Bundles
+                    Database Backup &amp; Recovery
                   </strong>
                   <span
                     style={{
@@ -2849,16 +2825,7 @@ export default function Page() {
                 </div>
 
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  <button
-                    type="button"
-                    className="primary"
-                    disabled={dbBundleStatus?.is_backup_running || bundleActionBusy}
-                    onClick={handleCreateBundle}
-                    title="Snapshot all 3 databases (catalog.db, generator-state.db, candidates.db) and code into an HMAC-signed .tar.gz bundle"
-                    style={{ fontSize: 12, padding: "7px 13px" }}
-                  >
-                    {dbBundleStatus?.is_backup_running || bundleActionBusy ? "⏳ Backing Up..." : "📦 Create Recovery Bundle"}
-                  </button>
+                  <span className="text-sm">Buat backup melalui tombol Backup sekarang di controller CNC.</span>
 
                   <button
                     type="button"
