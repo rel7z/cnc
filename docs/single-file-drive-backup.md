@@ -27,8 +27,8 @@ The owner subsequently selected manual backups only. The backup timer is disable
 ## Production artifact checksums
 
 - Server: `6f64e877a6ec35f1952a3b088d92227bc3129bc1a325dc193faf873772712c9a`.
-- Trusted recovery helper: `8d084157610ac897e4115a1a2bd1fcd6713aa8874177ea72f7f4ddcca3774359`.
-- Release archive: `d5c18f4aaa1fafd4801f9a5e4d1c08cfef31be75364968d4afec32ead7cea5ac`.
+- Trusted recovery helper: `e41e99b60dac1cfc02ce3f3c88f077b97ec8cb7d3b64af6d7f4ad54473d6c354`.
+- Release archive: `ef6186f6c07249f57359e37926e7ac580b47fa3fed5acb892bf24acaadd330af`.
 
 These matched the installed server/helper, staged release, and controller's downloadable worker checksum references. The builder and installer include and verify the trusted recovery helper on future deployments.
 
@@ -42,3 +42,9 @@ Unique immutable bundle files now reuse their SHA-256 while identity, size and m
 - Production UI built successfully, the frontend API proxy responded, and both production cloud restore checks completed successfully.
 
 Runtime credentials, OAuth tokens, signing keys, databases and build caches are outside Git. Implementation source is published on `codex/cnc-single-file-recovery`; the Map source is published on `codex/internet-map-single-file-recovery` (code commit `1085dfb`). See [automatic recovery](../infra/DRIVE_RECOVERY.md) for operation and prerequisites.
+
+## Manual-only controller update
+
+The controller Server Management page now has a **Backup sekarang** button and a live running/upload status. Backup creation was removed from the Map UI to keep one controller entry point. The scheduled timer is disabled, and recovery installs a timer condition before executing older signed installers so their old automatic schedules cannot run. The manual backup service remains available to the button. Google Drive sends the archive after an explicitly requested backup finishes.
+
+The built controller UI was tested against a fake Map API: unauthenticated access was blocked, cross-origin writes were blocked, status reads created no backups, and a manual request forwarded exactly once to the fake create endpoint. No real backup was started by these tests. The authenticated production status route returned the existing 1,943,650,694-byte uploaded archive with no backup running. Both UIs built successfully; rollback copies were retained. Manual defaults are implemented in source, installer and recovery code, and the controller UI plus trusted helper are included in the updated release archive.
